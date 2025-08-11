@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#SBATCH --job-name=brain_mask
+#SBATCH --mem=50G
+#SBATCH -t 10:50:00
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --exclude=gpu02
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.err
+
+module load cuda/11.3
+module load cudnn/8.1.1
+
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+python Brain_mask.py
+
+
+
+
