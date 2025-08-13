@@ -3,7 +3,6 @@
 #SBATCH --job-name=brain_mask
 #SBATCH --mem=50G
 #SBATCH -t 1:50:00
-#SBATCH --gres=cpu:1
 #SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
