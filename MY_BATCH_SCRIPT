@@ -3,7 +3,8 @@
 #SBATCH --job-name=brain_mask
 #SBATCH --mem=50G
 #SBATCH -t 12:50:00
-#SBATCH --partition=tier1_cpu
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
 #SBATCH --output=slurm-%A_haha.out
