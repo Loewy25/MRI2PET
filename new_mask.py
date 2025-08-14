@@ -1,6 +1,7 @@
 import os, re, glob, shutil
 import numpy as np
 import nibabel as nib
+import subprocess
 
 # =================== CONFIG ===================
 BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
@@ -87,12 +88,57 @@ def find_aseg_mgz(fs_subject_dir):
     return None
 
 def make_aseg_mask_nifti(aseg_path, out_path):
-    """Create NIfTI mask from aseg.mgz using KEEP_LABELS."""
+    """Create NIfTI mask from aseg.mgz using KEEP_LABELS, then reslice the mask
+    to the T1 grid with FreeSurfer mri_vol2vol --regheader (no fallback)."""
+    global reslice_fail
+
+    # --- Original behavior: build mask in aseg space ---
     aseg_img  = nib.load(aseg_path)
-    lab       = aseg_img.get_fdata()
+    lab       = aseg_img.get_fdata()  # keep as-is to avoid changing your logic
     mask      = np.isin(lab, list(KEEP_LABELS)).astype(np.uint8)
     nii_img   = nib.Nifti1Image(mask, aseg_img.affine)
     nib.save(nii_img, out_path)
+
+    # --- New: reslice the saved mask to the copied T1's grid (same output dir) ---
+    out_dir = os.path.dirname(out_path)
+    subj_name = os.path.basename(out_dir)
+    t1_target = os.path.join(out_dir, "T1001.nii.gz")
+
+    # Sanity: if T1 target not present (shouldn't happen given your earlier checks), mark fail.
+    if not os.path.exists(t1_target):
+        print(f"[FAIL:RESLICE] {subj_name}  (T1001.nii.gz not found in {out_dir})")
+        reslice_fail += 1
+        return out_path
+
+    mv2v = shutil.which("mri_vol2vol")
+    if not mv2v:
+        print(f"[FAIL:RESLICE] {subj_name}  (mri_vol2vol not found on PATH)")
+        reslice_fail += 1
+        return out_path
+
+    tmp_out = out_path + ".tmp.nii.gz"
+    cmd = [
+        mv2v,
+        "--mov", out_path,
+        "--targ", t1_target,
+        "--o", tmp_out,
+        "--interp", "nearest",
+        "--regheader"
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.replace(tmp_out, out_path)
+    except subprocess.CalledProcessError as e:
+        # Print a compact reason; leave the original (FS-space) mask as-is.
+        print(f"[FAIL:RESLICE] {subj_name}  (mri_vol2vol exit {e.returncode})")
+        # Clean up tmp if it exists
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+        reslice_fail += 1
+
     return out_path
 
 # =================== MAIN ===================
@@ -103,6 +149,8 @@ pup_subjects.sort()
 
 total = len(pup_subjects)
 ok = skip_no_nifti = skip_no_t1 = skip_no_pet = skip_no_code = skip_no_fs = skip_no_aseg = 0
+reslice_fail = 0
+
 
 print(f"Found {total} PUP AV1451 subjects.\n")
 
