@@ -88,58 +88,120 @@ def find_aseg_mgz(fs_subject_dir):
     return None
 
 def make_aseg_mask_nifti(aseg_path, out_path):
-    """Create NIfTI mask from aseg.mgz using KEEP_LABELS, then reslice the mask
-    to the T1 grid with FreeSurfer mri_vol2vol --regheader (no fallback)."""
+    """
+    Create NIfTI mask from aseg.mgz using KEEP_LABELS, then align it to the copied
+    T1001 grid using an intensity-based rigid transform (FS->T1001) computed with
+    mri_robust_register, and applied with mri_vol2vol (nearest). No fallbacks.
+    """
     global reslice_fail
 
-    # --- Original behavior: build mask in aseg space ---
-    aseg_img  = nib.load(aseg_path)
-    lab       = aseg_img.get_fdata()  # keep as-is to avoid changing your logic
-    mask      = np.isin(lab, list(KEEP_LABELS)).astype(np.uint8)
-    nii_img   = nib.Nifti1Image(mask, aseg_img.affine)
-    nib.save(nii_img, out_path)
+    # --- 0) Build mask in FS (aseg) space: unchanged behavior ---
+    aseg_img = nib.load(aseg_path)
+    lab      = aseg_img.get_fdata()  # keep your original dtype behavior
+    mask     = np.isin(lab, list(KEEP_LABELS)).astype(np.uint8)
+    nib.save(nib.Nifti1Image(mask, aseg_img.affine), out_path)
 
-    # --- New: reslice the saved mask to the copied T1's grid (same output dir) ---
-    out_dir = os.path.dirname(out_path)
+    out_dir   = os.path.dirname(out_path)
     subj_name = os.path.basename(out_dir)
     t1_target = os.path.join(out_dir, "T1001.nii.gz")
 
-    # Sanity: if T1 target not present (shouldn't happen given your earlier checks), mark fail.
     if not os.path.exists(t1_target):
-        print(f"[FAIL:RESLICE] {subj_name}  (T1001.nii.gz not found in {out_dir})")
+        print(f"[FAIL:ALIGN] {subj_name}  (T1001.nii.gz not found in {out_dir})")
         reslice_fail += 1
         return out_path
 
+    # Locate FS brain.mgz next to aseg.mgz (typical FS layout)
+    fs_mri_dir = os.path.dirname(aseg_path)
+    brain_path = os.path.join(fs_mri_dir, "brain.mgz")
+    if not os.path.exists(brain_path):
+        # small search in same subject tree (not a method fallback; just locating the file)
+        found = None
+        for root, _, files in os.walk(os.path.dirname(fs_mri_dir)):
+            if "brain.mgz" in files:
+                found = os.path.join(root, "brain.mgz")
+                break
+        if not found:
+            print(f"[FAIL:ALIGN] {subj_name}  (brain.mgz not found near {aseg_path})")
+            reslice_fail += 1
+            return out_path
+        brain_path = found
+
+    # Ensure FreeSurfer CLIs exist
     mv2v = shutil.which("mri_vol2vol")
-    if not mv2v:
-        print(f"[FAIL:RESLICE] {subj_name}  (mri_vol2vol not found on PATH)")
+    mrr  = shutil.which("mri_robust_register")
+    if not mv2v or not mrr:
+        miss = "mri_vol2vol" if not mv2v else "mri_robust_register"
+        print(f"[FAIL:ALIGN] {subj_name}  ({miss} not found on PATH)")
         reslice_fail += 1
         return out_path
 
-    tmp_out = out_path + ".tmp.nii.gz"
-    cmd = [
-        mv2v,
-        "--mov", out_path,
-        "--targ", t1_target,
-        "--o", tmp_out,
-        "--interp", "nearest",
-        "--regheader"
+    # If T1001 is 4D with a single frame, squeeze to a 3D temp for the CLIs
+    t1_target_for_cli = t1_target
+    try:
+        t1_img = nib.load(t1_target)
+        if t1_img.ndim == 4 and t1_img.shape[-1] == 1:
+            t1_squeezed = os.path.join(out_dir, "_t1001_3d_tmp.nii.gz")
+            nib.save(nib.Nifti1Image(t1_img.get_fdata()[..., 0], t1_img.affine, t1_img.header), t1_squeezed)
+            t1_target_for_cli = t1_squeezed
+        else:
+            t1_squeezed = None
+    except Exception:
+        t1_squeezed = None
+
+    # Paths for transform and tmp output
+    lta_path = os.path.join(out_dir, "_fs_to_t1001.lta")
+    tmp_out  = out_path + ".tmp.nii.gz"
+
+    # --- 1) Compute rigid FS->T1001 transform (intensity-based) ---
+    cmd_reg = [
+        mrr,
+        "--mov", brain_path,        # FS brain (moving)
+        "--dst", t1_target_for_cli, # destination T1001
+        "--lta", lta_path,          # output transform FS->T1001
+        "--satit"                   # robust cost (recommended)
     ]
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        os.replace(tmp_out, out_path)
+        subprocess.run(cmd_reg, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
-        # Print a compact reason; leave the original (FS-space) mask as-is.
-        print(f"[FAIL:RESLICE] {subj_name}  (mri_vol2vol exit {e.returncode})")
-        # Clean up tmp if it exists
+        print(f"[FAIL:ALIGN] {subj_name}  (mri_robust_register exit {e.returncode})")
+        reslice_fail += 1
+        # cleanup
         try:
-            if os.path.exists(tmp_out):
-                os.remove(tmp_out)
+            if os.path.exists(lta_path): os.remove(lta_path)
+            if t1_squeezed and os.path.exists(t1_squeezed): os.remove(t1_squeezed)
         except Exception:
             pass
+        return out_path
+
+    # --- 2) Apply FS->T1001 to the mask (nearest) ---
+    cmd_apply = [
+        mv2v,
+        "--mov", out_path,              # FS-space mask
+        "--targ", t1_target_for_cli,    # T1001 grid
+        "--o", tmp_out,
+        "--reg", lta_path,              # FS->T1001 transform
+        "--interp", "nearest"
+    ]
+    try:
+        subprocess.run(cmd_apply, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.replace(tmp_out, out_path)
+    except subprocess.CalledProcessError as e:
+        print(f"[FAIL:ALIGN] {subj_name}  (mri_vol2vol exit {e.returncode})")
         reslice_fail += 1
+        try:
+            if os.path.exists(tmp_out): os.remove(tmp_out)
+        except Exception:
+            pass
+    finally:
+        # tidy temporary files
+        try:
+            if os.path.exists(lta_path): os.remove(lta_path)
+            if t1_squeezed and os.path.exists(t1_squeezed): os.remove(t1_squeezed)
+        except Exception:
+            pass
 
     return out_path
+
 
 # =================== MAIN ===================
 
@@ -220,3 +282,5 @@ print(f"Skipped (no subj code): {skip_no_code}")
 print(f"Skipped (no FS match) : {skip_no_fs}")
 print(f"Skipped (no ASEG)     : {skip_no_aseg}")
 print(f"Output root           : {OUT_ROOT}")
+print(f"Reslice/align failures : {reslice_fail}")
+
