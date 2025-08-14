@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=brain_mask
-#SBATCH --mem=50G
-#SBATCH -t 12:50:00
+#SBATCH --mem=30G
+#SBATCH -t 5:50:00
 #SBATCH --gres=gpu:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
