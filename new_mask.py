@@ -9,7 +9,7 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brain2"   # <--- EDIT this if needed
+OUT_ROOT  = "/scratch/l.peiwang/kari_brain3"   # <--- EDIT this if needed
 os.makedirs(OUT_ROOT, exist_ok=True)
 
 # Labels to keep for a clean brain parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
