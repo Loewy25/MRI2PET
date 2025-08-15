@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=brain_mask
 #SBATCH --mem=30G
-#SBATCH -t 5:50:00
+#SBATCH -t 18:50:00
 #SBATCH --gres=gpu:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
