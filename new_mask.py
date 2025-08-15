@@ -9,24 +9,13 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainTEST2"   # <--- EDIT this if needed
+OUT_ROOT  = "/scratch/l.peiwang/kari_brainTEST3"   # <--- EDIT this if needed
 os.makedirs(OUT_ROOT, exist_ok=True)
 
 # Labels to keep for a clean brain parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
 KEEP_LABELS = {
-    2, 41,        # Cerebral WM (L/R)
-    3, 42,        # Cerebral Cortex (L/R)
-    7, 46,        # Cerebellum WM (L/R)
-    8, 47,        # Cerebellum Cortex (L/R)
-    10, 49,       # Thalamus-Proper (L/R)
-    11, 50,       # Caudate (L/R)
-    12, 51,       # Putamen (L/R)
-    13, 52,       # Pallidum (L/R)
-    17, 53,       # Hippocampus (L/R)
-    18, 54,       # Amygdala (L/R)
-    26, 58,       # Accumbens (L/R)
-    28, 60,       # VentralDC (L/R)
-    16            # Brainstem
+    2, 41, 3, 42, 7, 46, 8, 47, 10, 49, 11, 50, 12, 51,
+    13, 52, 17, 53, 18, 54, 26, 58, 28, 60, 16
 }
 
 # =================== HELPERS ===================
@@ -115,12 +104,16 @@ def find_aseg_mgz_closest(fs_subject_dir, target_dt):
     return None
 
 def _ensure_3d_nifti(in_path, out_dir, tag):
-    """If a NIfTI is 4D with one frame, write a 3D temp for CLI use."""
+    """
+    If a NIfTI is 4D (any length), write the first volume as a 3D temp for CLI use.
+    Returns (path_to_use, was_squeezed_bool).
+    """
     try:
         img = nib.load(in_path)
-        if img.ndim == 4 and img.shape[-1] == 1:
+        if img.ndim == 4:
             out = os.path.join(out_dir, f"_{tag}_3d_tmp.nii.gz")
-            nib.save(nib.Nifti1Image(img.get_fdata()[..., 0], img.affine, img.header), out)
+            data = np.asanyarray(img.dataobj)[..., 0]
+            nib.save(nib.Nifti1Image(data, img.affine, img.header), out)
             return out, True
     except Exception:
         pass
@@ -132,7 +125,7 @@ def make_aseg_mask_nifti(aseg_path, out_path):
     No reslicing here (assumes aseg/T1 share the same grid, which you've verified).
     """
     aseg_img = nib.load(aseg_path)
-    lab      = aseg_img.get_fdata()
+    lab      = np.asanyarray(aseg_img.dataobj)
     mask     = np.isin(lab, list(KEEP_LABELS)).astype(np.uint8)
     nib.save(nib.Nifti1Image(mask, aseg_img.affine), out_path)
     return out_path
@@ -211,62 +204,74 @@ for subj_folder in pup_subjects[:3]:
         flirt_fail += 1
         continue
 
-    # Squeeze any 4D single-frame files to 3D for CLIs
-    t1_for_cli, squeezed = _ensure_3d_nifti(dst_t1, out_dir, "t1")
-    t1001_for_cli, t1001_squeezed = _ensure_3d_nifti(t1_1001, out_dir, "t1001")
-    pet_for_cli, pet_squeezed = _ensure_3d_nifti(pet_path, out_dir, "pet")
+    # Squeeze any 4D files to 3D for CLIs
+    t1_for_cli, squeezed        = _ensure_3d_nifti(dst_t1, out_dir, "t1")
+    t1001_for_cli, t1001_sqz    = _ensure_3d_nifti(t1_1001, out_dir, "t1001")
+    pet_for_cli, pet_sqz        = _ensure_3d_nifti(pet_path, out_dir, "pet")
 
     mat_path = os.path.join(out_dir, "T1001_to_T1.mat")
     dst_pet  = os.path.join(out_dir, "PET_in_T1.nii.gz")
 
+    # Prepare env for FSL output
+    env = os.environ.copy()
+    env.setdefault("FSLOUTPUTTYPE", "NIFTI_GZ")
+
     # 1) estimate transform (6 DOF, normalized MI)
     try:
-        subprocess.run([flirt, "-in", t1001_for_cli, "-ref", t1_for_cli, "-omat", mat_path,
-                        "-dof", "6", "-cost", "normmi"],
-                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        r = subprocess.run([flirt, "-in", t1001_for_cli, "-ref", t1_for_cli, "-omat", mat_path,
+                            "-dof", "6", "-cost", "normmi"],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     except subprocess.CalledProcessError as e:
         print(f"[FAIL:FLIRT] {subj_folder}  (flirt estimate exit {e.returncode})")
-        flirt_fail += 1
+        msg = e.stderr.decode("utf-8", errors="ignore")
+        print("---- FLIRT stderr (estimate, last 20 lines) ----")
+        print("\n".join(msg.splitlines()[-20:]))
+        print("---- end ----")
         # cleanup temps
         if squeezed and os.path.exists(t1_for_cli):
             try: os.remove(t1_for_cli)
             except Exception: pass
-        if t1001_squeezed and os.path.exists(t1001_for_cli):
+        if t1001_sqz and os.path.exists(t1001_for_cli):
             try: os.remove(t1001_for_cli)
             except Exception: pass
-        if pet_squeezed and os.path.exists(pet_for_cli):
+        if pet_sqz and os.path.exists(pet_for_cli):
             try: os.remove(pet_for_cli)
             except Exception: pass
+        flirt_fail += 1
         continue
 
     # 2) apply to PET (one resample; trilinear)
     try:
-        subprocess.run([flirt, "-in", pet_for_cli, "-ref", t1_for_cli, "-applyxfm", "-init", mat_path,
-                        "-interp", "trilinear", "-out", dst_pet],
-                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        r = subprocess.run([flirt, "-in", pet_for_cli, "-ref", t1_for_cli, "-applyxfm", "-init", mat_path,
+                            "-interp", "trilinear", "-out", dst_pet],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     except subprocess.CalledProcessError as e:
         print(f"[FAIL:FLIRT] {subj_folder}  (flirt apply exit {e.returncode})")
-        flirt_fail += 1
+        msg = e.stderr.decode("utf-8", errors="ignore")
+        print("---- FLIRT stderr (apply, last 20 lines) ----")
+        print("\n".join(msg.splitlines()[-20:]))
+        print("---- end ----")
         # cleanup temps
         if squeezed and os.path.exists(t1_for_cli):
             try: os.remove(t1_for_cli)
             except Exception: pass
-        if t1001_squeezed and os.path.exists(t1001_for_cli):
+        if t1001_sqz and os.path.exists(t1001_for_cli):
             try: os.remove(t1001_for_cli)
             except Exception: pass
-        if pet_squeezed and os.path.exists(pet_for_cli):
+        if pet_sqz and os.path.exists(pet_for_cli):
             try: os.remove(pet_for_cli)
             except Exception: pass
+        flirt_fail += 1
         continue
 
     # cleanup temps on success
     if squeezed and os.path.exists(t1_for_cli):
         try: os.remove(t1_for_cli)
         except Exception: pass
-    if t1001_squeezed and os.path.exists(t1001_for_cli):
+    if t1001_sqz and os.path.exists(t1001_for_cli):
         try: os.remove(t1001_for_cli)
         except Exception: pass
-    if pet_squeezed and os.path.exists(pet_for_cli):
+    if pet_sqz and os.path.exists(pet_for_cli):
         try: os.remove(pet_for_cli)
         except Exception: pass
 
