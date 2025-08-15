@@ -21,7 +21,7 @@ KEEP_LABELS = {
 # =================== HELPERS ===================
 
 def extract_subject_code(pup_folder_name):
-    """Get '1092_385' from '1092_385_av1451_v1'."""
+    """Get '1092_385' from '1092_385_av1451_v2'."""
     parts = pup_folder_name.split("_")
     if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
         return f"{parts[0]}_{parts[1]}"
