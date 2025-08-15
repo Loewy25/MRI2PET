@@ -9,7 +9,7 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainTEST3"   # <--- EDIT this if needed
+OUT_ROOT  = "/scratch/l.peiwang/kari_brainv1"   # <--- EDIT this if needed
 os.makedirs(OUT_ROOT, exist_ok=True)
 
 # Labels to keep for a clean brain parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
@@ -143,7 +143,7 @@ flirt_fail = 0
 print(f"Found {total} PUP AV1451 subjects.\n")
 
 # Process only the first 2 subjects for this test
-for subj_folder in pup_subjects[:3]:
+for subj_folder in pup_subjects:
     pup_dir   = os.path.join(PUP_ROOT, subj_folder)
     nifti_dir = find_pup_nifti_dir(pup_dir)
     if not nifti_dir:
