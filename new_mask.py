@@ -9,7 +9,7 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainTEST"   # <--- EDIT this if needed
+OUT_ROOT  = "/scratch/l.peiwang/kari_brainTEST2"   # <--- EDIT this if needed
 os.makedirs(OUT_ROOT, exist_ok=True)
 
 # Labels to keep for a clean brain parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
@@ -149,7 +149,8 @@ flirt_fail = 0
 
 print(f"Found {total} PUP AV1451 subjects.\n")
 
-for subj_folder in pup_subjects[:2]:
+# Process only the first 2 subjects for this test
+for subj_folder in pup_subjects[:3]:
     pup_dir   = os.path.join(PUP_ROOT, subj_folder)
     nifti_dir = find_pup_nifti_dir(pup_dir)
     if not nifti_dir:
@@ -210,8 +211,10 @@ for subj_folder in pup_subjects[:2]:
         flirt_fail += 1
         continue
 
+    # Squeeze any 4D single-frame files to 3D for CLIs
     t1_for_cli, squeezed = _ensure_3d_nifti(dst_t1, out_dir, "t1")
-    t1001_for_cli, _     = _ensure_3d_nifti(t1_1001, out_dir, "t1001")
+    t1001_for_cli, t1001_squeezed = _ensure_3d_nifti(t1_1001, out_dir, "t1001")
+    pet_for_cli, pet_squeezed = _ensure_3d_nifti(pet_path, out_dir, "pet")
 
     mat_path = os.path.join(out_dir, "T1001_to_T1.mat")
     dst_pet  = os.path.join(out_dir, "PET_in_T1.nii.gz")
@@ -224,26 +227,47 @@ for subj_folder in pup_subjects[:2]:
     except subprocess.CalledProcessError as e:
         print(f"[FAIL:FLIRT] {subj_folder}  (flirt estimate exit {e.returncode})")
         flirt_fail += 1
+        # cleanup temps
         if squeezed and os.path.exists(t1_for_cli):
             try: os.remove(t1_for_cli)
+            except Exception: pass
+        if t1001_squeezed and os.path.exists(t1001_for_cli):
+            try: os.remove(t1001_for_cli)
+            except Exception: pass
+        if pet_squeezed and os.path.exists(pet_for_cli):
+            try: os.remove(pet_for_cli)
             except Exception: pass
         continue
 
     # 2) apply to PET (one resample; trilinear)
     try:
-        subprocess.run([flirt, "-in", pet_path, "-ref", t1_for_cli, "-applyxfm", "-init", mat_path,
+        subprocess.run([flirt, "-in", pet_for_cli, "-ref", t1_for_cli, "-applyxfm", "-init", mat_path,
                         "-interp", "trilinear", "-out", dst_pet],
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         print(f"[FAIL:FLIRT] {subj_folder}  (flirt apply exit {e.returncode})")
         flirt_fail += 1
+        # cleanup temps
         if squeezed and os.path.exists(t1_for_cli):
             try: os.remove(t1_for_cli)
             except Exception: pass
+        if t1001_squeezed and os.path.exists(t1001_for_cli):
+            try: os.remove(t1001_for_cli)
+            except Exception: pass
+        if pet_squeezed and os.path.exists(pet_for_cli):
+            try: os.remove(pet_for_cli)
+            except Exception: pass
         continue
 
+    # cleanup temps on success
     if squeezed and os.path.exists(t1_for_cli):
         try: os.remove(t1_for_cli)
+        except Exception: pass
+    if t1001_squeezed and os.path.exists(t1001_for_cli):
+        try: os.remove(t1001_for_cli)
+        except Exception: pass
+    if pet_squeezed and os.path.exists(pet_for_cli):
+        try: os.remove(pet_for_cli)
         except Exception: pass
 
     # --- Build aseg-based mask (labels only; no reslice) ---
@@ -268,4 +292,5 @@ print(f"Skipped (no FS match) : {skip_no_fs}")
 print(f"Skipped (no ASEG)     : {skip_no_aseg}")
 print(f"FLIRT failures        : {flirt_fail}")
 print(f"Output root           : {OUT_ROOT}")
+
 
