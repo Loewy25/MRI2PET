@@ -13,6 +13,7 @@
 module load cuda/11.3
 module load cudnn/8.1.1
 module load freesurfer
+module load fsl
 . ~/miniconda3/bin/activate
 conda activate pasta
 
