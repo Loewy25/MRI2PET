@@ -149,7 +149,7 @@ flirt_fail = 0
 
 print(f"Found {total} PUP AV1451 subjects.\n")
 
-for subj_folder in pup_subjects:
+for subj_folder in pup_subjects[:2]:
     pup_dir   = os.path.join(PUP_ROOT, subj_folder)
     nifti_dir = find_pup_nifti_dir(pup_dir)
     if not nifti_dir:
