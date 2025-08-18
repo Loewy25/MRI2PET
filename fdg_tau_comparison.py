@@ -31,7 +31,7 @@ def main():
 
         suvr = find_last(subj_root, ["*_msum_SUVR.nii.gz"])
         t1001 = find_last(subj_root, ["T1001.nii.gz"])
-        bmask = find_last(subj_root, ["BrainMask.nii.gz")
+        bmask = find_last(subj_root, ["BrainMask.nii.gz"])
 
         if not (suvr and t1001 and bmask):
             missing = ["PET" if not suvr else None,
