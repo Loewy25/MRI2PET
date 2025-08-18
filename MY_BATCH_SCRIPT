@@ -18,7 +18,7 @@ conda activate pasta
 
 
 
-python Brain_mask.py
+python fdg_tau_comparison.py
 
 
 
