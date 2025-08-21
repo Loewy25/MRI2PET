@@ -3,7 +3,7 @@
 #SBATCH --job-name=brain_mask
 #SBATCH --mem=20G
 #SBATCH -t 23:50:00
-#SBATCH --gres=gpu:a100_80:1
+#SBATCH --gres=gpu:nvidia_a100_80:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
