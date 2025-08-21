@@ -56,10 +56,7 @@ os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 
 # Keep native FreeSurfer size by default; set to (128,128,128) if you need to save memory.
-RESIZE_TO: Optional[Tuple[int,int,int]] = None  # e.g., (128,128,128) or (76,94,76)
-
-# PET intensity reference constant (kept for completeness; not used by min–max PET)
-PET_MAX = 3.5
+RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)  # e.g., (128,128,128) or (76,94,76)
 
 # Splits & loader
 TRAIN_FRACTION = 0.70
