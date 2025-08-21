@@ -104,6 +104,22 @@ def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
         nn.ReLU(inplace=True),
     )
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# ONLY CHANGE: add residual blocks (add ×6) IMMEDIATELY AFTER THE BOTTLENECK
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+class ResidualBlock3D(nn.Module):
+    """(3x3x3 -> ReLU -> 3x3x3) + residual add -> ReLU."""
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=True)
+        self.relu  = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.relu(self.conv1(x))
+        out = self.conv2(out)
+        return self.relu(out + x)
+
 
 class Generator(nn.Module):
     """
@@ -126,8 +142,16 @@ class Generator(nn.Module):
         self.down3 = _double_conv(ch2, 512)                                           # -> 512
         ch3 = 512
 
-        # Bottleneck (two 3x3 convs as in text)
+        # Bottleneck (two 3x3 convs) + add×6 residual stack (ONLY CHANGE)
         self.bottleneck = _double_conv(ch3, ch3)
+        self.bottleneck_res6 = nn.Sequential(
+            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3),
+        )
 
         # Decoder (upsample then concat with skip, then double conv)
         self.up1_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
@@ -156,8 +180,9 @@ class Generator(nn.Module):
         x3 = self.down3(p2)         # B x 512 x D/4 x H/4 x W/4
         p3 = self.pool(x3)          # B x 512 x D/8 x H/8 x W/8
 
-        # Bottleneck
+        # Bottleneck (+ residual ×6)
         b = self.bottleneck(p3)     # B x 512 x D/8 x H/8 x W/8
+        b = self.bottleneck_res6(b) # <<< ONLY CHANGE
 
         # Decoder
         u1 = self.up1_ups(b)
@@ -464,3 +489,4 @@ if __name__ == "__main__":
 
     metrics = evaluate_paggan(G, test_loader, device=device, data_range=1.0, mmd_voxels=2048)
     print("Test metrics:", metrics)
+
