@@ -17,11 +17,11 @@ Data assumptions:
     PET_in_T1_masked.nii.gz
   (both in FreeSurfer native space, brain-masked and aligned)
 
-Outputs:
-- /home/l.peiwang/MRI2PET/loss_curves.png
-- /home/l.peiwang/MRI2PET/training_log.csv
-- /home/l.peiwang/MRI2PET/checkpoints/best_G.pth, best_D.pth
-- /home/l.peiwang/MRI2PET/test_metrics.txt
+Outputs (all under /home/l.peiwang/MRI2PET/<RUN_NAME>/):
+- loss_curves.png
+- training_log.csv
+- checkpoints/best_G.pth, best_D.pth
+- test_metrics.txt
 """
 
 import os, glob, time, csv, math
@@ -47,8 +47,12 @@ import matplotlib.pyplot as plt
 # ----------------------------
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
-CKPT_DIR   = os.path.join(OUT_DIR, "checkpoints")
-os.makedirs(OUT_DIR, exist_ok=True)
+
+# >>> Set this per run <<<
+RUN_NAME   = "test"   # e.g., "test", "baseline_256", "2025-08-21_0930"
+OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
+CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
+os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 
 # Keep native FreeSurfer size by default; set to (128,128,128) if you need to save memory.
@@ -679,7 +683,9 @@ def save_history_csv(history: Dict[str, Sequence[float]], out_csv: str):
 # ----------------------------
 if __name__ == "__main__":
     print(f"Data root: {ROOT_DIR}")
-    print(f"Output dir: {OUT_DIR}")
+    print(f"Output root: {OUT_DIR}")
+    print(f"Run name: {RUN_NAME}")
+    print(f"Run dir: {OUT_RUN}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -701,12 +707,12 @@ if __name__ == "__main__":
         device=device, epochs=EPOCHS, gamma=GAMMA, lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE, verbose=True
     )
 
-    # Save curves & CSV
-    curves_path = os.path.join(OUT_DIR, "loss_curves.png")
+    # Save curves & CSV (in run folder)
+    curves_path = os.path.join(OUT_RUN, "loss_curves.png")
     save_loss_curves(out["history"], curves_path)
     print(f"Saved loss curves to: {curves_path}")
 
-    csv_path = os.path.join(OUT_DIR, "training_log.csv")
+    csv_path = os.path.join(OUT_RUN, "training_log.csv")
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
@@ -714,9 +720,10 @@ if __name__ == "__main__":
     metrics = evaluate_paggan(G, test_loader, device=device, data_range=DATA_RANGE, mmd_voxels=2048)
     print("Test metrics:", metrics)
 
-    metrics_txt = os.path.join(OUT_DIR, "test_metrics.txt")
+    metrics_txt = os.path.join(OUT_RUN, "test_metrics.txt")
     with open(metrics_txt, "w") as f:
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
 
