@@ -22,6 +22,7 @@ Outputs (all under /home/l.peiwang/MRI2PET/<RUN_NAME>/):
 - training_log.csv
 - checkpoints/best_G.pth, best_D.pth
 - test_metrics.txt
+- volumes/<subject_id>/{MRI.nii.gz,PET_gt.nii.gz,PET_fake.nii.gz,PET_abs_error.nii.gz}
 """
 
 import os, glob, time, csv
@@ -52,11 +53,16 @@ OUT_DIR    = "/home/l.peiwang/MRI2PET"
 RUN_NAME   = "test"   # e.g., "test", "baseline_256", "2025-08-21_0930"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
+VOL_DIR    = os.path.join(OUT_RUN, "volumes")  # where we save 3D volumes
 os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
+os.makedirs(VOL_DIR, exist_ok=True)
 
 # Keep native FreeSurfer size by default; set to (128,128,128) if you need to save memory.
 RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)  # or None or (76,94,76)
+
+# Save volumes back in original T1 space (True) or model grid (False)
+RESAMPLE_BACK_TO_T1 = True
 
 # Splits & loader
 TRAIN_FRACTION = 0.70
@@ -163,10 +169,11 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]]) -> np.n
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
     return nd_zoom(vol, zoom_factors, order=1).astype(np.float32)  # trilinear
 
+
 class KariAV1451Dataset(Dataset):
     """
     Loads pairs (T1_masked.nii.gz, PET_in_T1_masked.nii.gz) from AV1451 subject folders,
-    normalizes, optional resize, returns (MRI, PET) as FloatTensors [1,D,H,W].
+    normalizes, optional resize, returns (MRI, PET, meta) where MRI/PET are FloatTensors [1,D,H,W].
     Uses aseg_brainmask.nii.gz if available for masking; otherwise T1>0 as mask.
     """
     def __init__(
@@ -202,6 +209,8 @@ class KariAV1451Dataset(Dataset):
 
     def __getitem__(self, idx: int):
         t1_path, pet_path, mask_path = self.items[idx]
+        sid = os.path.basename(os.path.dirname(t1_path))
+
         t1_img  = nib.load(t1_path);  t1  = np.asarray(t1_img.get_fdata(), dtype=np.float32)
         pet_img = nib.load(pet_path); pet = np.asarray(pet_img.get_fdata(), dtype=np.float32)
 
@@ -210,6 +219,10 @@ class KariAV1451Dataset(Dataset):
         else:
             mask = (t1 != 0)
 
+        orig_shape = tuple(t1.shape)
+        t1_affine  = t1_img.affine
+        pet_affine = pet_img.affine
+
         # Assure PET on T1 grid; if not, resample PET to T1
         if t1.shape != pet.shape:
             pet = _maybe_resize(pet, t1.shape)
@@ -217,6 +230,8 @@ class KariAV1451Dataset(Dataset):
         # Optional global resize for the model
         t1  = _maybe_resize(t1,  self.resize_to)
         pet = _maybe_resize(pet, self.resize_to)
+        cur_shape = tuple(t1.shape)
+
         if self.resize_to is not None and mask is not None:
             Dz, Hy, Wx = mask.shape
             td, th, tw = self.resize_to
@@ -228,10 +243,21 @@ class KariAV1451Dataset(Dataset):
         petn = norm_pet_to_01(pet, mask=mask)
 
         # Channel-first [1,D,H,W]
-        t1n  = np.expand_dims(t1n,  axis=0)
-        petn = np.expand_dims(petn, axis=0)
+        t1n_t  = torch.from_numpy(np.expand_dims(t1n,  axis=0))
+        petn_t = torch.from_numpy(np.expand_dims(petn, axis=0))
 
-        return torch.from_numpy(t1n), torch.from_numpy(petn)
+        meta = {
+            "sid": sid,
+            "t1_path": t1_path,
+            "pet_path": pet_path,
+            "t1_affine": t1_affine,
+            "pet_affine": pet_affine,
+            "orig_shape": orig_shape,
+            "cur_shape": cur_shape,
+            "resized_to": self.resize_to,
+        }
+        return t1n_t, petn_t, meta
+
 
 def build_loaders(
     root: str = ROOT_DIR,
@@ -486,7 +512,11 @@ def train_paggan(
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
-        for mri, pet in train_loader:
+        for batch in train_loader:
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                mri, pet, _ = batch
+            else:
+                mri, pet = batch
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
             B = mri.size(0)
@@ -528,7 +558,11 @@ def train_paggan(
             G.eval()
             with torch.no_grad():
                 val_recon, v_batches = 0.0, 0
-                for mri, pet in val_loader:
+                for batch in val_loader:
+                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                        mri, pet, _ = batch
+                    else:
+                        mri, pet = batch
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
                     fake = G(mri)
@@ -566,6 +600,7 @@ def train_paggan(
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
 
+
 @torch.no_grad()
 def evaluate_paggan(
     G: nn.Module,
@@ -583,7 +618,11 @@ def evaluate_paggan(
     mmd_sum = 0.0
     n = 0
 
-    for mri, pet in test_loader:
+    for batch in test_loader:
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            mri, pet, _ = batch
+        else:
+            mri, pet = batch
         mri = mri.to(device, non_blocking=True)
         pet = pet.to(device, non_blocking=True)
         fake = G(mri)
@@ -600,6 +639,78 @@ def evaluate_paggan(
         "MSE":  mse_sum  / max(1, n),
         "MMD":  mmd_sum  / max(1, n),
     }
+
+
+# ----------------------------
+# Saving test volumes
+# ----------------------------
+def _safe_name(s: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in s)
+
+def _save_nifti(vol: np.ndarray, affine: np.ndarray, path: str):
+    img = nib.Nifti1Image(vol.astype(np.float32), affine)
+    nib.save(img, path)
+
+@torch.no_grad()
+def save_test_volumes(
+    G: nn.Module,
+    test_loader: Iterable,
+    device: torch.device,
+    out_dir: str,
+    resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
+):
+    os.makedirs(out_dir, exist_ok=True)
+    G.to(device)
+    G.eval()
+
+    print(f"Saving test volumes to: {out_dir}  (resample_back_to_t1={resample_back_to_t1})")
+
+    for i, batch in enumerate(test_loader):
+        if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+            # If no meta is provided, create a fallback meta
+            mri, pet = batch
+            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
+        else:
+            mri, pet, meta = batch
+
+        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
+        subdir = os.path.join(out_dir, sid)
+        os.makedirs(subdir, exist_ok=True)
+
+        mri_t  = mri.to(device, non_blocking=True)
+        fake_t = G(mri_t)
+
+        # to numpy [D,H,W]
+        mri_np  = mri_t.squeeze(0).squeeze(0).detach().cpu().numpy()
+        pet_np  = pet.squeeze(0).squeeze(0).detach().cpu().numpy()
+        fake_np = fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
+        err_np  = np.abs(fake_np - pet_np)
+
+        cur_shape  = tuple(mri_np.shape)
+        orig_shape = tuple(meta.get("orig_shape", cur_shape))
+        resized_to = meta.get("resized_to", None)
+
+        if resample_back_to_t1 and orig_shape != cur_shape:
+            # resample volumes back to original T1 grid size
+            zf = (orig_shape[0]/cur_shape[0], orig_shape[1]/cur_shape[1], orig_shape[2]/cur_shape[2])
+            mri_np  = nd_zoom(mri_np,  zf, order=1)
+            pet_np  = nd_zoom(pet_np,  zf, order=1)
+            fake_np = nd_zoom(fake_np, zf, order=1)
+            err_np  = nd_zoom(err_np,  zf, order=1)
+            affine_to_use = meta.get("t1_affine", np.eye(4))
+        else:
+            # If we didn't resize during dataset, we can keep original affine; otherwise identity
+            if resized_to is None:
+                affine_to_use = meta.get("t1_affine", np.eye(4))
+            else:
+                affine_to_use = np.eye(4)
+
+        _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
+        _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
+        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
+        _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
+
+        print(f"  saved {sid}: MRI/PET_gt/PET_fake/PET_abs_error")
 
 
 # ----------------------------
@@ -651,8 +762,8 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
-        mri0, pet0 = next(iter(train_loader))
-        print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}")
+        mri0, pet0, meta0 = next(iter(train_loader))
+        print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {meta0['sid']}")
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
@@ -673,7 +784,7 @@ if __name__ == "__main__":
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
-    # Evaluate
+    # Evaluate (metrics)
     metrics = evaluate_paggan(G, test_loader, device=device, data_range=DATA_RANGE, mmd_voxels=2048)
     print("Test metrics:", metrics)
 
@@ -682,4 +793,8 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
+    # Save 3D volumes for test subjects
+    save_test_volumes(G, test_loader, device=device, out_dir=VOL_DIR, resample_back_to_t1=RESAMPLE_BACK_TO_T1)
+
 
