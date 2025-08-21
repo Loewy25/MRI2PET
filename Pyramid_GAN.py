@@ -24,7 +24,7 @@ Outputs (all under /home/l.peiwang/MRI2PET/<RUN_NAME>/):
 - test_metrics.txt
 """
 
-import os, glob, time, csv, math
+import os, glob, time, csv
 from math import log10
 from typing import Iterable, Dict, Any, Tuple, Optional, Sequence
 
@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import matplotlib
-matplotlib.use("Agg")  # no X server needed
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
@@ -56,23 +56,24 @@ os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 
 # Keep native FreeSurfer size by default; set to (128,128,128) if you need to save memory.
-RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)  # e.g., (128,128,128) or (76,94,76)
+RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)  # or None or (76,94,76)
 
 # Splits & loader
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15  # TEST will be the rest
-BATCH_SIZE     = 1     # 256^3 is heavy; increase to 2 only if memory allows
-NUM_WORKERS    = 4     # adjust per node
+BATCH_SIZE     = 1
+NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
 # Training hyper-params
-EPOCHS      = 150
+EPOCHS      = 3
 LR_G        = 1e-4
 LR_D        = 4e-4
-GAMMA       = 1.0    # weight for (L1 + (1-SSIM))
+GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
-DATA_RANGE  = 1.0    # assumed data range for SSIM/PSNR
+DATA_RANGE  = 1.0
 SEED        = 2024
+
 
 # ----------------------------
 # Utilities: reproducibility
@@ -137,9 +138,9 @@ def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     x01[~mask] = 0.0
     return x01.astype(np.float32)
 
-def norm_pet_to_01(vol: np.ndarray, pet_max: float = PET_MAX, mask: Optional[np.ndarray]=None) -> np.ndarray:
+def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     """
-    PET: per-volume min–max to [0,1] within mask (no clipping, no PET_MAX scaling).
+    PET: per-volume min–max to [0,1] within mask (no clipping; no external constant).
     """
     x = vol.astype(np.float32)
     if mask is None:
@@ -172,11 +173,9 @@ class KariAV1451Dataset(Dataset):
         self,
         root_dir: str = ROOT_DIR,
         resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
-        pet_max: float = PET_MAX
     ):
         self.root_dir = root_dir
         self.resize_to = resize_to
-        self.pet_max = pet_max
 
         patterns = [
             os.path.join(root_dir, "*_av1451_*"),
@@ -226,7 +225,7 @@ class KariAV1451Dataset(Dataset):
 
         # Normalize (MRI: z->minmax; PET: minmax)
         t1n  = norm_mri_to_01(t1,  mask)
-        petn = norm_pet_to_01(pet, pet_max=self.pet_max, mask=mask)
+        petn = norm_pet_to_01(pet, mask=mask)
 
         # Channel-first [1,D,H,W]
         t1n  = np.expand_dims(t1n,  axis=0)
@@ -237,7 +236,6 @@ class KariAV1451Dataset(Dataset):
 def build_loaders(
     root: str = ROOT_DIR,
     resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
-    pet_max: float = PET_MAX,
     train_fraction: float = TRAIN_FRACTION,
     val_fraction: float = VAL_FRACTION,
     batch_size: int = BATCH_SIZE,
@@ -245,12 +243,11 @@ def build_loaders(
     pin_memory: bool = PIN_MEMORY,
     seed: int = SEED,
 ):
-    ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to, pet_max=pet_max)
+    ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to)
     N = len(ds)
     n_train = int(round(train_fraction * N))
     n_val   = int(round(val_fraction   * N))
     n_test  = N - n_train - n_val
-    # Deterministic split
     gen = torch.Generator().manual_seed(seed)
     train_set, val_set, test_set = random_split(ds, [n_train, n_val, n_test], generator=gen)
 
@@ -267,7 +264,6 @@ def build_loaders(
 # Model blocks
 # ----------------------------
 class SelfAttention3D(nn.Module):
-    """Channel-wise gating from global spatial attention (Eqs. (1)-(2))."""
     def __init__(self, channels: int):
         super().__init__()
         self.Wf = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
@@ -279,16 +275,15 @@ class SelfAttention3D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, D, H, W = x.shape
         N = D * H * W
-        f = self.Wf(x).view(B, C, N)          # B x C x N
-        phi = self.Wphi(x).view(B, C, N)      # B x C x N
-        eta = self.softmax(f)                  # softmax over spatial locations
-        weighted_phi = eta * phi               # B x C x N
-        summed = weighted_phi.sum(dim=-1, keepdim=True)  # B x C x 1
-        a = self.Wv(summed.view(B, C, 1, 1, 1))          # B x C x 1 x 1 x 1
-        return self.sigmoid(a)                 # channel gate in [0,1]
+        f = self.Wf(x).view(B, C, N)
+        phi = self.Wphi(x).view(B, C, N)
+        eta = self.softmax(f)
+        weighted_phi = eta * phi
+        summed = weighted_phi.sum(dim=-1, keepdim=True)
+        a = self.Wv(summed.view(B, C, 1, 1, 1))
+        return self.sigmoid(a)
 
 class PyramidConvBlock(nn.Module):
-    """Parallel conv paths with specified kernel sizes; each path: Conv -> ReLU -> Conv -> ReLU."""
     def __init__(self, in_ch: int, out_ch_each: int, kernel_sizes=(3, 5, 7)):
         super().__init__()
         paths = []
@@ -304,7 +299,7 @@ class PyramidConvBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         outs = [p(x) for p in self.paths]
-        return torch.cat(outs, dim=1)  # concat along channel dim
+        return torch.cat(outs, dim=1)
 
 def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
     return nn.Sequential(
@@ -315,7 +310,6 @@ def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
     )
 
 class ResidualBlock3D(nn.Module):
-    """(3x3x3 -> ReLU -> 3x3x3) + residual add -> ReLU."""
     def __init__(self, channels: int):
         super().__init__()
         self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=True)
@@ -328,35 +322,25 @@ class ResidualBlock3D(nn.Module):
         return self.relu(out + x)
 
 class Generator(nn.Module):
-    """
-    Pyramid & Attention Generator (U-Net)
-    """
     def __init__(self, in_ch: int = 1, out_ch: int = 1):
         super().__init__()
         self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
 
-        # Encoder
-        self.down1 = PyramidConvBlock(in_ch, out_ch_each=64, kernel_sizes=(3, 5, 7))  # -> 64*3
+        self.down1 = PyramidConvBlock(in_ch, out_ch_each=64, kernel_sizes=(3, 5, 7))
         ch1 = 64 * 3
 
-        self.down2 = PyramidConvBlock(ch1, out_ch_each=128, kernel_sizes=(3, 5))      # -> 128*2
+        self.down2 = PyramidConvBlock(ch1, out_ch_each=128, kernel_sizes=(3, 5))
         ch2 = 128 * 2
 
-        self.down3 = _double_conv(ch2, 512)                                           # -> 512
+        self.down3 = _double_conv(ch2, 512)
         ch3 = 512
 
-        # Bottleneck (2x conv) + residual ×6
         self.bottleneck = _double_conv(ch3, ch3)
         self.bottleneck_res6 = nn.Sequential(
-            ResidualBlock3D(ch3),
-            ResidualBlock3D(ch3),
-            ResidualBlock3D(ch3),
-            ResidualBlock3D(ch3),
-            ResidualBlock3D(ch3),
-            ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3), ResidualBlock3D(ch3), ResidualBlock3D(ch3),
+            ResidualBlock3D(ch3), ResidualBlock3D(ch3), ResidualBlock3D(ch3),
         )
 
-        # Decoder
         self.up1_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
         self.up1_conv = _double_conv(ch3 + ch3, 256)
 
@@ -366,47 +350,25 @@ class Generator(nn.Module):
         self.up3_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
         self.up3_conv = _double_conv(128 + ch1, 64)
 
-        # Attention on last up-block
         self.att = SelfAttention3D(64)
         self.out_conv = nn.Conv3d(64, out_ch, kernel_size=3, padding=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.down1(x)          # B x ch1 x D x H x W
-        p1 = self.pool(x1)
-
-        x2 = self.down2(p1)         # B x ch2 x D/2 x H/2 x W/2
-        p2 = self.pool(x2)
-
-        x3 = self.down3(p2)         # B x 512 x D/4 x H/4 x W/4
-        p3 = self.pool(x3)          # B x 512 x D/8 x H/8 x W/8
+        x1 = self.down1(x); p1 = self.pool(x1)
+        x2 = self.down2(p1); p2 = self.pool(x2)
+        x3 = self.down3(p2); p3 = self.pool(x3)
 
         b = self.bottleneck(p3)
         b = self.bottleneck_res6(b)
 
-        u1 = self.up1_ups(b)
-        u1 = _pad_or_crop_to(u1, x3)
-        u1 = torch.cat([u1, x3], dim=1)
-        u1 = self.up1_conv(u1)
-
-        u2 = self.up2_ups(u1)
-        u2 = _pad_or_crop_to(u2, x2)
-        u2 = torch.cat([u2, x2], dim=1)
-        u2 = self.up2_conv(u2)
-
-        u3 = self.up3_ups(u2)
-        u3 = _pad_or_crop_to(u3, x1)
-        u3 = torch.cat([u3, x1], dim=1)
-        u3 = self.up3_conv(u3)
+        u1 = self.up1_ups(b); u1 = _pad_or_crop_to(u1, x3); u1 = torch.cat([u1, x3], dim=1); u1 = self.up1_conv(u1)
+        u2 = self.up2_ups(u1); u2 = _pad_or_crop_to(u2, x2); u2 = torch.cat([u2, x2], dim=1); u2 = self.up2_conv(u2)
+        u3 = self.up3_ups(u2); u3 = _pad_or_crop_to(u3, x1); u3 = torch.cat([u3, x1], dim=1); u3 = self.up3_conv(u3)
 
         gate = self.att(u3)
-        y = gate * u3
-        return self.out_conv(y)
+        return self.out_conv(gate * u3)
 
 class StandardDiscriminator(nn.Module):
-    """
-    Standard discriminator (6 conv layers total): 5 stride-2 3x3x3 conv blocks [32,64,128,256,512],
-    followed by a 1-channel conv head, global avg pool to 1, then sigmoid.
-    """
     def __init__(self, in_ch: int = 1):
         super().__init__()
         feats = []
@@ -422,9 +384,8 @@ class StandardDiscriminator(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
-        x = self.head(x)                  # [B,1,D',H',W']
-        x = F.adaptive_avg_pool3d(x, 1)   # [B,1,1,1,1]
-        x = x.view(x.size(0), -1)         # [B,1]
+        x = self.head(x)
+        x = F.adaptive_avg_pool3d(x, 1).view(x.size(0), -1)
         return torch.sigmoid(x)
 
 
@@ -689,7 +650,6 @@ if __name__ == "__main__":
     # Build loaders
     train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
-    # Peek one shape
     with torch.no_grad():
         mri0, pet0 = next(iter(train_loader))
         print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}")
@@ -704,7 +664,7 @@ if __name__ == "__main__":
         device=device, epochs=EPOCHS, gamma=GAMMA, lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE, verbose=True
     )
 
-    # Save curves & CSV (in run folder)
+    # Save curves & CSV
     curves_path = os.path.join(OUT_RUN, "loss_curves.png")
     save_loss_curves(out["history"], curves_path)
     print(f"Saved loss curves to: {curves_path}")
@@ -722,5 +682,4 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
-
 
