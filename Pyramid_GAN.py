@@ -27,7 +27,7 @@ Outputs (all under /home/l.peiwang/MRI2PET/<RUN_NAME>/):
 
 import os, glob, time, csv
 from math import log10
-from typing import Iterable, Dict, Any, Tuple, Optional, Sequence
+from typing import Iterable, Dict, Any, Tuple, Optional, Sequence, List, Union
 
 import numpy as np
 import nibabel as nib
@@ -259,6 +259,22 @@ class KariAV1451Dataset(Dataset):
         return t1n_t, petn_t, meta
 
 
+# ----------------------------
+# DataLoader collate (avoid meta collation for B=1)
+# ----------------------------
+def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
+    """
+    For BATCH_SIZE=1 returns the single (mri, pet, meta) sample unchanged.
+    For B>1, stacks mri/pet and returns meta as a list of dicts.
+    """
+    if len(batch) == 1:
+        return batch[0]
+    mri = torch.stack([b[0] for b in batch], dim=0)
+    pet = torch.stack([b[1] for b in batch], dim=0)
+    metas = [b[2] for b in batch]
+    return mri, pet, metas
+
+
 def build_loaders(
     root: str = ROOT_DIR,
     resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
@@ -277,12 +293,21 @@ def build_loaders(
     gen = torch.Generator().manual_seed(seed)
     train_set, val_set, test_set = random_split(ds, [n_train, n_val, n_test], generator=gen)
 
-    dl_train = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                          num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
-    dl_val   = DataLoader(val_set,   batch_size=batch_size, shuffle=False,
-                          num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
-    dl_test  = DataLoader(test_set,  batch_size=batch_size, shuffle=False,
-                          num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
+    dl_train = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
+    dl_val = DataLoader(
+        val_set, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
+    dl_test = DataLoader(
+        test_set, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
     return dl_train, dl_val, dl_test, N, n_train, n_val, n_test
 
 
@@ -519,15 +544,15 @@ def train_paggan(
                 mri, pet = batch
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
-            B = mri.size(0)
+            B = mri.size(0) if mri.dim() == 5 else 1
             real_lbl = torch.ones(B, 1, device=device)
             fake_lbl = torch.zeros(B, 1, device=device)
 
             # ---- Update D ----
             with torch.no_grad():
-                fake = G(mri)
+                fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
             D.zero_grad(set_to_none=True)
-            out_real = D(pet)
+            out_real = D(pet if pet.dim()==5 else pet.unsqueeze(0))
             out_fake = D(fake.detach())
             loss_D = bce(out_real, real_lbl) + bce(out_fake, fake_lbl)
             loss_D.backward()
@@ -535,11 +560,11 @@ def train_paggan(
 
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
-            fake = G(mri)
+            fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
             out_fake_for_G = D(fake)
             loss_gan = bce(out_fake_for_G, real_lbl)
-            loss_l1 = l1_loss(fake, pet)
-            ssim_val = ssim3d(fake, pet, data_range=data_range)
+            loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
+            ssim_val = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range)
             loss_G = gamma * (loss_l1 + (1.0 - ssim_val)) + lambda_gan * loss_gan
             loss_G.backward()
             opt_G.step()
@@ -565,9 +590,9 @@ def train_paggan(
                         mri, pet = batch
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
-                    fake = G(mri)
-                    loss_l1 = l1_loss(fake, pet)
-                    ssim_v  = ssim3d(fake, pet, data_range=data_range)
+                    fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
+                    loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
+                    ssim_v  = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range)
                     val_recon += (loss_l1 + (1.0 - ssim_v)).item()
                     v_batches += 1
             val_recon /= max(1, v_batches)
@@ -625,12 +650,12 @@ def evaluate_paggan(
             mri, pet = batch
         mri = mri.to(device, non_blocking=True)
         pet = pet.to(device, non_blocking=True)
-        fake = G(mri)
+        fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
 
-        ssim_sum += ssim3d(fake, pet, data_range=data_range).item()
-        psnr_sum += psnr(fake, pet, data_range=data_range)
-        mse_sum  += F.mse_loss(fake, pet).item()
-        mmd_sum  += mmd_gaussian(pet, fake, num_voxels=mmd_voxels)
+        ssim_sum += ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range).item()
+        psnr_sum += psnr(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range)
+        mse_sum  += F.mse_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0)).item()
+        mmd_sum  += mmd_gaussian(pet if pet.dim()==5 else pet.unsqueeze(0), fake, num_voxels=mmd_voxels)
         n += 1
 
     return {
@@ -642,14 +667,81 @@ def evaluate_paggan(
 
 
 # ----------------------------
-# Saving test volumes
+# Helpers for saving test volumes
 # ----------------------------
 def _safe_name(s: str) -> str:
+    s = str(s)
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in s)
 
 def _save_nifti(vol: np.ndarray, affine: np.ndarray, path: str):
     img = nib.Nifti1Image(vol.astype(np.float32), affine)
     nib.save(img, path)
+
+def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Tensor]) -> Tuple[int,int,int]:
+    """
+    Normalize various collated representations to a plain (D,H,W) of ints.
+    Handles: (D,H,W), [D,H,W], np arrays, torch tensors, and
+    collate artifacts like (tensor([D]), tensor([H]), tensor([W])) or tensor([[D,H,W]]).
+    """
+    # Unwrap lists/tuples of length 1 that hold tensors/arrays
+    if isinstance(x, (list, tuple)) and len(x) == 1:
+        x = x[0]
+    # If it's a list/tuple of scalars or 0/1-d tensors
+    if isinstance(x, (list, tuple)):
+        vals = []
+        for v in x:
+            if isinstance(v, torch.Tensor):
+                vals.append(int(v.detach().cpu().reshape(-1)[0].item()))
+            else:
+                vals.append(int(v))
+        if len(vals) >= 3:
+            return (vals[0], vals[1], vals[2])
+        raise ValueError(f"orig/cur shape has unexpected length: {vals}")
+    # If it's a tensor/ndarray
+    if isinstance(x, torch.Tensor):
+        arr = x.detach().cpu().numpy()
+    elif isinstance(x, np.ndarray):
+        arr = x
+    else:
+        # Single scalar?
+        try:
+            return tuple(int(t) for t in x)  # may raise
+        except Exception:
+            raise ValueError(f"Cannot parse shape from type: {type(x)}")
+    flat = np.array(arr).astype(np.int64).reshape(-1)
+    if flat.size < 3:
+        raise ValueError(f"Shape vector too small: {flat}")
+    return (int(flat[0]), int(flat[1]), int(flat[2]))
+
+def _meta_unbatch(meta: Any) -> Dict[str, Any]:
+    """
+    Convert meta produced by DataLoader (dict-of-lists/tuples/tensors) back to a plain dict for B=1.
+    If already a plain dict, returns it. If list of dicts, returns the first.
+    """
+    if isinstance(meta, list):
+        if len(meta) == 0:
+            return {}
+        if isinstance(meta[0], dict):
+            return meta[0]
+        # else fallthrough
+    if not isinstance(meta, dict):
+        return {}
+    out = {}
+    for k, v in meta.items():
+        # unwrap 1-length containers
+        if isinstance(v, (list, tuple)) and len(v) == 1:
+            v = v[0]
+        # convert tensors
+        if isinstance(v, torch.Tensor):
+            v = v.detach().cpu().numpy()
+        out[k] = v
+    # normalize shapes if present
+    if "orig_shape" in out:
+        out["orig_shape"] = _as_int_tuple3(out["orig_shape"])
+    if "cur_shape" in out:
+        out["cur_shape"]  = _as_int_tuple3(out["cur_shape"])
+    return out
+
 
 @torch.no_grad()
 def save_test_volumes(
@@ -666,40 +758,44 @@ def save_test_volumes(
     print(f"Saving test volumes to: {out_dir}  (resample_back_to_t1={resample_back_to_t1})")
 
     for i, batch in enumerate(test_loader):
-        if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
-            # If no meta is provided, create a fallback meta
+        # Unpack and unbatch meta robustly
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            mri, pet, meta = batch
+        else:
             mri, pet = batch
             meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
-        else:
-            mri, pet, meta = batch
+        meta = _meta_unbatch(meta)
 
         sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
         subdir = os.path.join(out_dir, sid)
         os.makedirs(subdir, exist_ok=True)
 
+        # Move through model
         mri_t  = mri.to(device, non_blocking=True)
-        fake_t = G(mri_t)
+        fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
 
         # to numpy [D,H,W]
-        mri_np  = mri_t.squeeze(0).squeeze(0).detach().cpu().numpy()
-        pet_np  = pet.squeeze(0).squeeze(0).detach().cpu().numpy()
+        mri_np  = (mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
+        pet_np  = (pet   if pet.dim()==5   else pet.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
         fake_np = fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
         err_np  = np.abs(fake_np - pet_np)
 
         cur_shape  = tuple(mri_np.shape)
         orig_shape = tuple(meta.get("orig_shape", cur_shape))
-        resized_to = meta.get("resized_to", None)
 
-        if resample_back_to_t1 and orig_shape != cur_shape:
-            # resample volumes back to original T1 grid size
-            zf = (orig_shape[0]/cur_shape[0], orig_shape[1]/cur_shape[1], orig_shape[2]/cur_shape[2])
+        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
+            # compute zoom factors as pure floats
+            zf = (float(orig_shape[0]) / float(cur_shape[0]),
+                  float(orig_shape[1]) / float(cur_shape[1]),
+                  float(orig_shape[2]) / float(cur_shape[2]))
             mri_np  = nd_zoom(mri_np,  zf, order=1)
             pet_np  = nd_zoom(pet_np,  zf, order=1)
             fake_np = nd_zoom(fake_np, zf, order=1)
             err_np  = nd_zoom(err_np,  zf, order=1)
             affine_to_use = meta.get("t1_affine", np.eye(4))
         else:
-            # If we didn't resize during dataset, we can keep original affine; otherwise identity
+            # If we didn't resize during dataset, keep original affine; otherwise identity
+            resized_to = meta.get("resized_to", None)
             if resized_to is None:
                 affine_to_use = meta.get("t1_affine", np.eye(4))
             else:
@@ -762,8 +858,14 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
-        mri0, pet0, meta0 = next(iter(train_loader))
-        print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {meta0['sid']}")
+        sample = next(iter(train_loader))
+        if isinstance(sample, (list, tuple)) and len(sample) == 3:
+            mri0, pet0, meta0 = sample
+            sid0 = meta0.get("sid", "NA") if isinstance(meta0, dict) else "NA"
+        else:
+            mri0, pet0 = sample
+            sid0 = "NA"
+        print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {sid0}")
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
