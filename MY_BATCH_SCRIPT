@@ -10,8 +10,9 @@
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
 
-module load cuda/11.3
-module load cudnn/8.1.1
+module load cuda/12.9
+module load cudnn/9.11.0.98-cuda12
+
 
 . ~/miniconda3/bin/activate
 conda activate pasta
