@@ -78,21 +78,8 @@ LR_D        = 4e-4
 GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 DATA_RANGE  = 1.0
-SEED        = 2024
 
-
-# ----------------------------
-# Utilities: reproducibility
-# ----------------------------
-def seed_everything(seed: int = 0):
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = True
-
-seed_everything(SEED)
+torch.backends.cudnn.benchmark = True
 
 
 # ----------------------------
