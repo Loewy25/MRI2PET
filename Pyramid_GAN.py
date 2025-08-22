@@ -50,7 +50,7 @@ ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
 # >>> Set this per run <<<
-RUN_NAME   = "test"   # e.g., "test", "baseline_256", "2025-08-21_0930"
+RUN_NAME   = "baselinev1"   # e.g., "test", "baseline_256", "2025-08-21_0930"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")  # where we save 3D volumes
@@ -72,7 +72,7 @@ NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
 # Training hyper-params
-EPOCHS      = 3
+EPOCHS      = 150
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
