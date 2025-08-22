@@ -1,29 +1,4 @@
 #!/usr/bin/env python3
-"""
-PA-GAN (Pyramid + Attention GAN) without Task-Induced Discriminator
--------------------------------------------------------------------
-- Generator: U-Net with two pyramid conv blocks (kernels {3,5,7} then {3,5}),
-  three decoder up-blocks (Upsample x2 + Conv3D(3x3) + ReLU + Conv3D(3x3) + ReLU),
-  self-attention module applied at the last up-block, and final 1-channel output.
-- Bottleneck: 2×(3×3×3 conv) followed by a residual stack ×6 (each: 3×3×3, ReLU, 3×3×3, +skip, ReLU).
-- Discriminator (Dstd): 3×3×3 stride-2 conv stack (channels 32,64,128,256,512) + 1ch head + GAP + sigmoid.
-- Loss: L_G = gamma*(L1 + (1-SSIM)) + lambda_gan * BCE(D(G(x)), 1).  D uses BCE on real/fake.
-- Optim: Adam, LR(G)=1e-4, LR(D)=4e-4.
-- Metrics: SSIM, PSNR, MSE, MMD (Gaussian-kernel, voxel subsampling).
-
-Data assumptions:
-- Each subject directory under ROOT contains:
-    T1_masked.nii.gz
-    PET_in_T1_masked.nii.gz
-  (both in FreeSurfer native space, brain-masked and aligned)
-
-Outputs (all under /home/l.peiwang/MRI2PET/<RUN_NAME>/):
-- loss_curves.png
-- training_log.csv
-- checkpoints/best_G.pth, best_D.pth
-- test_metrics.txt
-- volumes/<subject_id>/{MRI.nii.gz,PET_gt.nii.gz,PET_fake.nii.gz,PET_abs_error.nii.gz}
-"""
 
 import os, glob, time, csv
 from math import log10
@@ -49,29 +24,24 @@ import matplotlib.pyplot as plt
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-# >>> Set this per run <<<
-RUN_NAME   = "baselinev1"   # e.g., "test", "baseline_256", "2025-08-21_0930"
+RUN_NAME   = "baselinev1"  
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
-VOL_DIR    = os.path.join(OUT_RUN, "volumes")  # where we save 3D volumes
+VOL_DIR    = os.path.join(OUT_RUN, "volumes")  
 os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
 
-# Keep native FreeSurfer size by default; set to (128,128,128) if you need to save memory.
-RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)  # or None or (76,94,76)
 
-# Save volumes back in original T1 space (True) or model grid (False)
+RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128) 
 RESAMPLE_BACK_TO_T1 = True
 
-# Splits & loader
 TRAIN_FRACTION = 0.70
-VAL_FRACTION   = 0.15  # TEST will be the rest
+VAL_FRACTION   = 0.15 
 BATCH_SIZE     = 1
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
-# Training hyper-params
 EPOCHS      = 150
 LR_G        = 1e-4
 LR_D        = 4e-4
@@ -82,9 +52,7 @@ DATA_RANGE  = 1.0
 torch.backends.cudnn.benchmark = True
 
 
-# ----------------------------
 # Utility: shape alignment
-# ----------------------------
 def _pad_or_crop_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """Center pad/crop x spatially to match ref's D,H,W."""
     _, _, D, H, W = x.shape
@@ -108,9 +76,8 @@ def _pad_or_crop_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return x
 
 
-# ----------------------------
+
 # Dataset & Normalization
-# ----------------------------
 def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     """
     MRI: z-score within mask (no clipping), then per-volume min-max to [0,1] within mask.
@@ -130,6 +97,7 @@ def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     x01 = (z - zmin) / (zmax - zmin + 1e-6)
     x01[~mask] = 0.0
     return x01.astype(np.float32)
+
 
 def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     """
@@ -154,7 +122,7 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]]) -> np.n
     if (Dz, Hy, Wx) == (td, th, tw):
         return vol
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
-    return nd_zoom(vol, zoom_factors, order=1).astype(np.float32)  # trilinear
+    return nd_zoom(vol, zoom_factors, order=1).astype(np.float32) 
 
 
 class KariAV1451Dataset(Dataset):
