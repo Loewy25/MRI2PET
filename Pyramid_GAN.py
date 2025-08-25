@@ -178,11 +178,9 @@ class KariAV1451Dataset(Dataset):
         t1_affine  = t1_img.affine
         pet_affine = pet_img.affine
 
-        # Assure PET on T1 grid; if not, resample PET to T1
         if t1.shape != pet.shape:
-            pet = _maybe_resize(pet, t1.shape)
+            raise TypeError("T1 and PET are not in the same grid)
 
-        # Optional global resize for the model
         t1  = _maybe_resize(t1,  self.resize_to)
         pet = _maybe_resize(pet, self.resize_to)
         cur_shape = tuple(t1.shape)
@@ -238,7 +236,7 @@ def build_loaders(
     batch_size: int = BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     pin_memory: bool = PIN_MEMORY,
-    seed: int = SEED,
+    seed: int = 1999,
 ):
     ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to)
     N = len(ds)
@@ -496,7 +494,7 @@ def train_paggan(
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
                 mri, pet, _ = batch
             else:
-                mri, pet = batch
+                raise ValueError("There is something wrong happened when passing data") 
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
             B = mri.size(0) if mri.dim() == 5 else 1
@@ -621,9 +619,6 @@ def evaluate_paggan(
     }
 
 
-# ----------------------------
-# Helpers for saving test volumes
-# ----------------------------
 def _safe_name(s: str) -> str:
     s = str(s)
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in s)
