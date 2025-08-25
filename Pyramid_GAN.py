@@ -179,7 +179,7 @@ class KariAV1451Dataset(Dataset):
         pet_affine = pet_img.affine
 
         if t1.shape != pet.shape:
-            raise TypeError("T1 and PET are not in the same grid)
+            raise TypeError("T1 and PET are not in the same grid")
 
         t1  = _maybe_resize(t1,  self.resize_to)
         pet = _maybe_resize(pet, self.resize_to)
@@ -760,6 +760,93 @@ def save_test_volumes(
 
 
 # ----------------------------
+# NEW: Combined evaluate + save (single pass)
+# ----------------------------
+@torch.no_grad()
+def evaluate_and_save(
+    G: nn.Module,
+    test_loader: Iterable,
+    device: torch.device,
+    out_dir: str,
+    data_range: float = DATA_RANGE,
+    mmd_voxels: int = 2048,
+    resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
+) -> Dict[str, float]:
+    os.makedirs(out_dir, exist_ok=True)
+    G.to(device)
+    G.eval()
+
+    ssim_sum = 0.0
+    psnr_sum = 0.0
+    mse_sum  = 0.0
+    mmd_sum  = 0.0
+    n = 0
+
+    for i, batch in enumerate(test_loader):
+        # Unpack meta
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            mri, pet, meta = batch
+        else:
+            mri, pet = batch
+            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
+        meta = _meta_unbatch(meta)
+
+        # Move to device and forward once
+        mri_t = mri.to(device, non_blocking=True)
+        pet_t = pet.to(device, non_blocking=True)
+        fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
+
+        # --- Metrics (on tensors) ---
+        pet_for_metric  = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
+        ssim_sum += ssim3d(fake_t, pet_for_metric, data_range=data_range).item()
+        psnr_sum += psnr(fake_t, pet_for_metric, data_range=data_range)
+        mse_sum  += F.mse_loss(fake_t, pet_for_metric).item()
+        mmd_sum  += mmd_gaussian(pet_for_metric, fake_t, num_voxels=mmd_voxels)
+        n += 1
+
+        # --- Saving volumes (reuse same forward) ---
+        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
+        subdir = os.path.join(out_dir, sid)
+        os.makedirs(subdir, exist_ok=True)
+
+        mri_np  = (mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
+        pet_np  = (pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
+        fake_np =  fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
+        err_np  = np.abs(fake_np - pet_np)
+
+        cur_shape  = tuple(mri_np.shape)
+        orig_shape = tuple(meta.get("orig_shape", cur_shape))
+
+        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
+            zf = (float(orig_shape[0]) / float(cur_shape[0]),
+                  float(orig_shape[1]) / float(cur_shape[1]),
+                  float(orig_shape[2]) / float(cur_shape[2]))
+            mri_np  = nd_zoom(mri_np,  zf, order=1)
+            pet_np  = nd_zoom(pet_np,  zf, order=1)
+            fake_np = nd_zoom(fake_np, zf, order=1)
+            err_np  = nd_zoom(err_np,  zf, order=1)
+            affine_to_use = meta.get("t1_affine", np.eye(4))
+        else:
+            resized_to = meta.get("resized_to", None)
+            if resized_to is None:
+                affine_to_use = meta.get("t1_affine", np.eye(4))
+            else:
+                affine_to_use = np.eye(4)
+
+        _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
+        _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
+        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
+        _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
+
+    return {
+        "SSIM": ssim_sum / max(1, n),
+        "PSNR": psnr_sum / max(1, n),
+        "MSE":  mse_sum  / max(1, n),
+        "MMD":  mmd_sum  / max(1, n),
+    }
+
+
+# ----------------------------
 # Plotting & Logging helpers
 # ----------------------------
 def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
@@ -836,8 +923,12 @@ if __name__ == "__main__":
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
-    # Evaluate (metrics)
-    metrics = evaluate_paggan(G, test_loader, device=device, data_range=DATA_RANGE, mmd_voxels=2048)
+    # Evaluate + Save (single pass)
+    metrics = evaluate_and_save(
+        G, test_loader, device=device,
+        out_dir=VOL_DIR, data_range=DATA_RANGE,
+        mmd_voxels=2048, resample_back_to_t1=RESAMPLE_BACK_TO_T1
+    )
     print("Test metrics:", metrics)
 
     metrics_txt = os.path.join(OUT_RUN, "test_metrics.txt")
@@ -845,8 +936,4 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
-
-    # Save 3D volumes for test subjects
-    save_test_volumes(G, test_loader, device=device, out_dir=VOL_DIR, resample_back_to_t1=RESAMPLE_BACK_TO_T1)
-
 
