@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "test2"
+RUN_NAME   = "baselinev2_ssim_new-normalization_brainmask"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -42,7 +42,7 @@ BATCH_SIZE     = 1
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
-EPOCHS      = 3
+EPOCHS      = 150
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
