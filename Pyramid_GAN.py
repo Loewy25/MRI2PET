@@ -179,8 +179,8 @@ class KariAV1451Dataset(Dataset):
         if t1.shape != pet.shape:
             raise TypeError("T1 and PET are not in the same grid")
 
-        # <<< CHANGED: MRI cubic (3), PET linear (1) >>>
-        t1  = _maybe_resize(t1,  self.resize_to, order=3)
+
+        t1  = _maybe_resize(t1,  self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
 
