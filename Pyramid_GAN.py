@@ -49,8 +49,7 @@ GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
 # <<< CHANGED: use a fixed dataset-wide SUVR range for PSNR/SSIM/MS-SSIM >>>
-DATA_RANGE  = 3.5   # e.g., 0–3.5 SUVR; adjust to your dataset-wide fixed range
-
+DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 
 
@@ -118,8 +117,7 @@ def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     """
     x = vol.astype(np.float32)
     if mask is None:
-        # fallback: treat non-zero as brain for zeroing outside
-        mask = (x != 0)
+        raise TypeError("No Mask")
     x_out = x.copy()
     x_out[~mask] = 0.0
     return x_out.astype(np.float32)
