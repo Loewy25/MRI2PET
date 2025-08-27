@@ -99,7 +99,7 @@ def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     """
     x = vol.astype(np.float32)
     if mask is None:
-        mask = (x != 0)
+        raise TypeError("no mask")
     vals = x[mask]
     if vals.size == 0:
         return np.zeros_like(x, dtype=np.float32)
