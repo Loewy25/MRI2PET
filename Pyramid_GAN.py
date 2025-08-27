@@ -170,7 +170,7 @@ class KariAV1451Dataset(Dataset):
         if mask_path is not None:
             m_img = nib.load(mask_path); mask = (np.asarray(m_img.get_fdata()) > 0)
         else:
-            mask = (t1 != 0)
+            raise TypeError("No Mask")
 
         orig_shape = tuple(t1.shape)
         t1_affine  = t1_img.affine
