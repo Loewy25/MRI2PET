@@ -1,8 +1,8 @@
 #!/bin/bash
 
-#SBATCH --job-name=brain_mask
+#SBATCH --job-name=pyramaid
 #SBATCH --mem=10G
-#SBATCH -t 0:50:00
+#SBATCH -t 16:50:00
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
