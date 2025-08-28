@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "baselinev2_ssim_new-normalization_brainmask_larger"
+RUN_NAME   = "baselinev2_ssim_new-normalization_brainmask_debugged"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -391,7 +391,7 @@ class StandardDiscriminator(nn.Module):
         x = self.features(x)
         x = self.head(x)
         x = F.adaptive_avg_pool3d(x, 1).view(x.size(0), -1)
-        return torch.sigmoid(x)
+        return x  # logits (no sigmoid)
 
 
 # ----------------------------
@@ -432,7 +432,10 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
         C1 = (k1 * data_range) ** 2
         C2 = (k2 * data_range) ** 2
         ssim_map = ((2*mu_a*mu_b + C1)*(2*sigma_ab + C2)) / ((mu_a**2 + mu_b**2 + C1)*(sigma_a + sigma_b + C2) + 1e-8)
-        return ssim_map.mean()
+        ssim_mean = ssim_map.mean()
+        # Map from [-1,1] to (0,1], clamp to avoid log(0)
+        ssim_01 = torch.clamp((ssim_mean + 1.0) * 0.5, min=1e-6, max=1.0)
+        return ssim_01
 
     ws = torch.tensor(weights[:levels], device=x.device, dtype=x.dtype)
     ws = ws / ws.sum()
@@ -444,9 +447,9 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
         if l < levels - 1:
             a = F.avg_pool3d(a, kernel_size=2, stride=2, padding=0)
             b = F.avg_pool3d(b, kernel_size=2, stride=2, padding=0)
-    vals = torch.stack(vals)
-    # product of powers (weighted by ws)
-    ms = torch.prod(vals ** ws)
+    vals_t = torch.stack(vals)  # values in (0,1]
+    # stable weighted product in log-space
+    ms = torch.exp(torch.sum(ws * torch.log(vals_t)))
     return ms
 
 def l1_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -527,7 +530,7 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
-    bce = nn.BCELoss()
+    bce = nn.BCEWithLogitsLoss()
 
     best_val = float('inf')
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -1013,3 +1016,4 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
