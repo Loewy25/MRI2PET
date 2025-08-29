@@ -49,7 +49,7 @@ LAMBDA_GAN  = 0.5
 
 # Keep your existing DATA_RANGE as-is to isolate normalization effect.
 # If you want numerically correct PSNR/SSIM for [0,1] data, set DATA_RANGE = 1.0.
-DATA_RANGE  = 3.5
+DATA_RANGE  = 1
 
 torch.backends.cudnn.benchmark = True
 
