@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=pyramaid
+#SBATCH --job-name=pyramaid_full
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
@@ -19,7 +19,7 @@ conda activate pasta
 
 
 
-python Py_nor.py
+python Py_full.py
 
 
 
