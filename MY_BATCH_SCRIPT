@@ -19,7 +19,7 @@ conda activate pasta
 
 
 
-python Py_nor.py
+python Py_ssim.py
 
 
 
