@@ -19,7 +19,7 @@ conda activate pasta
 
 
 
-python Pyramid_GAN.py
+python Py_nor.py
 
 
 
