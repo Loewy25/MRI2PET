@@ -24,14 +24,13 @@ import matplotlib.pyplot as plt
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "test2_ssim"
+RUN_NAME   = "baselinev2_ssim_new-normalization_brainmask_debugged"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
 os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
-
 
 RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)
 RESAMPLE_BACK_TO_T1 = True
@@ -48,12 +47,14 @@ LR_D        = 4e-4
 GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
-# Keep fixed SUVR range as in your current code
+# Keep same as your "bad-result new code" to isolate the two changes.
 DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 
 
+# ----------------------------
 # Utility: shape alignment
+# ----------------------------
 def _pad_or_crop_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     """Center pad/crop x spatially to match ref's D,H,W."""
     _, _, D, H, W = x.shape
@@ -80,7 +81,6 @@ def _pad_or_crop_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 # ----------------------------
 # Dataset & Normalization
 # ----------------------------
-
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
     if target is None:
         return vol.astype(np.float32)
@@ -91,35 +91,51 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: 
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
     return nd_zoom(vol, zoom_factors, order=order).astype(np.float32)
 
-# MRI: per-subject z-score in brain mask (NO min-max); outside-mask = 0
+# === REVERTED NORMALIZATION (old good version) ===
 def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
+    """
+    MRI: per-subject z-score within brain mask, then per-volume min–max to [0,1] (within mask).
+    Outside-mask voxels set to 0.
+    """
     x = vol.astype(np.float32)
     if mask is None:
         raise TypeError("no mask")
     vals = x[mask]
     if vals.size == 0:
         return np.zeros_like(x, dtype=np.float32)
+
     mean = float(vals.mean())
     std  = float(vals.std() + 1e-6)
     z = (x - mean) / std
-    z[~mask] = 0.0
-    return z.astype(np.float32)
 
-# PET: keep SUVR values (identity); outside-mask = 0
+    z_mask = z[mask]
+    zmin, zmax = float(z_mask.min()), float(z_mask.max())
+    out = (z - zmin) / (zmax - zmin + 1e-6)
+    out[~mask] = 0.0
+    return out.astype(np.float32)
+
 def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
+    """
+    PET: per-volume min–max to [0,1] within brain mask; outside-mask voxels set to 0.
+    """
     x = vol.astype(np.float32)
     if mask is None:
         raise TypeError("No Mask")
-    x_out = x.copy()
-    x_out[~mask] = 0.0
-    return x_out.astype(np.float32)
+    vals = x[mask]
+    if vals.size == 0:
+        return np.zeros_like(x, dtype=np.float32)
+    vmin, vmax = float(vals.min()), float(vals.max())
+    out = (x - vmin) / (vmax - vmin + 1e-6)
+    out[~mask] = 0.0
+    return out.astype(np.float32)
+# ================================================
 
 
 class KariAV1451Dataset(Dataset):
     """
     Loads pairs (T1_masked.nii.gz, PET_in_T1_masked.nii.gz) from AV1451 subject folders,
     normalizes, optional resize, returns (MRI, PET, meta) where MRI/PET are FloatTensors [1,D,H,W].
-    Uses aseg_brainmask.nii.gz if available for masking; otherwise T1>0 as mask.
+    Uses aseg_brainmask.nii.gz if available for masking; otherwise raises if mask missing.
     """
     def __init__(
         self,
@@ -181,6 +197,7 @@ class KariAV1451Dataset(Dataset):
             if (Dz,Hy,Wx) != (td,th,tw):
                 mask = nd_zoom(mask.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5
 
+        # Reverted normalization
         t1n  = norm_mri_to_01(t1,  mask)
         petn = norm_pet_to_01(pet, mask=mask)
 
@@ -206,10 +223,6 @@ class KariAV1451Dataset(Dataset):
 # DataLoader collate (avoid meta collation for B=1)
 # ----------------------------
 def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
-    """
-    For BATCH_SIZE=1 returns the single (mri, pet, meta) sample unchanged.
-    For B>1, stacks mri/pet and returns meta as a list of dicts.
-    """
     if len(batch) == 1:
         return batch[0]
     mri = torch.stack([b[0] for b in batch], dim=0)
@@ -380,7 +393,7 @@ class StandardDiscriminator(nn.Module):
         x = self.features(x)
         x = self.head(x)
         x = F.adaptive_avg_pool3d(x, 1).view(x.size(0), -1)
-        return x  # logits (no sigmoid)
+        return x  # logits (no sigmoid, used with BCEWithLogitsLoss)
 
 
 # ----------------------------
@@ -403,12 +416,12 @@ def ssim3d(x: torch.Tensor, y: torch.Tensor, ksize: int = 3,
     ssim_map = ssim_n / (ssim_d + 1e-8)
     return ssim_map.mean()
 
-# MS-SSIM function retained (unused) to minimize change surface
+# (kept here but unused after reverting to SSIM)
 def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
               ksize: int = 11, levels: int = 4,
               weights: Tuple[float, ...] = (0.0448, 0.2856, 0.3001, 0.2363, 0.1333)) -> torch.Tensor:
-    pad = ksize // 2
     def _ssim3d_local(a, b):
+        pad = ksize // 2
         mu_a = F.avg_pool3d(a, ksize, stride=1, padding=pad)
         mu_b = F.avg_pool3d(b, ksize, stride=1, padding=pad)
         sigma_a = F.avg_pool3d(a*a, ksize, stride=1, padding=pad) - mu_a**2
@@ -421,8 +434,10 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
         ssim_mean = ssim_map.mean()
         ssim_01 = torch.clamp((ssim_mean + 1.0) * 0.5, min=1e-6, max=1.0)
         return ssim_01
+
     ws = torch.tensor(weights[:levels], device=x.device, dtype=x.dtype)
     ws = ws / ws.sum()
+
     vals = []
     a, b = x, y
     for l in range(levels):
@@ -549,10 +564,9 @@ def train_paggan(
             fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
             out_fake_for_G = D(fake)
             loss_gan = bce(out_fake_for_G, real_lbl)
-            loss_l1  = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-            # CHANGED: SSIM (not MS-SSIM)
-            ssim_val = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                              data_range=data_range)
+            loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
+            # <<< REVERTED to SSIM >>>
+            ssim_val = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range)
             loss_G = gamma * (loss_l1 + (1.0 - ssim_val)) + lambda_gan * loss_gan
             loss_G.backward()
             opt_G.step()
@@ -580,14 +594,14 @@ def train_paggan(
                     pet = pet.to(device, non_blocking=True)
                     fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
                     loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-                    # CHANGED: SSIM for validation
-                    ssim_v  = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                                     data_range=data_range)
+                    # <<< REVERTED to SSIM >>>
+                    ssim_v  = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0), data_range=data_range)
                     val_recon += (loss_l1 + (1.0 - ssim_v)).item()
                     v_batches += 1
             val_recon /= max(1, v_batches)
             hist["val_recon"].append(val_recon)
 
+            # Save best
             if val_recon < best_val:
                 best_val = val_recon
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
@@ -599,13 +613,14 @@ def train_paggan(
                 dt = time.time() - t0
                 print(f"Epoch [{epoch:03d}/{epochs}]  "
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                      f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
+                      f"ValRecon(L1 + 1-MS-SSIM): {val_recon:.4f}  "  # (string kept the same)
                       f"| best {best_val:.4f}  | {dt:.1f}s")
             G.train()
         elif verbose:
             dt = time.time() - t0
             print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
 
+    # restore best weights
     if best_G is not None:
         G.load_state_dict(best_G)
     if best_D is not None:
@@ -632,6 +647,7 @@ def evaluate_paggan(
     n = 0
 
     for batch in test_loader:
+        # support (mri, pet, meta) or (mri, pet)
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
             mri, pet, meta = batch
         else:
@@ -643,7 +659,7 @@ def evaluate_paggan(
 
         pet_for_metric  = pet if pet.dim()==5 else pet.unsqueeze(0)
 
-        # masked metrics
+        # keep masked metrics behavior (unchanged)
         brain_mask_np = meta.get("brain_mask", None) if isinstance(meta, dict) else None
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
@@ -653,7 +669,7 @@ def evaluate_paggan(
         fake_m = fake * brain
         pet_m  = pet_for_metric * brain
 
-        # CHANGED: SSIM (not MS-SSIM)
+        # <<< REVERTED to SSIM >>>
         ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
         psnr_sum += psnr(fake_m, pet_m, data_range=data_range)
         mse_sum  += F.mse_loss(fake_m, pet_m).item()
@@ -677,11 +693,6 @@ def _save_nifti(vol: np.ndarray, affine: np.ndarray, path: str):
     nib.save(img, path)
 
 def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Tensor]) -> Tuple[int,int,int]:
-    """
-    Normalize various collated representations to a plain (D,H,W) of ints.
-    Handles: (D,H,W), [D,H,W], np arrays, torch tensors, and
-    collate artifacts like (tensor([D]), tensor([H]), tensor([W])) or tensor([[D,H,W]]).
-    """
     if isinstance(x, (list, tuple)) and len(x) == 1:
         x = x[0]
     if isinstance(x, (list, tuple)):
@@ -709,10 +720,6 @@ def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Ten
     return (int(flat[0]), int(flat[1]), int(flat[2]))
 
 def _meta_unbatch(meta: Any) -> Dict[str, Any]:
-    """
-    Convert meta produced by DataLoader (dict-of-lists/tuples/tensors) back to a plain dict for B=1.
-    If already a plain dict, returns it. If list of dicts, returns the first.
-    """
     if isinstance(meta, list):
         if len(meta) == 0:
             return {}
@@ -823,6 +830,8 @@ def evaluate_and_save(
     mmd_sum  = 0.0
     n = 0
 
+    print(f"Evaluating & saving to: {out_dir} (masked metrics, SSIM)")
+
     for i, batch in enumerate(test_loader):
         # Unpack meta
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -832,14 +841,13 @@ def evaluate_and_save(
             meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
         meta = _meta_unbatch(meta)
 
-        # Move to device and forward once
+        # Forward once
         mri_t = mri.to(device, non_blocking=True)
         pet_t = pet.to(device, non_blocking=True)
         fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
-
         pet_for_metric  = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
 
-        # masked metrics
+        # Masked metrics (unchanged behavior)
         brain_mask_np = meta.get("brain_mask", None)
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
@@ -849,7 +857,7 @@ def evaluate_and_save(
         fake_m = fake_t * brain
         pet_m  = pet_for_metric * brain
 
-        # CHANGED: SSIM (not MS-SSIM)
+        # <<< REVERTED to SSIM >>>
         ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
         psnr_sum += psnr(fake_m,  pet_m, data_range=data_range)
         mse_sum  += F.mse_loss(fake_m, pet_m).item()
@@ -908,7 +916,7 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     if "train_D" in history:
         plt.plot(history["train_D"], label="Train D")
     if "val_recon" in history and len(history["val_recon"]) > 0:
-        plt.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
+        plt.plot(history["val_recon"], label="Val (L1 + 1-MS-SSIM)")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training / Validation Losses")
@@ -988,6 +996,4 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
-
-
 
