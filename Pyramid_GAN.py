@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "baselinev2_ssim_new-normalization_brainmask_debugged"
+RUN_NAME   = "test2_ssim"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -48,7 +48,7 @@ LR_D        = 4e-4
 GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
-# <<< CHANGED: use a fixed dataset-wide SUVR range for PSNR/SSIM/MS-SSIM >>>
+# Keep fixed SUVR range as in your current code
 DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 
@@ -81,7 +81,6 @@ def _pad_or_crop_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 # Dataset & Normalization
 # ----------------------------
 
-# <<< CHANGED: allow choosing interpolation order >>>
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
     if target is None:
         return vol.astype(np.float32)
@@ -92,29 +91,22 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: 
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
     return nd_zoom(vol, zoom_factors, order=order).astype(np.float32)
 
-# <<< CHANGED: MRI normalization = per-subject z-score in brain mask (no min-max) >>>
+# MRI: per-subject z-score in brain mask (NO min-max); outside-mask = 0
 def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
-    """
-    MRI: per-subject z-score within brain mask (no min-max). Outside-mask voxels set to 0.
-    """
     x = vol.astype(np.float32)
     if mask is None:
         raise TypeError("no mask")
     vals = x[mask]
     if vals.size == 0:
         return np.zeros_like(x, dtype=np.float32)
-
     mean = float(vals.mean())
     std  = float(vals.std() + 1e-6)
     z = (x - mean) / std
     z[~mask] = 0.0
     return z.astype(np.float32)
 
-# <<< CHANGED: PET kept in SUVR (identity); zero outside mask >>>
+# PET: keep SUVR values (identity); outside-mask = 0
 def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
-    """
-    PET: keep SUVR values (no per-subject scaling). Outside-mask voxels set to 0.
-    """
     x = vol.astype(np.float32)
     if mask is None:
         raise TypeError("No Mask")
@@ -179,7 +171,6 @@ class KariAV1451Dataset(Dataset):
         if t1.shape != pet.shape:
             raise TypeError("T1 and PET are not in the same grid")
 
-
         t1  = _maybe_resize(t1,  self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
@@ -190,7 +181,6 @@ class KariAV1451Dataset(Dataset):
             if (Dz,Hy,Wx) != (td,th,tw):
                 mask = nd_zoom(mask.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5
 
-        # <<< CHANGED: Normalize (MRI z-score; PET SUVR identity); keep zeros outside >>>
         t1n  = norm_mri_to_01(t1,  mask)
         petn = norm_pet_to_01(pet, mask=mask)
 
@@ -207,7 +197,6 @@ class KariAV1451Dataset(Dataset):
             "orig_shape": orig_shape,
             "cur_shape": cur_shape,
             "resized_to": self.resize_to,
-            # <<< CHANGED: pass brain mask for masked metrics >>>
             "brain_mask": mask.astype(np.uint8) if mask is not None else None,
         }
         return t1n_t, petn_t, meta
@@ -414,15 +403,12 @@ def ssim3d(x: torch.Tensor, y: torch.Tensor, ksize: int = 3,
     ssim_map = ssim_n / (ssim_d + 1e-8)
     return ssim_map.mean()
 
-# <<< NEW: 3D MS-SSIM (used for loss and eval) >>>
+# MS-SSIM function retained (unused) to minimize change surface
 def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
               ksize: int = 11, levels: int = 4,
               weights: Tuple[float, ...] = (0.0448, 0.2856, 0.3001, 0.2363, 0.1333)) -> torch.Tensor:
-    """
-    3D Multi-Scale SSIM. x,y: [B,1,D,H,W], intensities in the same scale.
-    """
+    pad = ksize // 2
     def _ssim3d_local(a, b):
-        pad = ksize // 2
         mu_a = F.avg_pool3d(a, ksize, stride=1, padding=pad)
         mu_b = F.avg_pool3d(b, ksize, stride=1, padding=pad)
         sigma_a = F.avg_pool3d(a*a, ksize, stride=1, padding=pad) - mu_a**2
@@ -433,13 +419,10 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
         C2 = (k2 * data_range) ** 2
         ssim_map = ((2*mu_a*mu_b + C1)*(2*sigma_ab + C2)) / ((mu_a**2 + mu_b**2 + C1)*(sigma_a + sigma_b + C2) + 1e-8)
         ssim_mean = ssim_map.mean()
-        # Map from [-1,1] to (0,1], clamp to avoid log(0)
         ssim_01 = torch.clamp((ssim_mean + 1.0) * 0.5, min=1e-6, max=1.0)
         return ssim_01
-
     ws = torch.tensor(weights[:levels], device=x.device, dtype=x.dtype)
     ws = ws / ws.sum()
-
     vals = []
     a, b = x, y
     for l in range(levels):
@@ -447,8 +430,7 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
         if l < levels - 1:
             a = F.avg_pool3d(a, kernel_size=2, stride=2, padding=0)
             b = F.avg_pool3d(b, kernel_size=2, stride=2, padding=0)
-    vals_t = torch.stack(vals)  # values in (0,1]
-    # stable weighted product in log-space
+    vals_t = torch.stack(vals)
     ms = torch.exp(torch.sum(ws * torch.log(vals_t)))
     return ms
 
@@ -465,7 +447,6 @@ def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> float:
         return float('inf')
     return 10.0 * log10((data_range ** 2) / mse)
 
-# <<< CHANGED: MMD supports optional mask; samples only brain voxels if mask provided >>>
 @torch.no_grad()
 def mmd_gaussian(real: torch.Tensor,
                  fake: torch.Tensor,
@@ -568,11 +549,11 @@ def train_paggan(
             fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
             out_fake_for_G = D(fake)
             loss_gan = bce(out_fake_for_G, real_lbl)
-            loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-            # <<< CHANGED: use MS-SSIM for the perceptual term >>>
-            ms_val = ms_ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                               data_range=data_range, ksize=11, levels=4)
-            loss_G = gamma * (loss_l1 + (1.0 - ms_val)) + lambda_gan * loss_gan
+            loss_l1  = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
+            # CHANGED: SSIM (not MS-SSIM)
+            ssim_val = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
+                              data_range=data_range)
+            loss_G = gamma * (loss_l1 + (1.0 - ssim_val)) + lambda_gan * loss_gan
             loss_G.backward()
             opt_G.step()
 
@@ -599,14 +580,14 @@ def train_paggan(
                     pet = pet.to(device, non_blocking=True)
                     fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
                     loss_l1 = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-                    ms_v  = ms_ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                                      data_range=data_range, ksize=11, levels=4)
-                    val_recon += (loss_l1 + (1.0 - ms_v)).item()
+                    # CHANGED: SSIM for validation
+                    ssim_v  = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
+                                     data_range=data_range)
+                    val_recon += (loss_l1 + (1.0 - ssim_v)).item()
                     v_batches += 1
             val_recon /= max(1, v_batches)
             hist["val_recon"].append(val_recon)
 
-            # Save best
             if val_recon < best_val:
                 best_val = val_recon
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
@@ -618,14 +599,13 @@ def train_paggan(
                 dt = time.time() - t0
                 print(f"Epoch [{epoch:03d}/{epochs}]  "
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                      f"ValRecon(L1 + 1-MS-SSIM): {val_recon:.4f}  "
+                      f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                       f"| best {best_val:.4f}  | {dt:.1f}s")
             G.train()
         elif verbose:
             dt = time.time() - t0
             print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
 
-    # restore best weights
     if best_G is not None:
         G.load_state_dict(best_G)
     if best_D is not None:
@@ -645,14 +625,13 @@ def evaluate_paggan(
     G.to(device)
     G.eval()
 
-    msssim_sum = 0.0
+    ssim_sum = 0.0
     psnr_sum = 0.0
     mse_sum = 0.0
     mmd_sum = 0.0
     n = 0
 
     for batch in test_loader:
-        # support (mri, pet, meta) or (mri, pet)
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
             mri, pet, meta = batch
         else:
@@ -664,7 +643,7 @@ def evaluate_paggan(
 
         pet_for_metric  = pet if pet.dim()==5 else pet.unsqueeze(0)
 
-        # <<< CHANGED: masked metrics (use aseg mask if available) >>>
+        # masked metrics
         brain_mask_np = meta.get("brain_mask", None) if isinstance(meta, dict) else None
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
@@ -674,17 +653,18 @@ def evaluate_paggan(
         fake_m = fake * brain
         pet_m  = pet_for_metric * brain
 
-        msssim_sum += ms_ssim3d(fake_m, pet_m, data_range=data_range, ksize=11, levels=4).item()
-        psnr_sum   += psnr(fake_m,  pet_m, data_range=data_range)
-        mse_sum    += F.mse_loss(fake_m, pet_m).item()
-        mmd_sum    += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
+        # CHANGED: SSIM (not MS-SSIM)
+        ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
+        psnr_sum += psnr(fake_m, pet_m, data_range=data_range)
+        mse_sum  += F.mse_loss(fake_m, pet_m).item()
+        mmd_sum  += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
         n += 1
 
     return {
-        "MS-SSIM": msssim_sum / max(1, n),
-        "PSNR":    psnr_sum   / max(1, n),
-        "MSE":     mse_sum    / max(1, n),
-        "MMD":     mmd_sum    / max(1, n),
+        "SSIM": ssim_sum / max(1, n),
+        "PSNR": psnr_sum / max(1, n),
+        "MSE":  mse_sum  / max(1, n),
+        "MMD":  mmd_sum  / max(1, n),
     }
 
 
@@ -702,10 +682,8 @@ def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Ten
     Handles: (D,H,W), [D,H,W], np arrays, torch tensors, and
     collate artifacts like (tensor([D]), tensor([H]), tensor([W])) or tensor([[D,H,W]]).
     """
-    # Unwrap lists/tuples of length 1 that hold tensors/arrays
     if isinstance(x, (list, tuple)) and len(x) == 1:
         x = x[0]
-    # If it's a list/tuple of scalars or 0/1-d tensors
     if isinstance(x, (list, tuple)):
         vals = []
         for v in x:
@@ -716,15 +694,13 @@ def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Ten
         if len(vals) >= 3:
             return (vals[0], vals[1], vals[2])
         raise ValueError(f"orig/cur shape has unexpected length: {vals}")
-    # If it's a tensor/ndarray
     if isinstance(x, torch.Tensor):
         arr = x.detach().cpu().numpy()
     elif isinstance(x, np.ndarray):
         arr = x
     else:
-        # Single scalar?
         try:
-            return tuple(int(t) for t in x)  # may raise
+            return tuple(int(t) for t in x)
         except Exception:
             raise ValueError(f"Cannot parse shape from type: {type(x)}")
     flat = np.array(arr).astype(np.int64).reshape(-1)
@@ -742,19 +718,15 @@ def _meta_unbatch(meta: Any) -> Dict[str, Any]:
             return {}
         if isinstance(meta[0], dict):
             return meta[0]
-        # else fallthrough
     if not isinstance(meta, dict):
         return {}
     out = {}
     for k, v in meta.items():
-        # unwrap 1-length containers
         if isinstance(v, (list, tuple)) and len(v) == 1:
             v = v[0]
-        # convert tensors
         if isinstance(v, torch.Tensor):
             v = v.detach().cpu().numpy()
         out[k] = v
-    # normalize shapes if present
     if "orig_shape" in out:
         out["orig_shape"] = _as_int_tuple3(out["orig_shape"])
     if "cur_shape" in out:
@@ -829,7 +801,7 @@ def save_test_volumes(
 
 
 # ----------------------------
-# NEW: Combined evaluate + save (single pass)
+# Combined evaluate + save (single pass)
 # ----------------------------
 @torch.no_grad()
 def evaluate_and_save(
@@ -845,7 +817,7 @@ def evaluate_and_save(
     G.to(device)
     G.eval()
 
-    msssim_sum = 0.0
+    ssim_sum = 0.0
     psnr_sum = 0.0
     mse_sum  = 0.0
     mmd_sum  = 0.0
@@ -867,7 +839,7 @@ def evaluate_and_save(
 
         pet_for_metric  = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
 
-        # <<< CHANGED: masked metrics >>>
+        # masked metrics
         brain_mask_np = meta.get("brain_mask", None)
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
@@ -877,11 +849,11 @@ def evaluate_and_save(
         fake_m = fake_t * brain
         pet_m  = pet_for_metric * brain
 
-        # --- Metrics (masked) ---
-        msssim_sum += ms_ssim3d(fake_m, pet_m, data_range=data_range, ksize=11, levels=4).item()
-        psnr_sum   += psnr(fake_m,  pet_m, data_range=data_range)
-        mse_sum    += F.mse_loss(fake_m, pet_m).item()
-        mmd_sum    += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
+        # CHANGED: SSIM (not MS-SSIM)
+        ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
+        psnr_sum += psnr(fake_m,  pet_m, data_range=data_range)
+        mse_sum  += F.mse_loss(fake_m, pet_m).item()
+        mmd_sum  += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
         n += 1
 
         # --- Saving volumes (reuse same forward) ---
@@ -919,10 +891,10 @@ def evaluate_and_save(
         _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
 
     return {
-        "MS-SSIM": msssim_sum / max(1, n),
-        "PSNR":    psnr_sum   / max(1, n),
-        "MSE":     mse_sum    / max(1, n),
-        "MMD":     mmd_sum    / max(1, n),
+        "SSIM": ssim_sum / max(1, n),
+        "PSNR": psnr_sum / max(1, n),
+        "MSE":  mse_sum  / max(1, n),
+        "MMD":  mmd_sum  / max(1, n),
     }
 
 
@@ -936,7 +908,7 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     if "train_D" in history:
         plt.plot(history["train_D"], label="Train D")
     if "val_recon" in history and len(history["val_recon"]) > 0:
-        plt.plot(history["val_recon"], label="Val (L1 + 1-MS-SSIM)")
+        plt.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training / Validation Losses")
@@ -1016,5 +988,6 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
 
 
