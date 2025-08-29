@@ -298,7 +298,7 @@ class SelfAttention3D(nn.Module):
         return self.sigmoid(a)
 
 class PyramidConvBlock(nn.Module):
-    def ____(self, in_ch: int, out_ch_each: int, kernel_sizes=(3, 5, 7)):
+    def __init__(self, in_ch: int, out_ch_each: int, kernel_sizes=(3, 5, 7)):
         super().__init__()
         paths = []
         for k in kernel_sizes:
@@ -314,6 +314,7 @@ class PyramidConvBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         outs = [p(x) for p in self.paths]
         return torch.cat(outs, dim=1)
+
 
 def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
     return nn.Sequential(
