@@ -54,26 +54,38 @@ def train_paggan(
             fake_lbl = torch.zeros(B, 1, device=device)
 
             # ---- Update D ----
+            mri5 = mri if mri.dim()==5 else mri.unsqueeze(0)
+            pet5 = pet if pet.dim()==5 else pet.unsqueeze(0)
+
             with torch.no_grad():
-                fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
+                fake = G(mri5)
+
             D.zero_grad(set_to_none=True)
-            out_real = D(pet if pet.dim()==5 else pet.unsqueeze(0))
-            out_fake = D(fake.detach())
-            loss_D = bce(out_real, real_lbl) + bce(out_fake, fake_lbl)
+            pair_real = torch.cat([mri5, pet5], dim=1)           # [B,2,...]
+            pair_fake = torch.cat([mri5, fake.detach()], dim=1)  # [B,2,...]
+
+            out_real = D(pair_real)   # [B,1,d,h,w]
+            out_fake = D(pair_fake)   # [B,1,d,h,w]
+
+            loss_D = bce(out_real, torch.ones_like(out_real)) + \
+                     bce(out_fake, torch.zeros_like(out_fake))
             loss_D.backward()
             opt_D.step()
 
+
             # ---- Update G ----
+
             G.zero_grad(set_to_none=True)
-            fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
-            out_fake_for_G = D(fake)
-            loss_gan = bce(out_fake_for_G, real_lbl)
-            loss_l1  = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-            ssim_val = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                              data_range=data_range)
+            fake = G(mri5)
+            out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
+            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+
+            loss_l1  = l1_loss(fake, pet5)
+            ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_G = gamma * (loss_l1 + (1.0 - ssim_val)) + lambda_gan * loss_gan
             loss_G.backward()
             opt_G.step()
+
 
             g_running += loss_G.item()
             d_running += loss_D.item()
