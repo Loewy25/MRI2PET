@@ -34,7 +34,8 @@ if __name__ == "__main__":
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
-    D = StandardDiscriminator(in_ch=1)
+    D = CondPatchDiscriminator3D(in_ch=2)
+
 
     # Train
     out = train_paggan(
