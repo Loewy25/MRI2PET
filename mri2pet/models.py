@@ -110,22 +110,26 @@ class Generator(nn.Module):
         gate = self.att(u3)
         return self.out_conv(gate * u3)
 
-class StandardDiscriminator(nn.Module):
-    def __init__(self, in_ch: int = 1):
+class CondPatchDiscriminator3D(nn.Module):
+    """
+    Conditional 3D PatchGAN: input is [B, 2, D, H, W] = concat(MRI, PET).
+    Outputs patch logits [B, 1, d, h, w] (no global pooling).
+    """
+    def __init__(self, in_ch: int = 2):  # MRI+PET
         super().__init__()
-        feats = []
+        layers = []
         prev = in_ch
         for c in [32, 64, 128, 256, 512]:
-            feats += [
+            layers += [
                 nn.Conv3d(prev, c, kernel_size=3, stride=2, padding=1, bias=True),
                 nn.LeakyReLU(0.2, inplace=True),
             ]
             prev = c
-        self.features = nn.Sequential(*feats)
-        self.head = nn.Conv3d(prev, 1, kernel_size=3, padding=1, bias=True)
+        self.features = nn.Sequential(*layers)
+        self.head = nn.Conv3d(prev, 1, kernel_size=3, padding=1, bias=True)  # patch logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.head(x)
-        x = F.adaptive_avg_pool3d(x, 1).view(x.size(0), -1)
-        return x  # logits (no sigmoid)
+        # x: [B, 2, D, H, W]
+        f = self.features(x)          # [B, C, d, h, w]
+        s = self.head(f)              # [B, 1, d, h, w]
+        return s                      # logits (no sigmoid)
