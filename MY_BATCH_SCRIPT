@@ -19,7 +19,7 @@ conda activate pasta
 
 
 
-python Py_full.py
+python main.py
 
 
 
