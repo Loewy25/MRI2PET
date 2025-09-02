@@ -30,7 +30,7 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
-    bce = nn.BCEWithLogitsLoss()
+    #bce = nn.BCEWithLogitsLoss()
 
     best_val = float('inf')
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -67,8 +67,9 @@ def train_paggan(
             out_real = D(pair_real)   # [B,1,d,h,w]
             out_fake = D(pair_fake)   # [B,1,d,h,w]
 
-            loss_D = bce(out_real, torch.ones_like(out_real)) + \
-                     bce(out_fake, torch.zeros_like(out_fake))
+            # D wants: out_real > 1, out_fake < -1
+            loss_D = (F.relu(1 - out_real)).mean() + (F.relu(1 + out_fake)).mean()
+
             loss_D.backward()
             opt_D.step()
 
@@ -78,7 +79,8 @@ def train_paggan(
             G.zero_grad(set_to_none=True)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            # G wants to maximize out_fake, i.e. fool D
+            loss_gan = - out_fake_for_G.mean()
 
             loss_l1  = l1_loss(fake, pet5)
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
