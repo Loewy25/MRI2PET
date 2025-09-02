@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "test_better strcture"
+RUN_NAME   = "test_better_strcture"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
