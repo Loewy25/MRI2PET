@@ -13,6 +13,8 @@ from .config import (
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 
+
+
 def train_paggan(
     G: nn.Module,
     D: nn.Module,
@@ -31,6 +33,13 @@ def train_paggan(
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     bce = nn.BCEWithLogitsLoss()
+
+    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
+    lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
+    ema_beta = 0.9                # EMA smoothing for B=1 noise
+    LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
+    EPS = 1e-8
+    TRUST_TAU = 0.5               # trust-region: max 50% change per step
 
     best_val = float('inf')
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -70,21 +79,74 @@ def train_paggan(
             loss_D = bce(out_real, torch.ones_like(out_real)) + \
                      bce(out_fake, torch.zeros_like(out_fake))
             loss_D.backward()
+            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)  # <— clip D
             opt_D.step()
+
 
 
             # ---- Update G ----
 
+            # ---- Update G (with Global Gradient‑Ratio Controller for lambda_g) ----
             G.zero_grad(set_to_none=True)
+
+            # forward
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
 
-            loss_l1  = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)
-            loss_G = gamma * (loss_l1 + (1.0 - ssim_val)) + lambda_gan * loss_gan
+            # losses
+            loss_gan   = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1    = l1_loss(fake, pet5)
+            ssim_val   = ssim3d(fake, pet5, data_range=data_range)
+            loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
+
+            # measure grad norms at last decoder conv params (cheap & stable)
+            params_L = [G.out_conv.weight]
+            if getattr(G.out_conv, "bias", None) is not None:
+                params_L.append(G.out_conv.bias)
+
+            # recon grad‑norm
+            grads_r = torch.autograd.grad(
+                loss_recon, params_L, retain_graph=True, allow_unused=True
+            )
+            norm_recon_sq = 0.0
+            for g in grads_r:
+                if g is not None:
+                    norm_recon_sq = norm_recon_sq + g.pow(2).sum()
+            norm_recon = torch.sqrt(norm_recon_sq + 0.0)
+
+            # gan grad‑norm
+            grads_g = torch.autograd.grad(
+                loss_gan, params_L, retain_graph=True, allow_unused=True
+            )
+            norm_gan_sq = 0.0
+            for g in grads_g:
+                if g is not None:
+                    norm_gan_sq = norm_gan_sq + g.pow(2).sum()
+            norm_gan = torch.sqrt(norm_gan_sq + 0.0)
+
+            # update dynamic lambda_g with EMA + clipping + trust‑region
+            if torch.isfinite(norm_recon) and torch.isfinite(norm_gan):
+                raw = (norm_recon / (norm_gan + EPS)).item()
+                raw = max(LAM_MIN, min(LAM_MAX, raw))  # clip
+                lam_new = ema_beta * lambda_g + (1.0 - ema_beta) * raw
+
+                # trust‑region on relative change
+                if lambda_g > 0.0:
+                    max_up = (1.0 + TRUST_TAU) * lambda_g
+                    max_dn = (1.0 - TRUST_TAU) * lambda_g
+                    lam_new = min(max(lam_new, max_dn), max_up)
+
+                lambda_g = lam_new
+            # else: keep previous lambda_g
+
+            # final combined loss, backward, clip, step
+            loss_G = loss_recon + lambda_g * loss_gan
+
+            opt_G.zero_grad(set_to_none=True)
             loss_G.backward()
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)  # <— clip G
             opt_G.step()
+
 
 
             g_running += loss_G.item()
@@ -129,7 +191,8 @@ def train_paggan(
                 print(f"Epoch [{epoch:03d}/{epochs}]  "
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                       f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                      f"| best {best_val:.4f}  | {dt:.1f}s")
+                      f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
+
             G.train()
         elif verbose:
             dt = time.time() - t0
