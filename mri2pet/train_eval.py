@@ -49,7 +49,7 @@ def train_paggan(
     ema_beta_fm = 0.9            # EMA smoothing for ν_fm
     FM_MIN, FM_MAX = 0.01, 0.30  # guard rails: FM stays weaker than GAN
     TRUST_TAU_FM = 0.25          # trust-region: slower ν_fm changes than λ_g
-    FM_TARGET = 0.3              # target strength ~0.5× recon (fine-tuner)
+    FM_TARGET = 0.1             # target strength ~0.5× recon (fine-tuner)
 
     # === Curriculum gate for FM (warmup then ramp) ===
     def fm_gate(epoch: int, total_epochs: int) -> float:
