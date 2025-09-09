@@ -41,6 +41,27 @@ def train_paggan(
     EPS = 1e-8
     TRUST_TAU = 0.5               # trust-region: max 50% change per step
 
+        # === Global Gradient‑Ratio Controller (you already added) ===
+    # lambda_g, ema_beta, LAM_MIN, LAM_MAX, EPS, TRUST_TAU are already defined above
+
+    # === Feature-Matching (FM) dynamic weight controller ===
+    nu_fm = 0.10                 # initial FM weight (kept modest)
+    ema_beta_fm = 0.9            # EMA smoothing for ν_fm
+    FM_MIN, FM_MAX = 0.01, 0.30  # guard rails: FM stays weaker than GAN
+    TRUST_TAU_FM = 0.25          # trust-region: slower ν_fm changes than λ_g
+    FM_TARGET = 0.5              # target strength ~0.5× recon (fine-tuner)
+
+    # === Curriculum gate for FM (warmup then ramp) ===
+    def fm_gate(epoch: int, total_epochs: int) -> float:
+        # No FM for first 10 epochs, then ramp to 1.0 over next 30 epochs
+        if epoch < 10:
+            return 0.0
+        elif epoch < 40:
+            return (epoch - 10) / 30.0
+        else:
+            return 1.0
+
+
     best_val = float('inf')
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
@@ -84,30 +105,43 @@ def train_paggan(
 
 
 
-            # ---- Update G ----
-
-            # ---- Update G (with Global Gradient‑Ratio Controller for lambda_g) ----
+            # ---- Update G (GAN with dynamic λ_g + Feature-Matching with dynamic ν_fm) ----
             G.zero_grad(set_to_none=True)
 
-            # forward
+            # 1) Forward generator
             fake = G(mri5)
-            out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # losses
-            loss_gan   = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1    = l1_loss(fake, pet5)
-            ssim_val   = ssim3d(fake, pet5, data_range=data_range)
+            # 2) Discriminator on FAKE (logits + features) for G's gradients
+            out_fake_for_G, feats_fake = D.forward_with_feats(torch.cat([mri5, fake], dim=1))
+            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+
+            # 3) Discriminator on REAL (features only; no grad into D)
+            with torch.no_grad():
+                out_real_for_FM, feats_real = D.forward_with_feats(torch.cat([mri5, pet5], dim=1))
+
+            # 4) Feature-Matching loss: L1 across captured feature maps, normalized by size
+            loss_fm = 0.0
+            Lf = min(len(feats_fake), len(feats_real))
+            for i in range(Lf):
+                f_fake = feats_fake[i]
+                f_real = feats_real[i]
+                sz = f_fake.numel()
+                loss_fm = loss_fm + (f_fake - f_real.detach()).abs().sum() / max(1, sz)
+            if Lf > 0:
+                loss_fm = loss_fm / Lf
+
+            # 5) Reconstruction loss (same as before)
+            loss_l1   = l1_loss(fake, pet5)
+            ssim_val  = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # measure grad norms at last decoder conv params (cheap & stable)
+            # 6) Measure grad-norms at last generator conv (proxy subspace)
             params_L = [G.out_conv.weight]
             if getattr(G.out_conv, "bias", None) is not None:
                 params_L.append(G.out_conv.bias)
 
             # recon grad‑norm
-            grads_r = torch.autograd.grad(
-                loss_recon, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_r = torch.autograd.grad(loss_recon, params_L, retain_graph=True, allow_unused=True)
             norm_recon_sq = 0.0
             for g in grads_r:
                 if g is not None:
@@ -115,37 +149,53 @@ def train_paggan(
             norm_recon = torch.sqrt(norm_recon_sq + 0.0)
 
             # gan grad‑norm
-            grads_g = torch.autograd.grad(
-                loss_gan, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_g = torch.autograd.grad(loss_gan, params_L, retain_graph=True, allow_unused=True)
             norm_gan_sq = 0.0
             for g in grads_g:
                 if g is not None:
                     norm_gan_sq = norm_gan_sq + g.pow(2).sum()
             norm_gan = torch.sqrt(norm_gan_sq + 0.0)
 
-            # update dynamic lambda_g with EMA + clipping + trust‑region
+            # 7) Update dynamic λ_g (GAN weight) via gradient-ratio vs recon
             if torch.isfinite(norm_recon) and torch.isfinite(norm_gan):
                 raw = (norm_recon / (norm_gan + EPS)).item()
                 raw = max(LAM_MIN, min(LAM_MAX, raw))  # clip
                 lam_new = ema_beta * lambda_g + (1.0 - ema_beta) * raw
-
-                # trust‑region on relative change
-                if lambda_g > 0.0:
+                if lambda_g > 0.0:  # trust-region (±50%)
                     max_up = (1.0 + TRUST_TAU) * lambda_g
                     max_dn = (1.0 - TRUST_TAU) * lambda_g
                     lam_new = min(max(lam_new, max_dn), max_up)
-
                 lambda_g = lam_new
-            # else: keep previous lambda_g
 
-            # final combined loss, backward, clip, step
-            loss_G = loss_recon + lambda_g * loss_gan
+            # 8) FM grad‑norm (for dynamic ν_fm)
+            grads_fm = torch.autograd.grad(loss_fm, params_L, retain_graph=True, allow_unused=True)
+            norm_fm_sq = 0.0
+            for g in grads_fm:
+                if g is not None:
+                    norm_fm_sq = norm_fm_sq + g.pow(2).sum()
+            norm_fm = torch.sqrt(norm_fm_sq + 0.0)
+
+            # 9) Update dynamic ν_fm (FM weight) vs recon (weaker target + stricter bounds)
+            if torch.isfinite(norm_recon) and torch.isfinite(norm_fm) and norm_fm.item() > 0:
+                raw_fm = (FM_TARGET * norm_recon / (norm_fm + EPS)).item()
+                raw_fm = max(FM_MIN, min(FM_MAX, raw_fm))  # clip tighter than GAN
+                nu_new = ema_beta_fm * nu_fm + (1.0 - ema_beta_fm) * raw_fm
+                if nu_fm > 0.0:  # trust-region (±25%)
+                    max_up = (1.0 + TRUST_TAU_FM) * nu_fm
+                    max_dn = (1.0 - TRUST_TAU_FM) * nu_fm
+                    nu_new = min(max(nu_new, max_dn), max_up)
+                nu_fm = nu_new
+            # else: keep previous nu_fm
+
+            # 10) Final generator loss: recon + λ_g*GAN + gated ν_fm*FM
+            nu_fm_effective = fm_gate(epoch, epochs) * nu_fm
+            loss_G = loss_recon + lambda_g * loss_gan + nu_fm_effective * loss_fm
 
             opt_G.zero_grad(set_to_none=True)
             loss_G.backward()
-            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)  # <— clip G
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
+
 
 
 
@@ -191,7 +241,7 @@ def train_paggan(
                 print(f"Epoch [{epoch:03d}/{epochs}]  "
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                       f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                      f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
+                      f"| best {best_val:.4f}  | λ_g={lambda_g:.4f} ν_fm={nu_fm:.4f} | {dt:.1f}s")
 
             G.train()
         elif verbose:
