@@ -126,8 +126,22 @@ class CondPatchDiscriminator3D(nn.Module):
             ]
             prev = c
         self.features = nn.Sequential(*layers)
-        self.head = nn.Conv3d(prev, 1, kernel_size=3, padding=1, bias=True)  # patch logits
-
+        self.head = nn.Conv3d(prev, 1, kernel_size=3, padding=1, bias=True)  # patch logits'
+        
+    def forward_with_feats(self, x: torch.Tensor):
+        """
+        Return (patch_logits, [feat1, feat2, ...]) where each feat is captured
+        right after a LeakyReLU block in self.features. No sigmoid applied.
+        """
+        feats = []
+        h = x
+        for m in self.features:
+            h = m(h)
+            if isinstance(m, nn.LeakyReLU):
+                feats.append(h)
+        s = self.head(h)  # patch logits (raw)
+        return s, feats
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, 2, D, H, W]
         f = self.features(x)          # [B, C, d, h, w]
