@@ -119,16 +119,52 @@ def train_paggan(
             with torch.no_grad():
                 out_real_for_FM, feats_real = D.forward_with_feats(torch.cat([mri5, pet5], dim=1))
 
-            # 4) Feature-Matching loss: L1 across captured feature maps, normalized by size
-            loss_fm = 0.0
+            # 4) Feature-Matching loss with D-separability gating (no extra params)
             Lf = min(len(feats_fake), len(feats_real))
+            EPS = 1e-8
+
+            loss_fm_layers = []
+            sep_scores = []
+
             for i in range(Lf):
-                f_fake = feats_fake[i]
-                f_real = feats_real[i]
-                sz = f_fake.numel()
-                loss_fm = loss_fm + (f_fake - f_real.detach()).abs().sum() / max(1, sz)
+                f_fake = feats_fake[i]               # requires grad
+                f_real = feats_real[i].detach()      # from no_grad() call above; keep detached
+
+                # Per-layer FM term: mean L1 across all elements (size-invariant)
+                Li = (f_fake - f_real).abs().mean()
+                loss_fm_layers.append(Li)
+
+                # D-separability score s_i (stop-grad):
+                # Compare per-(B,C) spatial means between real and fake, normalized by real energy.
+                mu_r = f_real.mean(dim=(2,3,4))                # [B, C]
+                mu_f = f_fake.detach().mean(dim=(2,3,4))       # [B, C]
+                gap  = (mu_r - mu_f).abs().mean()              # scalar
+                denom = f_real.abs().mean() + EPS              # scalar
+                sep_scores.append((gap / denom).detach())
+        
             if Lf > 0:
-                loss_fm = loss_fm / Lf
+                # Convert scores to simplex weights w (sum=1, each>0)
+                s = torch.stack(sep_scores) + 1e-6             # [L]
+                w = s / s.sum()
+
+                # Smooth and stabilize (EMA + trust region) to reduce B=1 jitter
+                beta = 0.90   # EMA factor
+                tau  = 0.25   # trust-region: at most ±25% change vs previous step
+                if not hasattr(train_paggan, "_w_gate") or train_paggan._w_gate.numel() != Lf:
+                    train_paggan._w_gate = w.clone()
+                w = beta * train_paggan._w_gate + (1.0 - beta) * w
+                w = (w / w.sum()).clamp_min(1e-6)
+                w_up = (1.0 + tau) * train_paggan._w_gate
+                w_dn = (1.0 - tau) * train_paggan._w_gate
+                w = torch.max(torch.min(w, w_up), w_dn)
+                w = (w / w.sum()).detach()           # keep weights as constants for backprop
+                train_paggan._w_gate = w
+
+                # Final gated FM loss: weighted sum over layers
+                loss_fm = torch.sum(w * torch.stack(loss_fm_layers))
+            else:
+                loss_fm = torch.tensor(0.0, device=mri.device if mri.dim() == 5 else mri5.device)
+
 
             # 5) Reconstruction loss (same as before)
             loss_l1   = l1_loss(fake, pet5)
@@ -242,6 +278,11 @@ def train_paggan(
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                       f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                       f"| best {best_val:.4f}  | λ_g={lambda_g:.4f} ν_fm={nu_fm:.4f} | {dt:.1f}s")
+                    # Optional: show D-gate weights every 5 epochs
+                if (epoch % 5 == 0) and hasattr(train_paggan, "_w_gate"):
+                    w_str = ", ".join(f"{float(x):.3f}" for x in train_paggan._w_gate.detach().cpu())
+                    print(f"FM w_gate (per D-layer): [{w_str}]")
+
 
             G.train()
         elif verbose:
