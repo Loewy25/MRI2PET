@@ -148,7 +148,7 @@ def train_paggan(
                 w = s / s.sum()
 
                 # Smooth and stabilize (EMA + trust region) to reduce B=1 jitter
-                beta = 0.90   # EMA factor
+                beta = 0.75   # EMA factor
                 tau  = 0.25   # trust-region: at most ±25% change vs previous step
                 if not hasattr(train_paggan, "_w_gate") or train_paggan._w_gate.numel() != Lf:
                     train_paggan._w_gate = w.clone()
