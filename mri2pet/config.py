@@ -34,3 +34,10 @@ DATA_RANGE  = 3.5
 
 # Torch flags
 torch.backends.cudnn.benchmark = True
+
+# ---- Gradient-alignment probe ----
+# What to probe: "fake" (output space), "params", or "both"
+PROBE_GRAD_ALIGNMENT = True
+PROBE_SPACE = "both"            # "fake" | "params" | "both"
+PROBE_ALIGN_THR = 0.90          # cosine >= 0.90 ⇒ "nearly same direction"
+PROBE_CSV = True                # write a CSV summary each epoch
