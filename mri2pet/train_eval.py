@@ -15,9 +15,11 @@ from .utils import _safe_name, _save_nifti, _meta_unbatch
 
 import csv
 from .config import (
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE, LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE, LR_G, LR_D,
+    CKPT_DIR, RESAMPLE_BACK_TO_T1, OUT_RUN,   # <— add OUT_RUN here
     PROBE_GRAD_ALIGNMENT, PROBE_SPACE, PROBE_ALIGN_THR, PROBE_CSV
 )
+
 
 # ---------- gradient-alignment helpers ----------
 def _flatten1(t: torch.Tensor) -> torch.Tensor:
