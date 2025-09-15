@@ -85,73 +85,95 @@ def train_paggan(
 
 
             # ---- Update G ----
-
-            # ---- Update G (with Global Gradient‑Ratio Controller for lambda_g) ----
             G.zero_grad(set_to_none=True)
 
-            # forward
+            # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # losses
+            # losses (two objectives): Recon = gamma*(L1 + (1-SSIM)), GAN = BCE
             loss_gan   = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
             loss_l1    = l1_loss(fake, pet5)
             ssim_val   = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
+            # ========================= MGDA-UB (Two tasks) =========================
+            # Compute output-space gradients wrt 'fake' for each objective
+            v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # ∇_fake L_recon
+            v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # ∇_fake L_gan
+
+            # L2-normalize to avoid scale bias between objectives
+            eps = 1e-12
+            v1n = v1 / (v1.norm() + eps)
+            v2n = v2 / (v2.norm() + eps)
+
+            # Closed-form α* for 2 tasks (per-sample), then take robust median
+            V1 = v1n.reshape(v1n.size(0), -1)
+            V2 = v2n.reshape(v2n.size(0), -1)
+            diff = (V2 - V1)
+            num  = (diff * V2).sum(dim=1)                 # (v2 - v1) · v2
+            den  = (diff * diff).sum(dim=1) + eps         # ||v1 - v2||^2
+            alpha_batch = torch.clamp(num / den, 0.0, 1.0)
+            alpha = alpha_batch.median()                  # scalar α* for this batch
+
+            # Combined output-space direction and single backward through G
+            v_comb = alpha * v1n + (1.0 - alpha) * v2n
+            opt_G.zero_grad(set_to_none=True)
+            fake.backward(v_comb)                         # ONE backward through G
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
+            opt_G.step()
+
+            # For logging only (proxy scalar; not used for backward)
+            loss_G_log = (loss_recon + loss_gan).detach().item()
+            # =========================================================================
+
+            # ------------------ Legacy gradient-ratio controller ------------------
+            # (Commented out per your request; leave here for quick rollback)
+            """
             # measure grad norms at last decoder conv params (cheap & stable)
             params_L = [G.out_conv.weight]
             if getattr(G.out_conv, "bias", None) is not None:
                 params_L.append(G.out_conv.bias)
 
-            # recon grad‑norm
-            grads_r = torch.autograd.grad(
-                loss_recon, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_r = torch.autograd.grad(loss_recon, params_L, retain_graph=True, allow_unused=True)
             norm_recon_sq = 0.0
             for g in grads_r:
                 if g is not None:
                     norm_recon_sq = norm_recon_sq + g.pow(2).sum()
             norm_recon = torch.sqrt(norm_recon_sq + 0.0)
 
-            # gan grad‑norm
-            grads_g = torch.autograd.grad(
-                loss_gan, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_g = torch.autograd.grad(loss_gan, params_L, retain_graph=True, allow_unused=True)
             norm_gan_sq = 0.0
             for g in grads_g:
                 if g is not None:
                     norm_gan_sq = norm_gan_sq + g.pow(2).sum()
             norm_gan = torch.sqrt(norm_gan_sq + 0.0)
 
-            # update dynamic lambda_g with EMA + clipping + trust‑region
+            # update dynamic lambda_g with EMA + clipping + trust-region
             if torch.isfinite(norm_recon) and torch.isfinite(norm_gan):
-                raw = (norm_recon / (norm_gan + EPS)).item()
+                raw = (norm_recon / (norm_gan + 1e-8)).item()
                 raw = max(LAM_MIN, min(LAM_MAX, raw))  # clip
                 lam_new = ema_beta * lambda_g + (1.0 - ema_beta) * raw
-
-                # trust‑region on relative change
                 if lambda_g > 0.0:
                     max_up = (1.0 + TRUST_TAU) * lambda_g
                     max_dn = (1.0 - TRUST_TAU) * lambda_g
                     lam_new = min(max(lam_new, max_dn), max_up)
-
                 lambda_g = lam_new
-            # else: keep previous lambda_g
 
-            # final combined loss, backward, clip, step
             loss_G = loss_recon + lambda_g * loss_gan
-
             opt_G.zero_grad(set_to_none=True)
             loss_G.backward()
-            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)  # <— clip G
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
+            loss_G_log = loss_G.detach().item()
+            """
+            # ----------------------------------------------------------------------
 
-
-            g_running += loss_G.item()
+            g_running += float(loss_G_log)
             d_running += loss_D.item()
             n_batches += 1
+
 
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
