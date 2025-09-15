@@ -13,6 +13,33 @@ from .config import (
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 
+import csv
+from .config import (
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE, LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    PROBE_GRAD_ALIGNMENT, PROBE_SPACE, PROBE_ALIGN_THR, PROBE_CSV
+)
+
+# ---------- gradient-alignment helpers ----------
+def _flatten1(t: torch.Tensor) -> torch.Tensor:
+    return t.reshape(-1)
+
+def _cosine_1d(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-12) -> float:
+    # a, b are 1-D tensors
+    num = torch.dot(a, b)
+    den = a.norm() * b.norm() + eps
+    return float((num / den).detach().cpu())
+
+def _param_grads_vec(loss: torch.Tensor, params) -> torch.Tensor:
+    """Flattened grads of `loss` wrt a small param list (allow_unused for safety)."""
+    gs = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    parts = []
+    for g in gs:
+        if g is not None:
+            parts.append(g.reshape(-1))
+    if len(parts) == 0:
+        return torch.zeros(1, device=loss.device)
+    return torch.cat(parts, dim=0)
+# ------------------------------------------------
 
 
 def train_paggan(
@@ -34,7 +61,7 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     bce = nn.BCEWithLogitsLoss()
 
-    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
+    # === Global Gradient-Ratio Controller (dynamic lambda_g) ===
     lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
     ema_beta = 0.9                # EMA smoothing for B=1 noise
     LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
@@ -46,6 +73,13 @@ def train_paggan(
     best_D: Optional[Dict[str, torch.Tensor]] = None
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
+
+    # ---------- gradient-alignment counters (averaged per epoch) ----------
+    probe = {
+        'fake':   {'recon_gan': 0.0, 'l1_ssim': 0.0, 'l1_gan': 0.0, 'ssim_gan': 0.0, 'count': 0},
+        'params': {'recon_gan': 0.0, 'l1_ssim': 0.0, 'l1_gan': 0.0, 'ssim_gan': 0.0, 'count': 0},
+    }
+    # ---------------------------------------------------------------------
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -59,8 +93,6 @@ def train_paggan(
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
             B = mri.size(0) if mri.dim() == 5 else 1
-            real_lbl = torch.ones(B, 1, device=device)
-            fake_lbl = torch.zeros(B, 1, device=device)
 
             # ---- Update D ----
             mri5 = mri if mri.dim()==5 else mri.unsqueeze(0)
@@ -79,17 +111,12 @@ def train_paggan(
             loss_D = bce(out_real, torch.ones_like(out_real)) + \
                      bce(out_fake, torch.zeros_like(out_fake))
             loss_D.backward()
-            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)  # <— clip D
+            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-
-
-            # ---- Update G ----
-
-            # ---- Update G (with Global Gradient‑Ratio Controller for lambda_g) ----
+            # ---- Update G (legacy ratio controller; PROBE only reads grads) ----
             G.zero_grad(set_to_none=True)
 
-            # forward
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
@@ -99,55 +126,75 @@ def train_paggan(
             ssim_val   = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # measure grad norms at last decoder conv params (cheap & stable)
+            # ====== PROBE: gradient alignment (output 'fake' and/or last layer params) ======
+            if PROBE_GRAD_ALIGNMENT:
+                # (A) Output-space grads wrt 'fake'
+                if PROBE_SPACE in ("fake", "both"):
+                    g_fake_l1   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0].reshape(-1)
+                    g_fake_ssim = torch.autograd.grad(1.0 - ssim_val, fake, retain_graph=True)[0].reshape(-1)
+                    g_fake_rec  = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0].reshape(-1)
+                    g_fake_gan  = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0].reshape(-1)
+
+                    probe['fake']['recon_gan'] += _cosine_1d(g_fake_rec,  g_fake_gan)
+                    probe['fake']['l1_ssim']   += _cosine_1d(g_fake_l1,   g_fake_ssim)
+                    probe['fake']['l1_gan']    += _cosine_1d(g_fake_l1,   g_fake_gan)
+                    probe['fake']['ssim_gan']  += _cosine_1d(g_fake_ssim, g_fake_gan)
+                    probe['fake']['count']     += 1
+
+                # (B) Param-space grads on the last conv of G
+                if PROBE_SPACE in ("params", "both"):
+                    params_L = [G.out_conv.weight]
+                    if getattr(G.out_conv, "bias", None) is not None:
+                        params_L.append(G.out_conv.bias)
+
+                    g_p_l1   = _param_grads_vec(loss_l1,   params_L)
+                    g_p_ssim = _param_grads_vec(1.0 - ssim_val, params_L)
+                    g_p_rec  = _param_grads_vec(loss_recon, params_L)
+                    g_p_gan  = _param_grads_vec(loss_gan,   params_L)
+
+                    probe['params']['recon_gan'] += _cosine_1d(g_p_rec,  g_p_gan)
+                    probe['params']['l1_ssim']   += _cosine_1d(g_p_l1,   g_p_ssim)
+                    probe['params']['l1_gan']    += _cosine_1d(g_p_l1,   g_p_gan)
+                    probe['params']['ssim_gan']  += _cosine_1d(g_p_ssim, g_p_gan)
+                    probe['params']['count']     += 1
+            # ====== /PROBE ======
+
+            # measure grad norms at last decoder conv params (legacy controller)
             params_L = [G.out_conv.weight]
             if getattr(G.out_conv, "bias", None) is not None:
                 params_L.append(G.out_conv.bias)
 
-            # recon grad‑norm
-            grads_r = torch.autograd.grad(
-                loss_recon, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_r = torch.autograd.grad(loss_recon, params_L, retain_graph=True, allow_unused=True)
             norm_recon_sq = 0.0
             for g in grads_r:
                 if g is not None:
                     norm_recon_sq = norm_recon_sq + g.pow(2).sum()
             norm_recon = torch.sqrt(norm_recon_sq + 0.0)
 
-            # gan grad‑norm
-            grads_g = torch.autograd.grad(
-                loss_gan, params_L, retain_graph=True, allow_unused=True
-            )
+            grads_g = torch.autograd.grad(loss_gan, params_L, retain_graph=True, allow_unused=True)
             norm_gan_sq = 0.0
             for g in grads_g:
                 if g is not None:
                     norm_gan_sq = norm_gan_sq + g.pow(2).sum()
             norm_gan = torch.sqrt(norm_gan_sq + 0.0)
 
-            # update dynamic lambda_g with EMA + clipping + trust‑region
+            # update dynamic lambda_g with EMA + clipping + trust-region
             if torch.isfinite(norm_recon) and torch.isfinite(norm_gan):
                 raw = (norm_recon / (norm_gan + EPS)).item()
                 raw = max(LAM_MIN, min(LAM_MAX, raw))  # clip
                 lam_new = ema_beta * lambda_g + (1.0 - ema_beta) * raw
-
-                # trust‑region on relative change
                 if lambda_g > 0.0:
                     max_up = (1.0 + TRUST_TAU) * lambda_g
                     max_dn = (1.0 - TRUST_TAU) * lambda_g
                     lam_new = min(max(lam_new, max_dn), max_up)
-
                 lambda_g = lam_new
-            # else: keep previous lambda_g
 
             # final combined loss, backward, clip, step
             loss_G = loss_recon + lambda_g * loss_gan
-
             opt_G.zero_grad(set_to_none=True)
             loss_G.backward()
-            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)  # <— clip G
+            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
-
-
 
             g_running += loss_G.item()
             d_running += loss_D.item()
@@ -192,11 +239,53 @@ def train_paggan(
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                       f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                       f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
-
             G.train()
         elif verbose:
             dt = time.time() - t0
             print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
+
+        # ---- end-of-epoch probe report ----
+        if PROBE_GRAD_ALIGNMENT:
+            def _avg(d, k): return (d[k] / max(1, d['count']))
+            lines = []
+            if PROBE_SPACE in ("fake", "both"):
+                f = probe['fake']
+                lines.append(
+                    f"FAKE  cos[recon,gan]={_avg(f,'recon_gan'):.3f} | "
+                    f"[L1,SSIM]={_avg(f,'l1_ssim'):.3f} | [L1,GAN]={_avg(f,'l1_gan'):.3f} | "
+                    f"[SSIM,GAN]={_avg(f,'ssim_gan'):.3f}"
+                )
+            if PROBE_SPACE in ("params", "both"):
+                p = probe['params']
+                lines.append(
+                    f"PARAM cos[recon,gan]={_avg(p,'recon_gan'):.3f} | "
+                    f"[L1,SSIM]={_avg(p,'l1_ssim'):.3f} | [L1,GAN]={_avg(p,'l1_gan'):.3f} | "
+                    f"[SSIM,GAN]={_avg(p,'ssim_gan'):.3f}"
+                )
+            print(f"[Epoch {epoch:03d}] Grad-alignment  " + " | ".join(lines))
+
+            if PROBE_CSV:
+                csv_path = os.path.join(OUT_RUN, "grad_alignment.csv")
+                write_header = (epoch == 1 and not os.path.exists(csv_path))
+                with open(csv_path, "a", newline="") as fcsv:
+                    w = csv.writer(fcsv)
+                    if write_header:
+                        w.writerow([
+                            "epoch",
+                            "fake_recon_gan","fake_l1_ssim","fake_l1_gan","fake_ssim_gan",
+                            "param_recon_gan","param_l1_ssim","param_l1_gan","param_ssim_gan"
+                        ])
+                    def g(d,k): return (d[k] / max(1, d['count'])) if d['count']>0 else ""
+                    row = [epoch]
+                    row += [g(probe['fake'],'recon_gan'), g(probe['fake'],'l1_ssim'),
+                            g(probe['fake'],'l1_gan'), g(probe['fake'],'ssim_gan')]
+                    row += [g(probe['params'],'recon_gan'), g(probe['params'],'l1_ssim'),
+                            g(probe['params'],'l1_gan'), g(probe['params'],'ssim_gan')]
+                    w.writerow(row)
+
+            # reset counters for next epoch
+            probe['fake']   = {'recon_gan':0.0,'l1_ssim':0.0,'l1_gan':0.0,'ssim_gan':0.0,'count':0}
+            probe['params'] = {'recon_gan':0.0,'l1_ssim':0.0,'l1_gan':0.0,'ssim_gan':0.0,'count':0}
 
     if best_G is not None:
         G.load_state_dict(best_G)
@@ -204,6 +293,7 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
+
 
 @torch.no_grad()
 def evaluate_paggan(
