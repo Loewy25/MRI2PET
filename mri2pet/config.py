@@ -43,7 +43,7 @@ DYN_GROUP = True
 COS_EMA_BETA = 0.85
 
 # Hysteresis thresholds to avoid flip-flop
-COS_HIGH = 0.85   # if cos >= COS_HIGH -> merge L1+SSIM
+COS_HIGH = 0.8   # if cos >= COS_HIGH -> merge L1+SSIM
 COS_LOW  = 0.70   # if cos <= COS_LOW  -> split L1 vs SSIM
 
 # Don't switch more than once per this many epochs
