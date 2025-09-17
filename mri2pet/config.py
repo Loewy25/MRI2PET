@@ -34,3 +34,20 @@ DATA_RANGE  = 3.5
 
 # Torch flags
 torch.backends.cudnn.benchmark = True
+
+# ---- Dynamic L1/SSIM grouping (Idea 1) ----
+# Turn the controller on/off
+DYN_GROUP = True
+
+# Cosine smoothing across steps (B=1 so we smooth per-epoch)
+COS_EMA_BETA = 0.85
+
+# Hysteresis thresholds to avoid flip-flop
+COS_HIGH = 0.85   # if cos >= COS_HIGH -> merge L1+SSIM
+COS_LOW  = 0.70   # if cos <= COS_LOW  -> split L1 vs SSIM
+
+# Don't switch more than once per this many epochs
+MIN_HOLD_EPOCHS = 1
+
+# Optional: if you later want Adam-aware whitening before cos/MGDA (leave False for now)
+ADAM_AWARE_NORM = False
