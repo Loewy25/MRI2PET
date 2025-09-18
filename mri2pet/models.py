@@ -110,6 +110,30 @@ class Generator(nn.Module):
         gate = self.att(u3)
         return self.out_conv(gate * u3)
 
+    def forward_with_intermediates(self, x: torch.Tensor):
+        """
+        Return:
+          fake : final output
+          u3   : last decoder feature before attention/out head
+          b    : bottleneck feature (after self.bottleneck_res6)
+        All tensors require_grad=True and can serve as autograd roots.
+        """
+        x1 = self.down1(x); p1 = self.pool(x1)
+        x2 = self.down2(p1); p2 = self.pool(x2)
+        x3 = self.down3(p2); p3 = self.pool(x3)
+
+        b = self.bottleneck(p3)
+        b = self.bottleneck_res6(b)   # shared rep for encoder
+
+        u1 = self.up1_ups(b); u1 = _pad_or_crop_to(u1, x3); u1 = torch.cat([u1, x3], dim=1); u1 = self.up1_conv(u1)
+        u2 = self.up2_ups(u1); u2 = _pad_or_crop_to(u2, x2); u2 = torch.cat([u2, x2], dim=1); u2 = self.up2_conv(u2)
+        u3 = self.up3_ups(u2); u3 = _pad_or_crop_to(u3, x1); u3 = torch.cat([u3, x1], dim=1); u3 = self.up3_conv(u3)
+
+        gate = self.att(u3)
+        fake = self.out_conv(gate * u3)
+        return fake, u3, b
+
+
 class CondPatchDiscriminator3D(nn.Module):
     """
     Conditional 3D PatchGAN: input is [B, 2, D, H, W] = concat(MRI, PET).
