@@ -6,12 +6,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .config import (
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
-    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1
-)
+
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
+from .config import (
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    # multi-view epoch schedule
+    MVIEWS_ENABLE, MVIEWS_SCHEDULE,
+    MVIEWS_EARLY_EPOCHS, MVIEWS_LATE_EPOCH,
+    MVIEWS_W_EARLY, MVIEWS_W_LATE,
+)
+
+def _interp_triple(w1, w2, t: float):
+    return (
+        (1.0 - t) * float(w1[0]) + t * float(w2[0]),
+        (1.0 - t) * float(w1[1]) + t * float(w2[1]),
+        (1.0 - t) * float(w1[2]) + t * float(w2[2]),
+    )
+
+def _mview_weights_for_epoch(epoch: int):
+    """
+    Piecewise-linear schedule:
+      - epoch <= EARLY_EPOCHS  -> MVIEWS_W_EARLY
+      - EARLY_EPOCHS < epoch < LATE_EPOCH -> linear ramp EARLY -> LATE
+      - epoch >= LATE_EPOCH    -> MVIEWS_W_LATE
+    Returns a (w_b, w_u3, w_out) triple (we still renormalize to be safe).
+    """
+    if not MVIEWS_ENABLE:
+        return (0.0, 0.0, 1.0)
+    if not MVIEWS_SCHEDULE:
+        return MVIEWS_W_LATE
+
+    if epoch <= MVIEWS_EARLY_EPOCHS:
+        w = MVIEWS_W_EARLY
+    elif epoch >= MVIEWS_LATE_EPOCH:
+        w = MVIEWS_W_LATE
+    else:
+        t = (epoch - MVIEWS_EARLY_EPOCHS) / max(1, MVIEWS_LATE_EPOCH - MVIEWS_EARLY_EPOCHS)
+        w = _interp_triple(MVIEWS_W_EARLY, MVIEWS_W_LATE, float(t))
+
+    s = max(1e-8, float(w[0] + w[1] + w[2]))
+    return (float(w[0]) / s, float(w[1]) / s, float(w[2]) / s)
 
 # ---------- MGDA-UB helpers for dynamic grouping ----------
 def _flatten5d(x: torch.Tensor) -> torch.Tensor:
@@ -184,59 +220,82 @@ def train_paggan(
 
 
 
-                        # ---- Update G (Dynamic merge/split of L1 & SSIM + MGDA-UB) ----
+            # ---- Update G (Multi-view MGDA-UB, epoch-scheduled fusion) ----
             G.zero_grad(set_to_none=True)
 
-            # Forward through G and D (for GAN loss)
-            fake = G(mri5)
+            # Forward ONCE to get all three views
+            fake, u3, b = G.forward_with_intermediates(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # Atomic losses (keep separate; we'll merge/split on gradients)
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1  = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
-            loss_ssim = (1.0 - ssim_val)                               # make it a loss
-            loss_recon = gamma * (loss_l1 + loss_ssim)                 # for logging
+            # Atomic losses (unchanged)
+            loss_gan  = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1   = l1_loss(fake, pet5)
+            ssim_val  = ssim3d(fake, pet5, data_range=data_range)     # ∈ [0,1]
+            loss_ssim = (1.0 - ssim_val)
+            loss_recon = gamma * (loss_l1 + loss_ssim)                # logging only
 
-            # Output-space grads wrt 'fake' for each task
-            # We will not backprop them; just read. We'll do ONE backward with the combined direction.
-            v_l1   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
-            v_ssim = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
-            v_gan  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            # Gradients wrt each view
+            # -- bottleneck
+            v_l1_b   = torch.autograd.grad(loss_l1,   b, retain_graph=True)[0]
+            v_ssim_b = torch.autograd.grad(loss_ssim, b, retain_graph=True)[0]
+            v_gan_b  = torch.autograd.grad(loss_gan,  b, retain_graph=True)[0]
+            v_l1_b_n, v_ssim_b_n, v_gan_b_n = (_l2_normalize_per_sample(v_l1_b),
+                                               _l2_normalize_per_sample(v_ssim_b),
+                                               _l2_normalize_per_sample(v_gan_b))
+            # -- u3
+            v_l1_u3   = torch.autograd.grad(loss_l1,   u3, retain_graph=True)[0]
+            v_ssim_u3 = torch.autograd.grad(loss_ssim, u3, retain_graph=True)[0]
+            v_gan_u3  = torch.autograd.grad(loss_gan,  u3, retain_graph=True)[0]
+            v_l1_u3_n, v_ssim_u3_n, v_gan_u3_n = (_l2_normalize_per_sample(v_l1_u3),
+                                                  _l2_normalize_per_sample(v_ssim_u3),
+                                                  _l2_normalize_per_sample(v_gan_u3))
+            # -- output
+            v_l1_out   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
+            v_ssim_out = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
+            v_gan_out  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            v_l1_out_n, v_ssim_out_n, v_gan_out_n = (_l2_normalize_per_sample(v_l1_out),
+                                                     _l2_normalize_per_sample(v_ssim_out),
+                                                     _l2_normalize_per_sample(v_gan_out))
 
-            # Per-sample L2 normalization (stable across objectives)
-            v_l1n   = _l2_normalize_per_sample(v_l1)
-            v_ssimn = _l2_normalize_per_sample(v_ssim)
-            v_gann  = _l2_normalize_per_sample(v_gan)
-
-            # Track cosine(L1, SSIM) this epoch (for the controller)
-            cos_l1_ssim = _cos_batch(v_l1n, v_ssimn)  # scalar (B=1)
-            # Accumulate epoch stats
+            # Record cosine(L1, SSIM) at the OUTPUT view for the dynamic grouping controller
+            cos_l1_ssim = _cos_batch(v_l1_out_n, v_ssim_out_n)
             if 'cos_sum' not in locals():
                 cos_sum, cos_cnt = 0.0, 0
             cos_sum += cos_l1_ssim
             cos_cnt += 1
 
-            # ---- Build final output-space direction v_comb depending on state ----
+            # Per-view MGDA-UB with your dynamic merge/split state
             if DYN_GROUP and group_state == "merged":
-                # (1) Inside the group: MGDA-UB on {L1, SSIM} -> v_recon^†
-                _, v_recon_dag = _mgda2_normed(v_l1n, v_ssimn)
-                # (2) Top level: MGDA-UB on {v_recon^†, GAN}
-                _, v_comb = _mgda2_normed(v_recon_dag, v_gann)
-                mode_str = "MERGED"
+                # first merge L1+SSIM at each view
+                _, v_rec_b   = _mgda2_normed(v_l1_b_n,   v_ssim_b_n)
+                _, v_rec_u3  = _mgda2_normed(v_l1_u3_n,  v_ssim_u3_n)
+                _, v_rec_out = _mgda2_normed(v_l1_out_n, v_ssim_out_n)
+                # then combine recon vs GAN at each view
+                _, v_b_comb   = _mgda2_normed(v_rec_b,   v_gan_b_n)
+                _, v_u3_comb  = _mgda2_normed(v_rec_u3,  v_gan_u3_n)
+                _, v_out_comb = _mgda2_normed(v_rec_out, v_gan_out_n)
             else:
-                # Split: MGDA-UB on {L1, SSIM, GAN}
-                _, v_comb = _mgda3_normed([v_l1n, v_ssimn, v_gann])
-                mode_str = "SPLIT"
+                # split: L1 vs SSIM vs GAN at each view
+                _, v_b_comb   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
+                _, v_u3_comb  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
+                _, v_out_comb = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
 
-            # Single backward through G with the combined direction
+            # Epoch-scheduled fusion weights
+            w_b, w_u3, w_out = _mview_weights_for_epoch(epoch)
+
+            # One backward with multiple roots; autograd will sum parameter grads
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_comb)   # ONE backward
+            torch.autograd.backward(
+                tensors=[b, u3, fake],
+                grad_tensors=[w_b * v_b_comb, w_u3 * v_u3_comb, w_out * v_out_comb],
+                retain_graph=False
+            )
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # For logging only (proxy scalar; not used for backward)
+            # Logging proxy
             loss_G_log = (loss_recon + loss_gan).detach().item()
+
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
