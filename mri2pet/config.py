@@ -51,3 +51,10 @@ MIN_HOLD_EPOCHS = 1
 
 # Optional: if you later want Adam-aware whitening before cos/MGDA (leave False for now)
 ADAM_AWARE_NORM = False
+# ---- Multi-view MGDA-UB (Idea 2) ----
+# Turn the multi-view fusion ON/OFF (set to False to revert to single-view)
+MVIEWS_ENABLE = True
+
+# Fixed fusion weights for (bottleneck, u3, output). Must sum ≈ 1.0 (we re-normalize in code).
+# Good starting guess (can tune later):
+MVIEWS_WEIGHTS = (0.20, 0.30, 0.50)
