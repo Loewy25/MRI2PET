@@ -51,3 +51,20 @@ MIN_HOLD_EPOCHS = 1
 
 # Optional: if you later want Adam-aware whitening before cos/MGDA (leave False for now)
 ADAM_AWARE_NORM = False
+
+# ---- Multi-view MGDA-UB: cosine-gated fusion (Idea 2b) ----
+# Turn the multi-view fusion ON/OFF. If False, you use the baseline (output-only) update.
+MVIEWS_ENABLE = True
+
+# Use cosine-gated fusion (instead of fixed or epoch-scheduled weights)
+MVIEWS_COS_FUSION = True
+
+# Temperature (higher -> more peaky weights)
+MVIEWS_KAPPA = 4.0
+
+# Each view gets at least this much weight (prevents starvation)
+MVIEWS_FLOOR = 0.05
+
+# Smooth the per-batch cosines to reduce jitter (0.0 = no smoothing, 0.8–0.9 works well)
+MVIEWS_EMA_BETA = 0.8
+
