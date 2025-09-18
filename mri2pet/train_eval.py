@@ -19,6 +19,20 @@ from .config import (
     MVIEWS_ENABLE, MVIEWS_COS_FUSION, MVIEWS_KAPPA, MVIEWS_FLOOR, MVIEWS_EMA_BETA,
 )
 
+def _pos(x: float) -> float:
+    # keep only agreement; negative cos shouldn't get weight credit
+    return max(0.0, float(x))
+
+def _softmax_with_floor(v: torch.Tensor, floor: float) -> torch.Tensor:
+    """
+    v: 1D tensor of 'scores' (after temperature), shape [3]
+    Returns weights in (0,1) that sum to 1, each >= floor.
+    """
+    w = torch.softmax(v, dim=0)
+    if floor > 0.0:
+        w = (1.0 - 3.0 * floor) * w + floor
+        w = w / (w.sum() + 1e-8)
+    return w
 
 # ---------- MGDA-UB helpers for dynamic grouping ----------
 def _flatten5d(x: torch.Tensor) -> torch.Tensor:
@@ -156,6 +170,7 @@ def train_paggan(
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
+        gate_ema = None   # reset cosine-gate EMA each epoch
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
         for batch in train_loader:
@@ -191,59 +206,119 @@ def train_paggan(
 
 
 
-                        # ---- Update G (Dynamic merge/split of L1 & SSIM + MGDA-UB) ----
+            # ---- Update G (Cosine-gated multi-view MGDA-UB) ----
             G.zero_grad(set_to_none=True)
 
-            # Forward through G and D (for GAN loss)
-            fake = G(mri5)
+            # One forward to get all three views
+            fake, u3, b = G.forward_with_intermediates(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # Atomic losses (keep separate; we'll merge/split on gradients)
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1  = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
-            loss_ssim = (1.0 - ssim_val)                               # make it a loss
-            loss_recon = gamma * (loss_l1 + loss_ssim)                 # for logging
+            # Atomic losses (unchanged)
+            loss_gan  = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1   = l1_loss(fake, pet5)
+            ssim_val  = ssim3d(fake, pet5, data_range=data_range)   # ∈ [0,1]
+            loss_ssim = (1.0 - ssim_val)
+            loss_recon = gamma * (loss_l1 + loss_ssim)              # logging only
 
-            # Output-space grads wrt 'fake' for each task
-            # We will not backprop them; just read. We'll do ONE backward with the combined direction.
-            v_l1   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
-            v_ssim = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
-            v_gan  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            # Grads wrt each view
+            # -- bottleneck
+            v_l1_b   = torch.autograd.grad(loss_l1,   b,   retain_graph=True)[0]
+            v_ssim_b = torch.autograd.grad(loss_ssim, b,   retain_graph=True)[0]
+            v_gan_b  = torch.autograd.grad(loss_gan,  b,   retain_graph=True)[0]
+            v_l1_b_n, v_ssim_b_n, v_gan_b_n = (_l2_normalize_per_sample(v_l1_b),
+                                               _l2_normalize_per_sample(v_ssim_b),
+                                               _l2_normalize_per_sample(v_gan_b))
+            # -- u3
+            v_l1_u3   = torch.autograd.grad(loss_l1,   u3,  retain_graph=True)[0]
+            v_ssim_u3 = torch.autograd.grad(loss_ssim, u3,  retain_graph=True)[0]
+            v_gan_u3  = torch.autograd.grad(loss_gan,  u3,  retain_graph=True)[0]
+            v_l1_u3_n, v_ssim_u3_n, v_gan_u3_n = (_l2_normalize_per_sample(v_l1_u3),
+                                                  _l2_normalize_per_sample(v_ssim_u3),
+                                                  _l2_normalize_per_sample(v_gan_u3))
+            # -- output
+            v_l1_out   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
+            v_ssim_out = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
+            v_gan_out  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            v_l1_out_n, v_ssim_out_n, v_gan_out_n = (_l2_normalize_per_sample(v_l1_out),
+                                                     _l2_normalize_per_sample(v_ssim_out),
+                                                     _l2_normalize_per_sample(v_gan_out))
 
-            # Per-sample L2 normalization (stable across objectives)
-            v_l1n   = _l2_normalize_per_sample(v_l1)
-            v_ssimn = _l2_normalize_per_sample(v_ssim)
-            v_gann  = _l2_normalize_per_sample(v_gan)
-
-            # Track cosine(L1, SSIM) this epoch (for the controller)
-            cos_l1_ssim = _cos_batch(v_l1n, v_ssimn)  # scalar (B=1)
-            # Accumulate epoch stats
+            # Record output-view cos(L1,SSIM) for your Idea-1 controller (unchanged)
+            cos_l1_ssim = _cos_batch(v_l1_out_n, v_ssim_out_n)
             if 'cos_sum' not in locals():
                 cos_sum, cos_cnt = 0.0, 0
             cos_sum += cos_l1_ssim
             cos_cnt += 1
 
-            # ---- Build final output-space direction v_comb depending on state ----
+            # Per-view MGDA-UB update direction (respecting current merge/split state)
             if DYN_GROUP and group_state == "merged":
-                # (1) Inside the group: MGDA-UB on {L1, SSIM} -> v_recon^†
-                _, v_recon_dag = _mgda2_normed(v_l1n, v_ssimn)
-                # (2) Top level: MGDA-UB on {v_recon^†, GAN}
-                _, v_comb = _mgda2_normed(v_recon_dag, v_gann)
-                mode_str = "MERGED"
-            else:
-                # Split: MGDA-UB on {L1, SSIM, GAN}
-                _, v_comb = _mgda3_normed([v_l1n, v_ssimn, v_gann])
-                mode_str = "SPLIT"
+                # merge L1+SSIM at each view -> v_recon^†, then {recon^†, GAN}
+                _, v_rec_b   = _mgda2_normed(v_l1_b_n,   v_ssim_b_n)
+                _, v_rec_u3  = _mgda2_normed(v_l1_u3_n,  v_ssim_u3_n)
+                _, v_rec_out = _mgda2_normed(v_l1_out_n, v_ssim_out_n)
 
-            # Single backward through G with the combined direction
+                _, v_b_comb   = _mgda2_normed(v_rec_b,   v_gan_b_n)
+                _, v_u3_comb  = _mgda2_normed(v_rec_u3,  v_gan_u3_n)
+                _, v_out_comb = _mgda2_normed(v_rec_out, v_gan_out_n)
+
+                # For gating, measure agreement between Recon^† and GAN at each view
+                cos_b   = _cos_batch(v_rec_b,   v_gan_b_n)
+                cos_u3  = _cos_batch(v_rec_u3,  v_gan_u3_n)
+                cos_out = _cos_batch(v_rec_out, v_gan_out_n)
+            else:
+                # split: MGDA-UB on {L1, SSIM, GAN} at each view
+                _, v_b_comb   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
+                _, v_u3_comb  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
+                _, v_out_comb = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
+
+                # For gating in split mode, compare GAN to average Recon dir
+                v_rec_b_gate   = 0.5 * (v_l1_b_n   + v_ssim_b_n)
+                v_rec_u3_gate  = 0.5 * (v_l1_u3_n  + v_ssim_u3_n)
+                v_rec_out_gate = 0.5 * (v_l1_out_n + v_ssim_out_n)
+                cos_b   = _cos_batch(v_rec_b_gate,   v_gan_b_n)
+                cos_u3  = _cos_batch(v_rec_u3_gate,  v_gan_u3_n)
+                cos_out = _cos_batch(v_rec_out_gate, v_gan_out_n)
+
+            # ---- Cosine-gated fusion weights over views (b, u3, out) ----
+            if MVIEWS_ENABLE and MVIEWS_COS_FUSION:
+                # keep only positive agreement (negatives get 0 credit)
+                c_b   = _pos(cos_b)
+                c_u3  = _pos(cos_u3)
+                c_out = _pos(cos_out)
+
+                # Smooth across mini-batches to avoid jitter
+                if 'gate_ema' not in locals() or gate_ema is None:
+                    gate_ema = torch.tensor([c_b, c_u3, c_out], device=fake.device, dtype=fake.dtype)
+                else:
+                    curr = torch.tensor([c_b, c_u3, c_out], device=fake.device, dtype=fake.dtype)
+                    gate_ema = MVIEWS_EMA_BETA * gate_ema + (1.0 - MVIEWS_EMA_BETA) * curr
+
+                logits = MVIEWS_KAPPA * gate_ema
+                w = _softmax_with_floor(logits, MVIEWS_FLOOR)
+                w_b, w_u3, w_out = w[0].item(), w[1].item(), w[2].item()
+            else:
+                # Fallback to output-only (your old baseline)
+                w_b, w_u3, w_out = 0.0, 0.0, 1.0
+
+            # One backward with multiple roots; PyTorch will sum parameter grads
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_comb)   # ONE backward
+            torch.autograd.backward(
+                tensors=[b, u3, fake],
+                grad_tensors=[
+                    w_b  * v_b_comb,
+                    w_u3 * v_u3_comb,
+                    w_out* v_out_comb
+                ],
+                retain_graph=False
+            )
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # For logging only (proxy scalar; not used for backward)
+            # Logging proxy (not used for backward)
             loss_G_log = (loss_recon + loss_gan).detach().item()
+            # Optionally uncomment to inspect gate:
+            # print(f"[Gate] w_b={w_b:.2f}, w_u3={w_u3:.2f}, w_out={w_out:.2f} | cos b/u3/out = {cos_b:.2f}/{cos_u3:.2f}/{cos_out:.2f}")
+
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
