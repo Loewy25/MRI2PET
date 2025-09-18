@@ -51,3 +51,19 @@ MIN_HOLD_EPOCHS = 1
 
 # Optional: if you later want Adam-aware whitening before cos/MGDA (leave False for now)
 ADAM_AWARE_NORM = False
+
+# ---- Multi-view MGDA-UB: epoch schedule (Idea 2) ----
+# Turn the multi-view fusion ON/OFF (set False to fall back to single-view = output only)
+MVIEWS_ENABLE = True
+
+# Use an epoch-based schedule for the three views (bottleneck, u3, output)
+MVIEWS_SCHEDULE = True
+
+# Epoch breakpoints: ramp linearly from EARLY -> LATE between these
+MVIEWS_EARLY_EPOCHS = 25     # first 15 epochs = emphasize encoder
+MVIEWS_LATE_EPOCH   = 60     # from 15 to 60 = linear ramp; >=60 = late weights
+
+# Weights triplets (b, u3, out). They will be renormalized to sum to 1.
+MVIEWS_W_EARLY = (0.50, 0.30, 0.20)   # early: push representation learning
+MVIEWS_W_LATE  = (0.10, 0.20, 0.70)   # late : focus the output for fidelity
+
