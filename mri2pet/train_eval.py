@@ -12,6 +12,13 @@ from .config import (
 )
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
+from .config import (
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    # cosine-gated multi-view fusion
+    MVIEWS_ENABLE, MVIEWS_COS_FUSION, MVIEWS_KAPPA, MVIEWS_FLOOR, MVIEWS_EMA_BETA,
+)
+
 
 # ---------- MGDA-UB helpers for dynamic grouping ----------
 def _flatten5d(x: torch.Tensor) -> torch.Tensor:
