@@ -5,6 +5,8 @@ from scipy.ndimage import zoom as nd_zoom
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .config import MVIEWS_ENABLE, MVIEWS_WEIGHTS
+
 
 from .config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
@@ -184,59 +186,94 @@ def train_paggan(
 
 
 
-                        # ---- Update G (Dynamic merge/split of L1 & SSIM + MGDA-UB) ----
+            # ---- Update G (Multi-view MGDA-UB fusion, stable weights) ----
             G.zero_grad(set_to_none=True)
 
-            # Forward through G and D (for GAN loss)
-            fake = G(mri5)
+            # Forward ONCE to get all views
+            fake, u3, b = G.forward_with_intermediates(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # Atomic losses (keep separate; we'll merge/split on gradients)
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1  = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
-            loss_ssim = (1.0 - ssim_val)                               # make it a loss
-            loss_recon = gamma * (loss_l1 + loss_ssim)                 # for logging
+            # Atomic losses (same as baseline; dynamic grouping will sit on their gradients)
+            loss_gan  = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1   = l1_loss(fake, pet5)
+            ssim_val  = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
+            loss_ssim = (1.0 - ssim_val)
+            loss_recon = gamma * (loss_l1 + loss_ssim)                  # for logging only
 
-            # Output-space grads wrt 'fake' for each task
-            # We will not backprop them; just read. We'll do ONE backward with the combined direction.
-            v_l1   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
-            v_ssim = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
-            v_gan  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            # Gradients wrt EACH VIEW (b, u3, fake). We normalize per-sample.
+            # --- bottleneck view ---
+            v_l1_b   = torch.autograd.grad(loss_l1,   b, retain_graph=True)[0]
+            v_ssim_b = torch.autograd.grad(loss_ssim, b, retain_graph=True)[0]
+            v_gan_b  = torch.autograd.grad(loss_gan,  b, retain_graph=True)[0]
+            v_l1_b_n, v_ssim_b_n, v_gan_b_n = (_l2_normalize_per_sample(v_l1_b),
+                                               _l2_normalize_per_sample(v_ssim_b),
+                                               _l2_normalize_per_sample(v_gan_b))
 
-            # Per-sample L2 normalization (stable across objectives)
-            v_l1n   = _l2_normalize_per_sample(v_l1)
-            v_ssimn = _l2_normalize_per_sample(v_ssim)
-            v_gann  = _l2_normalize_per_sample(v_gan)
+            # --- u3 view ---
+            v_l1_u3   = torch.autograd.grad(loss_l1,   u3, retain_graph=True)[0]
+            v_ssim_u3 = torch.autograd.grad(loss_ssim, u3, retain_graph=True)[0]
+            v_gan_u3  = torch.autograd.grad(loss_gan,  u3, retain_graph=True)[0]
+            v_l1_u3_n, v_ssim_u3_n, v_gan_u3_n = (_l2_normalize_per_sample(v_l1_u3),
+                                                  _l2_normalize_per_sample(v_ssim_u3),
+                                                  _l2_normalize_per_sample(v_gan_u3))
 
-            # Track cosine(L1, SSIM) this epoch (for the controller)
-            cos_l1_ssim = _cos_batch(v_l1n, v_ssimn)  # scalar (B=1)
-            # Accumulate epoch stats
+            # --- output view (fake) ---
+            v_l1_out   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
+            v_ssim_out = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
+            v_gan_out  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
+            v_l1_out_n, v_ssim_out_n, v_gan_out_n = (_l2_normalize_per_sample(v_l1_out),
+                                                     _l2_normalize_per_sample(v_ssim_out),
+                                                     _l2_normalize_per_sample(v_gan_out))
+
+            # Track cosine(L1, SSIM) at the OUTPUT view for your controller
+            cos_l1_ssim = _cos_batch(v_l1_out_n, v_ssim_out_n)
             if 'cos_sum' not in locals():
                 cos_sum, cos_cnt = 0.0, 0
             cos_sum += cos_l1_ssim
             cos_cnt += 1
 
-            # ---- Build final output-space direction v_comb depending on state ----
+            # Per-view MGDA-UB (2↔3 tasks) using your dynamic merge/split state
             if DYN_GROUP and group_state == "merged":
-                # (1) Inside the group: MGDA-UB on {L1, SSIM} -> v_recon^†
-                _, v_recon_dag = _mgda2_normed(v_l1n, v_ssimn)
-                # (2) Top level: MGDA-UB on {v_recon^†, GAN}
-                _, v_comb = _mgda2_normed(v_recon_dag, v_gann)
-                mode_str = "MERGED"
+                # inside recon group: MGDA(L1,SSIM) at each view
+                _, v_rec_b   = _mgda2_normed(v_l1_b_n,   v_ssim_b_n)
+                _, v_rec_u3  = _mgda2_normed(v_l1_u3_n,  v_ssim_u3_n)
+                _, v_rec_out = _mgda2_normed(v_l1_out_n, v_ssim_out_n)
+                # top-level: MGDA(recon, GAN) at each view
+                _, v_b_comb   = _mgda2_normed(v_rec_b,   v_gan_b_n)
+                _, v_u3_comb  = _mgda2_normed(v_rec_u3,  v_gan_u3_n)
+                _, v_out_comb = _mgda2_normed(v_rec_out, v_gan_out_n)
             else:
-                # Split: MGDA-UB on {L1, SSIM, GAN}
-                _, v_comb = _mgda3_normed([v_l1n, v_ssimn, v_gann])
-                mode_str = "SPLIT"
+                # split state: MGDA(L1, SSIM, GAN) at each view
+                _, v_b_comb   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
+                _, v_u3_comb  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
+                _, v_out_comb = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
 
-            # Single backward through G with the combined direction
-            opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_comb)   # ONE backward
+            # Stable fusion across views (fixed weights from config, re-normalized)
+            if MVIEWS_ENABLE:
+                w_b, w_u3, w_out = MVIEWS_WEIGHTS
+                s = float(w_b + w_u3 + w_out) if (w_b + w_u3 + w_out) != 0 else 1.0
+                w_b   = float(w_b)   / s
+                w_u3  = float(w_u3)  / s
+                w_out = float(w_out) / s
+
+                # One backward with multiple roots; autograd sums parameter grads
+                opt_G.zero_grad(set_to_none=True)
+                torch.autograd.backward(
+                    tensors=[b, u3, fake],
+                    grad_tensors=[w_b * v_b_comb, w_u3 * v_u3_comb, w_out * v_out_comb],
+                    retain_graph=False
+                )
+            else:
+                # Fallback: use output view only (your original single-view behavior)
+                opt_G.zero_grad(set_to_none=True)
+                fake.backward(v_out_comb, retain_graph=False)
+
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # For logging only (proxy scalar; not used for backward)
+            # Logging proxy (not used for backward)
             loss_G_log = (loss_recon + loss_gan).detach().item()
+
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
