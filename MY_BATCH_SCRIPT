@@ -12,11 +12,12 @@
 
 module load cuda/12.9
 module load cudnn/9.11.0.98-cuda12
-
+module load freesurfer
 
 . ~/miniconda3/bin/activate
 conda activate pasta
-module load freesurfer
+
+
 
 
 python ROI.py
