@@ -15,7 +15,7 @@ PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
 OUT_ROOT  = "/scratch/l.peiwang/kari_brainv11"   # subject folders live here (target for ROI masks)
-LUT_PATH  = "/export/freesurfer/freesurfer-7.4.1/FreeSurferColorLUT.txt"
+LUT_PATH  = "/scratch/l.peiwang/FreeSurferColorLUT.txt"
 
 RUN_LIMIT   = None     # e.g., 5 for quick test; None = all
 ATOL_AFFINE = 1e-4
