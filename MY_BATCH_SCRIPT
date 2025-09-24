@@ -16,6 +16,9 @@ module load freesurfer
 
 . ~/miniconda3/bin/activate
 conda activate pasta
+conda install -c conda-forge nibabel
+python -c "import nibabel; print(nibabel.__version__)"
+
 
 
 
