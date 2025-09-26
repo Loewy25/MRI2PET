@@ -233,7 +233,7 @@ def compute_subject_roi_metrics(subj: str,
         elif strict_affine and not affines_close(wb_img, fake_img):
             raise TypeError("Mask Wrong Affine")
         else:
-            raise TypeError("Mask Wrong with something Unknown")
+            wb_mask_np = (wb_np > 0).astype(np.float32)
             
     if wb_mask_np is None and roi_union_np is not None:
         raise TypeError("Noooo Mask")
