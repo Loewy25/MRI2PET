@@ -229,14 +229,14 @@ def compute_subject_roi_metrics(subj: str,
     if os.path.exists(wb_path):
         wb_img, wb_np = load_nii(wb_path)
         if wb_np.shape != fake_np.shape:
-            print(f"[WARN] Whole-brain mask shape mismatch for {subj}: mask{wb_np.shape} vs pet{fake_np.shape}; falling back to ROI union.")
+            raise TypeError("Mask Wrong Shape")
         elif strict_affine and not affines_close(wb_img, fake_img):
-            print(f"[WARN] Whole-brain mask affine mismatch for {subj}; falling back to ROI union.")
+            raise TypeError("Mask Wrong Affine")
         else:
-            wb_mask_np = (wb_np > 0).astype(np.float32)
-
+            raise TypeError("Mask Wrong with something Unknown")
+            
     if wb_mask_np is None and roi_union_np is not None:
-        wb_mask_np = (roi_union_np > 0).astype(np.float32)
+        raise TypeError("Noooo Mask")
 
     if wb_mask_np is not None:
         wb_vox = int(np.count_nonzero(wb_mask_np))
