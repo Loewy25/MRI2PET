@@ -86,6 +86,46 @@ def mmd_gaussian(real: torch.Tensor,
         total += mmd.item()
     return total / B
 
+# ---------- Masked metrics (bug fix) ----------
+def masked_mse(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    num = (((x - y) ** 2) * mask).sum()
+    den = mask.sum().clamp_min(eps)
+    return num / den
+
+def masked_psnr(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, data_range: float = 3.5, eps: float = 1e-6) -> torch.Tensor:
+    mse = masked_mse(x, y, mask, eps=eps)
+    return 10.0 * torch.log10((data_range ** 2) / mse)
+
+def ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
+                  ksize: int = 3, k1: float = 0.01, k2: float = 0.03,
+                  data_range: float = 3.5, eps: float = 1e-6) -> torch.Tensor:
+    """
+    SSIM averaged only over windows that intersect the mask.
+    Uses masked local statistics within each window.
+    """
+    pad = ksize // 2
+    k = torch.ones((1, 1, ksize, ksize, ksize), device=x.device, dtype=x.dtype)
+
+    def wavg(z):
+        z_sum = F.conv3d(z * mask, k, padding=pad)
+        m_sum = F.conv3d(mask,    k, padding=pad).clamp_min(eps)
+        return z_sum / m_sum
+
+    mu_x = wavg(x); mu_y = wavg(y)
+    mu_x2 = mu_x * mu_x; mu_y2 = mu_y * mu_y; mu_xy = mu_x * mu_y
+    sigma_x  = wavg(x * x) - mu_x2
+    sigma_y  = wavg(y * y) - mu_y2
+    sigma_xy = wavg(x * y) - mu_xy
+
+    C1 = (k1 * data_range) ** 2
+    C2 = (k2 * data_range) ** 2
+    num = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
+    den = (mu_x2 + mu_y2 + C1) * (sigma_x + sigma_y + C2)
+    ssim_map = num / (den + eps)
+
+    win_hits = (F.conv3d(mask, k, padding=pad) > 0).to(x.dtype)
+    return (ssim_map * win_hits).sum() / win_hits.sum().clamp_min(eps)
+
 # ---------- IO helpers ----------
 def load_nii(path: str):
     img = nib.load(path)
@@ -137,6 +177,10 @@ def compute_subject_roi_metrics(subj: str,
     x_gt   = to_tensor_5d(gt_np,   device)
 
     rows: List[Dict[str, str]] = []
+
+    # Track union of ROI masks (fallback if whole-brain mask is missing)
+    roi_union_np: Optional[np.ndarray] = None
+
     for roi_name, roi_file in ROI_FILES.items():
         roi_path = os.path.join(subj_roi, roi_file)
         if not os.path.exists(roi_path):
@@ -151,20 +195,22 @@ def compute_subject_roi_metrics(subj: str,
             print(f"[WARN] ROI affine mismatch for {subj} {roi_name}; skip (strict_affine).")
             continue
 
-        voxels = int(np.count_nonzero(roi_np))
+        roi_bin = (roi_np > 0).astype(np.float32)
+        voxels = int(np.count_nonzero(roi_bin))
         if voxels == 0:
             print(f"[WARN] ROI empty for {subj} {roi_name}; skip.")
             continue
 
-        roi_t  = to_tensor_5d((roi_np > 0).astype(np.float32), device)
-        fake_m = x_fake * roi_t
-        gt_m   = x_gt   * roi_t
+        # accumulate union
+        roi_union_np = roi_bin if roi_union_np is None else np.logical_or(roi_union_np > 0, roi_bin > 0).astype(np.float32)
 
-        # ---- EXACT old metrics (4): SSIM, PSNR, MSE, MMD ----
-        ssim_v = float(ssim3d(fake_m, gt_m, data_range=data_range).item())
-        psnr_v = float(psnr(fake_m,  gt_m, data_range=data_range))
-        mse_v  = float(F.mse_loss(fake_m, gt_m).item())
-        mmd_v  = float(mmd_gaussian(gt_m, fake_m, num_voxels=mmd_voxels, mask=roi_t))
+        roi_t  = to_tensor_5d(roi_bin, device)
+
+        # ---- Masked metrics (bug fix) ----
+        ssim_v = float(ssim3d_masked(x_fake, x_gt, roi_t, data_range=data_range).item())
+        mse_v  = float(masked_mse(x_fake, x_gt, roi_t).item())
+        psnr_v = float(masked_psnr(x_fake, x_gt, roi_t, data_range=data_range).item())
+        mmd_v  = float(mmd_gaussian(x_gt, x_fake, num_voxels=mmd_voxels, mask=roi_t))
 
         rows.append({
             "subject": subj,
@@ -175,6 +221,46 @@ def compute_subject_roi_metrics(subj: str,
             "MSE":  f"{mse_v:.8f}",
             "MMD":  f"{mmd_v:.8f}",
         })
+
+    # ---- Whole-brain metrics (additional result) ----
+    # Preferred: use aseg_brainmask if present; else fallback to union of ROIs (if any).
+    wb_path = os.path.join(subj_roi, "aseg_brainmask.nii.gz")
+    wb_mask_np: Optional[np.ndarray] = None
+    if os.path.exists(wb_path):
+        wb_img, wb_np = load_nii(wb_path)
+        if wb_np.shape != fake_np.shape:
+            print(f"[WARN] Whole-brain mask shape mismatch for {subj}: mask{wb_np.shape} vs pet{fake_np.shape}; falling back to ROI union.")
+        elif strict_affine and not affines_close(wb_img, fake_img):
+            print(f"[WARN] Whole-brain mask affine mismatch for {subj}; falling back to ROI union.")
+        else:
+            wb_mask_np = (wb_np > 0).astype(np.float32)
+
+    if wb_mask_np is None and roi_union_np is not None:
+        wb_mask_np = (roi_union_np > 0).astype(np.float32)
+
+    if wb_mask_np is not None:
+        wb_vox = int(np.count_nonzero(wb_mask_np))
+        if wb_vox > 0:
+            wb_t = to_tensor_5d(wb_mask_np, device)
+            ssim_wb = float(ssim3d_masked(x_fake, x_gt, wb_t, data_range=data_range).item())
+            mse_wb  = float(masked_mse(x_fake, x_gt, wb_t).item())
+            psnr_wb = float(masked_psnr(x_fake, x_gt, wb_t, data_range=data_range).item())
+            mmd_wb  = float(mmd_gaussian(x_gt, x_fake, num_voxels=mmd_voxels, mask=wb_t))
+
+            rows.append({
+                "subject": subj,
+                "roi": "WholeBrain",
+                "voxels": str(wb_vox),
+                "SSIM": f"{ssim_wb:.6f}",
+                "PSNR": f"{psnr_wb:.6f}" if math.isfinite(psnr_wb) else "inf",
+                "MSE":  f"{mse_wb:.8f}",
+                "MMD":  f"{mmd_wb:.8f}",
+            })
+        else:
+            print(f"[WARN] Whole-brain mask empty for {subj}; skipping WholeBrain row.")
+    else:
+        print(f"[WARN] No whole-brain mask available for {subj}; skipping WholeBrain row.")
+
     return rows
 
 # ---------- Aggregation ----------
