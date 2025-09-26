@@ -261,7 +261,7 @@ def evaluate_paggan(
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
         else:
-            brain = (pet_for_metric > 0).float()
+            raise TypeError("No Mask")
 
         fake_m = fake * brain
         pet_m  = pet_for_metric * brain
