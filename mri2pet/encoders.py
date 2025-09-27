@@ -63,24 +63,54 @@ class ResNet3DEncoder(nn.Module):
 # ---- utils: freezing / partial fine-tuning ----
 def set_finetune_pct(module: nn.Module, pct: float):
     """
-    Freeze lower layers and unfreeze the top pct of child modules.
-    Works best on r3d_18; on fallback, uses last modules.
+    Freeze lower layers and unfreeze the top pct of the encoder.
+    For torchvision r3d_18, we use stage-level granularity: [stem, layer1, layer2, layer3, layer4].
+    Fallback: last-k children.
     """
     pct = float(max(0.0, min(1.0, pct)))
-    # Freeze everything
+
+    # Freeze everything first
     for p in module.parameters():
         p.requires_grad = False
-    # Unfreeze top fraction of direct children (coarse but effective)
+
+    # Special path for ResNet3DEncoder with r3d_18 backbone
+    bb = getattr(module, "backbone", None)
+    if bb is not None and hasattr(bb, "layer4"):
+        stages = []
+        # Some r3d_18 variants expose 'stem' as Sequential; be defensive
+        if hasattr(bb, "stem"):
+            stages.append(bb.stem)
+        if hasattr(bb, "layer1"): stages.append(bb.layer1)
+        if hasattr(bb, "layer2"): stages.append(bb.layer2)
+        if hasattr(bb, "layer3"): stages.append(bb.layer3)
+        if hasattr(bb, "layer4"): stages.append(bb.layer4)
+
+        L = len(stages)
+        if L == 0:
+            # fallback to whole backbone if unexpected
+            if pct > 0.0:
+                for p in module.parameters(): p.requires_grad = True
+            return
+
+        k = max(1, int(round(pct * L))) if pct > 0.0 else 0
+        # Unfreeze top-k stages
+        for s in stages[-k:]:
+            for p in s.parameters():
+                p.requires_grad = True
+        return
+
+    # Generic fallback (non-r3d_18)
     children = list(module.children())
     if len(children) == 0:
-        # Single-seq fallback
-        for p in module.parameters():
-            p.requires_grad = True
-        return
-    k = max(1, int(round(pct * len(children))))
-    for child in children[-k:]:
-        for p in child.parameters():
-            p.requires_grad = True
+        # Single block: either keep frozen (pct=0) or unfreeze all (>0)
+        if pct > 0.0:
+            for p in module.parameters(): p.requires_grad = True
+    else:
+        k = max(1, int(round(pct * len(children)))) if pct > 0.0 else 0
+        for child in children[-k:]:
+            for p in child.parameters():
+                p.requires_grad = True
+
 
 def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(dim=1, keepdim=True) + eps)
