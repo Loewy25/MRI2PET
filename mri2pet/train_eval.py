@@ -1,20 +1,22 @@
-import os, time
-from .contrastive import contrastive_aux_loss
+import os, time, itertools
 from typing import Any, Dict, Iterable, Optional
 import numpy as np
-from scipy.ndimage import zoom as nd_zoom
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from scipy.ndimage import zoom as nd_zoom
+
+from .contrastive import contrastive_aux_loss
 from .config import MVIEWS_ENABLE, MVIEWS_WEIGHTS
-
-
 from .config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
     LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1
 )
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
+
 
 # ---------- MGDA-UB helpers for dynamic grouping ----------
 def _flatten5d(x: torch.Tensor) -> torch.Tensor:
@@ -33,7 +35,6 @@ def _cos_batch(v1n: torch.Tensor, v2n: torch.Tensor) -> float:
     # Cosine of normalized per-sample vectors; returns batch-mean (B=1 -> scalar)
     a = _flatten5d(v1n)
     b = _flatten5d(v2n)
-    # v1n, v2n should already be per-sample normalized
     cos = (a * b).sum(dim=1)  # per-sample cos
     return float(cos.mean().detach().cpu())
 
@@ -49,8 +50,7 @@ def _mgda2_normed(v1n: torch.Tensor, v2n: torch.Tensor, eps: float = 1e-12):
     diff = (V2 - V1)
     num  = (diff * V2).sum(dim=1)                 # (v2-v1)·v2
     den  = (diff * diff).sum(dim=1) + eps         # ||v1-v2||^2
-    alpha_b = torch.clamp(num / den, 0.0, 1.0)    # per-sample solution
-    # robust scalar for the batch (B=1 -> just that value)
+    alpha_b = torch.clamp(num / den, 0.0, 1.0)    # per-sample
     alpha = alpha_b.median()
     v_comb = alpha * v1n + (1.0 - alpha) * v2n
     return alpha, v_comb
@@ -66,31 +66,29 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
     NOTE: assumes B=1 (your setup). If B>1, run per-sample & reduce by median.
     """
     assert len(vs_normed) == 3, "Need 3 normalized vectors"
-    # flatten (assume B=1)
     U = [_flatten5d(vn).squeeze(0) for vn in vs_normed]  # each [N]
-    # Gram matrix
     G = torch.stack([torch.stack([torch.dot(Ui, Uj) for Uj in U]) for Ui in U])  # [3,3]
     ones = torch.ones(3, device=G.device, dtype=G.dtype)
 
     candidates = []
 
-    # interior candidate: a_tilde = G^{-1} 1, then normalize to sum=1
+    # interior candidate
     try:
         a_tilde = torch.linalg.solve(G + eps * torch.eye(3, device=G.device, dtype=G.dtype), ones)
     except RuntimeError:
         a_tilde = torch.linalg.lstsq(G, ones).solution
     a_int = a_tilde / (a_tilde.sum() + eps)
-    if (a_int >= -1e-8).all():  # feasible
+    if (a_int >= -1e-8).all():
         a_int = torch.clamp(a_int, 0.0, 1.0)
         a_int = a_int / (a_int.sum() + eps)
         candidates.append(a_int)
 
-    # edges: (i,j) pairs -> 2-task closed forms
+    # edges (i,j)
     def edge_2task(u_i, u_j, i, j):
         diff = u_j - u_i
         num = torch.dot(diff, u_j)
         den = torch.dot(diff, diff) + eps
-        a = torch.clamp(num / den, 0.0, 1.0)  # weight on i
+        a = torch.clamp(num / den, 0.0, 1.0)
         w = torch.zeros(3, device=G.device, dtype=G.dtype)
         w[i] = a
         w[j] = 1.0 - a
@@ -110,22 +108,15 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
             n_best, w_best = n, w
     v_comb = w_best[0] * vs_normed[0] + w_best[1] * vs_normed[1] + w_best[2] * vs_normed[2]
     return w_best, v_comb
-# ------------------------------------------------------------
-# add near other MGDA helpers
-# add near other imports
-import itertools
 
-# add right after _mgda3_normed
 @torch.no_grad()
 def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
     """
-    4-task MGDA on the simplex. Enumerates interior, 3-task faces, 2-task edges, and singletons;
-    returns the min-norm combination.
+    4-task MGDA on the simplex. Enumerates interior, 3-task faces, 2-task edges, and singletons.
     vs_normed: list of 4 tensors [B,1,D,H,W], already per-sample L2-normalized.
-    Returns (w_best [4], v_comb tensor with same shape as inputs).
-    Assumes B=1 (as in our setup).
+    Returns (w_best [4], v_comb). Assumes B=1 (your setup).
     """
-    assert len(vs_normed) == 4
+    assert len(vs_normed) == 4, "Need 4 normalized vectors"
     U = [_flatten5d(vn).squeeze(0) for vn in vs_normed]  # each [N]
     device = U[0].device
     dtype = U[0].dtype
@@ -152,11 +143,11 @@ def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
     # All 3-task faces (interior + edges)
     for idxs in itertools.combinations(range(4), 3):
         subU = [U[i] for i in idxs]
-        G3 = torch.stack([torch.stack([torch.dot(ui, uj) for uj in subU]) for ui in subU])  # [3,3]
+        G3 = torch.stack([torch.stack([torch.dot(ui, uj) for uj in subU]) for ui in subU])
         ones3 = torch.ones(3, device=device, dtype=dtype)
         epsI3 = eps * torch.eye(3, device=device, dtype=dtype)
 
-        # interior on the face
+        # interior on face
         try:
             a_tilde3 = torch.linalg.solve(G3 + epsI3, ones3)
         except RuntimeError:
@@ -213,7 +204,7 @@ def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
 
     v_comb = sum(best_w[i] * vs_normed[i] for i in range(4))
     return best_w, v_comb
-
+# ------------------------------------------------------------
 
 
 def train_paggan(
@@ -224,14 +215,13 @@ def train_paggan(
     device: torch.device,
     epochs: int = EPOCHS,
     gamma: float = GAMMA,
-    lambda_gan: float = LAMBDA_GAN,
+    lambda_gan: float = LAMBDA_GAN,   # kept for logging compatibility
     data_range: float = DATA_RANGE,
     verbose: bool = True,
-    # >>> NEW: frozen teacher encoders + config dict
+    # >>> frozen teacher encoders + config dict
     contrastive_mods: Optional[Dict[str, nn.Module]] = None,
     contrast_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-
 
     G.to(device); D.to(device)
     G.train(); D.train()
@@ -240,23 +230,23 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     bce = nn.BCEWithLogitsLoss()
 
-    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
-    lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
-    ema_beta = 0.9                # EMA smoothing for B=1 noise
-    LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
+    # kept (unused controller params preserved for compatibility/logs)
+    lambda_g = float(lambda_gan)
+    ema_beta = 0.9
+    LAM_MIN, LAM_MAX = 0.05, 5.0
     EPS = 1e-8
-    TRUST_TAU = 0.5               # trust-region: max 50% change per step
+    TRUST_TAU = 0.5
 
     best_val = float('inf')
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
-        # === Dynamic grouping controller state (Idea 1) ===
+    # === Dynamic grouping controller state for (L1, SSIM)
     from .config import DYN_GROUP, COS_EMA_BETA, COS_HIGH, COS_LOW, MIN_HOLD_EPOCHS, ADAM_AWARE_NORM
-    group_state = "merged"   # start merged: L1+SSIM act as one Recon task
+    group_state = "merged"
     epochs_since_switch = 0
-    cos_ema = None           # EMA of cos(L1,SSIM) in output-space
+    cos_ema = None
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -270,19 +260,15 @@ def train_paggan(
 
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
-            brain_mask = None
             if isinstance(meta, dict) and meta.get("brain_mask", None) is not None:
                 bm = meta["brain_mask"]
                 if not torch.is_tensor(bm):
                     bm = torch.from_numpy(bm)
                 brain_mask = bm.to(device).squeeze().bool()  # [D,H,W]
             else:
-                # your dataset always provides a mask; this is a safe fallback
                 brain_mask = (pet if pet.dim()==5 else pet.unsqueeze(0))[0, 0] > 0
 
             B = mri.size(0) if mri.dim() == 5 else 1
-            real_lbl = torch.ones(B, 1, device=device)
-            fake_lbl = torch.zeros(B, 1, device=device)
 
             # ---- Update D ----
             mri5 = mri if mri.dim()==5 else mri.unsqueeze(0)
@@ -301,32 +287,27 @@ def train_paggan(
             loss_D = bce(out_real, torch.ones_like(out_real)) + \
                      bce(out_fake, torch.zeros_like(out_fake))
             loss_D.backward()
-            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)  # <— clip D
+            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-
-
-            # ---- Update G (Multi-view MGDA-UB fusion, stable weights) ----
+            # ---- Update G (Multi-view MGDA-UB fusion, with contrast integrated) ----
             G.zero_grad(set_to_none=True)
 
             # Forward ONCE to get all views
             fake, u3, b = G.forward_with_intermediates(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # Atomic losses (same as baseline; dynamic grouping will sit on their gradients)
+            # Atomic losses
             loss_gan  = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
             loss_l1   = l1_loss(fake, pet5)
             ssim_val  = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
             loss_ssim = (1.0 - ssim_val)
-            loss_recon = gamma * (loss_l1 + loss_ssim)                  # for logging only
 
-
-            # >>> NEW: contrastive auxiliary loss (global + optional patch-level)
+            # Contrastive loss (scalar)
             L_contr = torch.tensor(0.0, device=device)
-            contr_diag = {}
-            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
-                # mri5, pet5, fake already exist in this scope
-                L_contr, contr_diag = contrastive_aux_loss(
+            contrast_used = (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False)
+            if contrast_used:
+                L_contr, _ = contrastive_aux_loss(
                     mods=contrastive_mods,
                     mri=mri5, pet=pet5, pet_hat=fake,
                     brain_mask=brain_mask,
@@ -336,123 +317,134 @@ def train_paggan(
                     patches_per_subj=contrast_cfg["patches_per_subj"]
                 )
 
-            # Gradients wrt EACH VIEW (b, u3, fake). We normalize per-sample.
+            # Gradients wrt EACH VIEW (b, u3, fake). Normalize per-sample.
             # --- bottleneck view ---
             v_l1_b   = torch.autograd.grad(loss_l1,   b, retain_graph=True)[0]
             v_ssim_b = torch.autograd.grad(loss_ssim, b, retain_graph=True)[0]
             v_gan_b  = torch.autograd.grad(loss_gan,  b, retain_graph=True)[0]
-            v_l1_b_n, v_ssim_b_n, v_gan_b_n = (_l2_normalize_per_sample(v_l1_b),
-                                               _l2_normalize_per_sample(v_ssim_b),
-                                               _l2_normalize_per_sample(v_gan_b))
+            v_l1_b_n, v_ssim_b_n, v_gan_b_n = (
+                _l2_normalize_per_sample(v_l1_b),
+                _l2_normalize_per_sample(v_ssim_b),
+                _l2_normalize_per_sample(v_gan_b),
+            )
 
             # --- u3 view ---
             v_l1_u3   = torch.autograd.grad(loss_l1,   u3, retain_graph=True)[0]
             v_ssim_u3 = torch.autograd.grad(loss_ssim, u3, retain_graph=True)[0]
             v_gan_u3  = torch.autograd.grad(loss_gan,  u3, retain_graph=True)[0]
-            v_l1_u3_n, v_ssim_u3_n, v_gan_u3_n = (_l2_normalize_per_sample(v_l1_u3),
-                                                  _l2_normalize_per_sample(v_ssim_u3),
-                                                  _l2_normalize_per_sample(v_gan_u3))
+            v_l1_u3_n, v_ssim_u3_n, v_gan_u3_n = (
+                _l2_normalize_per_sample(v_l1_u3),
+                _l2_normalize_per_sample(v_ssim_u3),
+                _l2_normalize_per_sample(v_gan_u3),
+            )
 
             # --- output view (fake) ---
             v_l1_out   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
             v_ssim_out = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
             v_gan_out  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
-            v_l1_out_n, v_ssim_out_n, v_gan_out_n = (_l2_normalize_per_sample(v_l1_out),
-                                                     _l2_normalize_per_sample(v_ssim_out),
-                                                     _l2_normalize_per_sample(v_gan_out))
+            v_l1_out_n, v_ssim_out_n, v_gan_out_n = (
+                _l2_normalize_per_sample(v_l1_out),
+                _l2_normalize_per_sample(v_ssim_out),
+                _l2_normalize_per_sample(v_gan_out),
+            )
 
-            # Track cosine(L1, SSIM) at the OUTPUT view for your controller
+            # Contrastive grads per view (only if used)
+            if contrast_used:
+                v_contr_b   = torch.autograd.grad(L_contr, b,    retain_graph=True)[0]
+                v_contr_u3  = torch.autograd.grad(L_contr, u3,   retain_graph=True)[0]
+                v_contr_out = torch.autograd.grad(L_contr, fake, retain_graph=True)[0]
+                v_contr_b_n, v_contr_u3_n, v_contr_out_n = (
+                    _l2_normalize_per_sample(v_contr_b),
+                    _l2_normalize_per_sample(v_contr_u3),
+                    _l2_normalize_per_sample(v_contr_out),
+                )
+
+            # Track cosine(L1, SSIM) at the OUTPUT view for controller
             cos_l1_ssim = _cos_batch(v_l1_out_n, v_ssim_out_n)
             if 'cos_sum' not in locals():
                 cos_sum, cos_cnt = 0.0, 0
             cos_sum += cos_l1_ssim
             cos_cnt += 1
 
-            # Per-view MGDA-UB (2↔3 tasks) using your dynamic merge/split state
+            # ---- Per-view MGDA-UB selection (merge/split L1↔SSIM; include GAN and CONTR) ----
             if DYN_GROUP and group_state == "merged":
-                # inside recon group: MGDA(L1,SSIM) at each view
+                # First merge recon (L1, SSIM) per view
                 _, v_rec_b   = _mgda2_normed(v_l1_b_n,   v_ssim_b_n)
                 _, v_rec_u3  = _mgda2_normed(v_l1_u3_n,  v_ssim_u3_n)
                 _, v_rec_out = _mgda2_normed(v_l1_out_n, v_ssim_out_n)
-                # top-level: MGDA(recon, GAN) at each view
-                _, v_b_comb   = _mgda2_normed(v_rec_b,   v_gan_b_n)
-                _, v_u3_comb  = _mgda2_normed(v_rec_u3,  v_gan_u3_n)
-                _, v_out_comb = _mgda2_normed(v_rec_out, v_gan_out_n)
+                if contrast_used:
+                    # MGDA over {Recon, GAN, CONTR}
+                    _, v_b_comb   = _mgda3_normed([v_rec_b,   v_gan_b_n,   v_contr_b_n])
+                    _, v_u3_comb  = _mgda3_normed([v_rec_u3,  v_gan_u3_n,  v_contr_u3_n])
+                    _, v_out_comb = _mgda3_normed([v_rec_out, v_gan_out_n, v_contr_out_n])
+                else:
+                    # MGDA over {Recon, GAN}
+                    _, v_b_comb   = _mgda2_normed(v_rec_b,   v_gan_b_n)
+                    _, v_u3_comb  = _mgda2_normed(v_rec_u3,  v_gan_u3_n)
+                    _, v_out_comb = _mgda2_normed(v_rec_out, v_gan_out_n)
             else:
-                # split state: MGDA(L1, SSIM, GAN) at each view
-                _, v_b_comb   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
-                _, v_u3_comb  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
-                _, v_out_comb = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
+                if contrast_used:
+                    # Full 4-task MGDA over {L1, SSIM, GAN, CONTR}
+                    _, v_b_comb   = _mgda4_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n,   v_contr_b_n])
+                    _, v_u3_comb  = _mgda4_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n,  v_contr_u3_n])
+                    _, v_out_comb = _mgda4_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n, v_contr_out_n])
+                else:
+                    # 3-task MGDA over {L1, SSIM, GAN}
+                    _, v_b_comb   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
+                    _, v_u3_comb  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
+                    _, v_out_comb = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
 
-            # Stable fusion across views (fixed weights from config, re-normalized)
+            # ---- Fuse views and backprop once (NO static λ for contrast) ----
             if MVIEWS_ENABLE:
                 w_b, w_u3, w_out = MVIEWS_WEIGHTS
                 s = float(w_b + w_u3 + w_out) if (w_b + w_u3 + w_out) != 0 else 1.0
                 w_b, w_u3, w_out = float(w_b)/s, float(w_u3)/s, float(w_out)/s
-            
+
                 opt_G.zero_grad(set_to_none=True)
-                # keep graph because we'll add a second backward for L_contr
                 torch.autograd.backward(
                     tensors=[b, u3, fake],
                     grad_tensors=[w_b * v_b_comb, w_u3 * v_u3_comb, w_out * v_out_comb],
-                    retain_graph=True
+                    retain_graph=False
                 )
             else:
                 opt_G.zero_grad(set_to_none=True)
-                # keep graph because we'll add a second backward for L_contr
-                fake.backward(v_out_comb, retain_graph=True)
-            
-            # >>> NEW: backprop the scalar contrastive loss into G
-            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
-                (contrast_cfg["lambda_contrast"] * L_contr).backward()
-            
+                fake.backward(v_out_comb, retain_graph=False)
+
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-
-            # Logging proxy (not used for backward)
-            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
-                loss_G_log = (loss_recon + loss_gan + contrast_cfg["lambda_contrast"] * L_contr).detach().item()
+            # Logging proxy (only for monitoring; not used for backward)
+            if contrast_used:
+                loss_G_log = (gamma * (loss_l1 + loss_ssim) + loss_gan + L_contr).detach().item()
             else:
-                loss_G_log = (loss_recon + loss_gan).detach().item()
-
-
+                loss_G_log = (gamma * (loss_l1 + loss_ssim) + loss_gan).detach().item()
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
             n_batches += 1
 
-
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
+
         # ---- End-of-epoch: update dynamic grouping state ----
-        if DYN_GROUP and cos_cnt > 0:
+        if DYN_GROUP and 'cos_cnt' in locals() and cos_cnt > 0:
             cos_epoch = cos_sum / max(1, cos_cnt)
             cos_ema = (cos_epoch if (cos_ema is None)
                        else COS_EMA_BETA * cos_ema + (1.0 - COS_EMA_BETA) * cos_epoch)
-
-            # Switch with hysteresis & min-hold
             switched = False
             if group_state == "merged" and epochs_since_switch >= MIN_HOLD_EPOCHS and cos_ema is not None and cos_ema <= COS_LOW:
-                group_state = "split"
-                epochs_since_switch = 0
-                switched = True
+                group_state = "split"; epochs_since_switch = 0; switched = True
             elif group_state == "split" and epochs_since_switch >= MIN_HOLD_EPOCHS and cos_ema is not None and cos_ema >= COS_HIGH:
-                group_state = "merged"
-                epochs_since_switch = 0
-                switched = True
+                group_state = "merged"; epochs_since_switch = 0; switched = True
             else:
                 epochs_since_switch += 1
 
-            # Log controller status
             print(f"[Epoch {epoch:03d}] Grouping={group_state} | cos(L1,SSIM)_ema={cos_ema:.3f}"
                   + ("  (state changed)" if switched else ""))
 
-            # reset accumulators for next epoch
             del cos_sum, cos_cnt
-
 
         # ---- Validation ----
         if val_loader is not None:
@@ -500,6 +492,7 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
+
 
 @torch.no_grad()
 def evaluate_paggan(
@@ -553,6 +546,7 @@ def evaluate_paggan(
         "MMD":  mmd_sum  / max(1, n),
     }
 
+
 @torch.no_grad()
 def save_test_volumes(
     G: nn.Module,
@@ -561,7 +555,6 @@ def save_test_volumes(
     out_dir: str,
     resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
 ):
-    import numpy as np
     print(f"Saving test volumes to: {out_dir}  (resample_back_to_t1={resample_back_to_t1})")
     os.makedirs(out_dir, exist_ok=True)
     G.to(device)
@@ -612,6 +605,7 @@ def save_test_volumes(
         _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
 
         print(f"  saved {sid}: MRI/PET_gt/PET_fake/PET_abs_error")
+
 
 @torch.no_grad()
 def evaluate_and_save(
@@ -701,3 +695,4 @@ def evaluate_and_save(
         "MSE":  mse_sum  / max(1, n),
         "MMD":  mmd_sum  / max(1, n),
     }
+
