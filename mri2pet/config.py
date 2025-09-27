@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_dynamic_stable"
+RUN_NAME   = "MGDA_UB_dynamic_stable_contra"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -70,7 +70,7 @@ CONTRAST_TAU: float = 0.10             # InfoNCE temperature
 FINETUNE_PCT: float = 0.30             # during pretrain: % of encoder to unfreeze (top-most)
 
 # Optim for pretraining
-PRETRAIN_EPOCHS: int = 30
+PRETRAIN_EPOCHS: int = 50
 LR_CONTRAST: float = 1e-4
 CONTRAST_CKPT: str = os.path.join(CKPT_DIR, "contrast_teachers.pt")
 
