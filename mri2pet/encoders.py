@@ -37,8 +37,15 @@ class ResNet3DEncoder(nn.Module):
         if _HAS_TV:
             model = r3d_18(weights=None)        # we will pretrain via InfoNCE
             # Replace first conv to accept 1 channel
-            model.stem[0] = nn.Conv3d(in_ch, 64, kernel_size=(3,7,7), stride=(1,2,2), padding=(1,3,3), bias=False)
+            model.stem[0] = nn.Conv3d(
+                in_ch, 64, kernel_size=(3,7,7), stride=(1,2,2), padding=(1,3,3), bias=False
+            )
+            # Keep the full model for stage-aware freezing,
+            # but build a feature trunk (no avgpool/fc) for forward()
             self.backbone = model
+            self.features = nn.Sequential(
+                model.stem, model.layer1, model.layer2, model.layer3, model.layer4
+            )
             self.feat_dim = 512                  # r3d_18 final planes
             self.pool = global_avgpool_3d
         else:
@@ -52,13 +59,14 @@ class ResNet3DEncoder(nn.Module):
                     nn.ReLU(inplace=True),
                 ]
             self.backbone = nn.Sequential(*layers)
+            self.features = self.backbone
             self.feat_dim = 512
             self.pool = global_avgpool_3d
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        f = self.backbone(x)
-        g = self.pool(f)
-        return g  # [B, feat_dim]
+        f = self.features(x)   # 5D feature map
+        g = self.pool(f)       # [B, feat_dim]
+        return g
 
 # ---- utils: freezing / partial fine-tuning ----
 def set_finetune_pct(module: nn.Module, pct: float):
@@ -77,7 +85,6 @@ def set_finetune_pct(module: nn.Module, pct: float):
     bb = getattr(module, "backbone", None)
     if bb is not None and hasattr(bb, "layer4"):
         stages = []
-        # Some r3d_18 variants expose 'stem' as Sequential; be defensive
         if hasattr(bb, "stem"):
             stages.append(bb.stem)
         if hasattr(bb, "layer1"): stages.append(bb.layer1)
@@ -87,13 +94,11 @@ def set_finetune_pct(module: nn.Module, pct: float):
 
         L = len(stages)
         if L == 0:
-            # fallback to whole backbone if unexpected
             if pct > 0.0:
                 for p in module.parameters(): p.requires_grad = True
             return
 
         k = max(1, int(round(pct * L))) if pct > 0.0 else 0
-        # Unfreeze top-k stages
         for s in stages[-k:]:
             for p in s.parameters():
                 p.requires_grad = True
@@ -102,7 +107,6 @@ def set_finetune_pct(module: nn.Module, pct: float):
     # Generic fallback (non-r3d_18)
     children = list(module.children())
     if len(children) == 0:
-        # Single block: either keep frozen (pct=0) or unfreeze all (>0)
         if pct > 0.0:
             for p in module.parameters(): p.requires_grad = True
     else:
@@ -110,7 +114,6 @@ def set_finetune_pct(module: nn.Module, pct: float):
         for child in children[-k:]:
             for p in child.parameters():
                 p.requires_grad = True
-
 
 def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(dim=1, keepdim=True) + eps)
