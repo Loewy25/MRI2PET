@@ -40,7 +40,7 @@ def _crop_3d(x: torch.Tensor, center: Tuple[int,int,int], ps: Tuple[int,int,int]
         patch = F.pad(patch, (0,pwz, 0,phz, 0,pdz), value=0.)
     return patch
 
-@torch.no_grad()
+
 def _embed(mods, x: torch.Tensor, which: str) -> torch.Tensor:
     if which == "M":
         f = mods["enc_M"](x); p = mods["proj_M"](f)
@@ -68,9 +68,11 @@ def sample_aligned_patches(
         m = _crop_3d(mri,     center, patch_size)
         p = _crop_3d(pet,     center, patch_size)
         ph= _crop_3d(pet_hat, center, patch_size)
-        uM_list.append(_embed(mods, m,  "M"))
-        uP_list.append(_embed(mods, p,  "P"))
-        # grad should flow only via PET_hat path later, but these are used in CE with stop-grad outside
+        # teachers (MRI, PET): no grad
+        with torch.no_grad():
+            uM_list.append(_embed(mods, m, "M"))
+            uP_list.append(_embed(mods, p, "P"))
+       # PET-hat: KEEP GRAD so loss updates G via ph
         uPh_list.append(_embed(mods, ph, "P"))
 
     uM  = torch.cat(uM_list,  dim=0)   # [K,d]
