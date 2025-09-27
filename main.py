@@ -53,11 +53,13 @@ if __name__ == "__main__":
         # If requested, run pretraining then save
         if PREALIGNMENT:
             print("[Contrast] Pretraining encoders (global InfoNCE)...")
+            # >>> build a *separate* loader with batch_size >= 4 for pretraining
+            pretrain_train_loader, _, _, _, _, _, _ = build_loaders(batch_size=4)
             pretrain_encoders(
-                train_loader, val_loader, device,
-                proj_dim=CONTRAST_DIM, tau=CONTRAST_TAU, finetune_pct=FINETUNE_PCT,
-                lr=LR_CONTRAST, epochs=PRETRAIN_EPOCHS, ckpt_path=CONTRAST_CKPT
-            )
+                 pretrain_train_loader, val_loader, device,
+                 proj_dim=CONTRAST_DIM, tau=CONTRAST_TAU, finetune_pct=FINETUNE_PCT,
+                 lr=LR_CONTRAST, epochs=PRETRAIN_EPOCHS, ckpt_path=CONTRAST_CKPT
+             )
             print(f"[Contrast] Saved teachers -> {CONTRAST_CKPT}")
     
         # Load (either newly saved or an existing ckpt)
