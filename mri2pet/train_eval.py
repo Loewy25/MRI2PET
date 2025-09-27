@@ -1,4 +1,5 @@
 import os, time
+from .contrastive import contrastive_aux_loss
 from typing import Any, Dict, Iterable, Optional
 import numpy as np
 from scipy.ndimage import zoom as nd_zoom
@@ -123,7 +124,12 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
     verbose: bool = True,
+    # >>> NEW: frozen teacher encoders + config dict
+    contrastive_mods: Optional[Dict[str, nn.Module]] = None,
+    contrast_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+
+
     G.to(device); D.to(device)
     G.train(); D.train()
 
@@ -155,11 +161,22 @@ def train_paggan(
 
         for batch in train_loader:
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                mri, pet, _ = batch
+                mri, pet, meta = batch
             else:
                 raise ValueError("There is something wrong happened when passing data")
+
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
+            brain_mask = None
+            if isinstance(meta, dict) and meta.get("brain_mask", None) is not None:
+                bm = meta["brain_mask"]
+                if not torch.is_tensor(bm):
+                    bm = torch.from_numpy(bm)
+                brain_mask = bm.to(device).squeeze().bool()  # [D,H,W]
+            else:
+                # your dataset always provides a mask; this is a safe fallback
+                brain_mask = (pet if pet.dim()==5 else pet.unsqueeze(0))[0, 0] > 0
+
             B = mri.size(0) if mri.dim() == 5 else 1
             real_lbl = torch.ones(B, 1, device=device)
             fake_lbl = torch.zeros(B, 1, device=device)
@@ -199,6 +216,22 @@ def train_paggan(
             ssim_val  = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
             loss_ssim = (1.0 - ssim_val)
             loss_recon = gamma * (loss_l1 + loss_ssim)                  # for logging only
+
+
+            # >>> NEW: contrastive auxiliary loss (global + optional patch-level)
+            L_contr = torch.tensor(0.0, device=device)
+            contr_diag = {}
+            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
+                # mri5, pet5, fake already exist in this scope
+                L_contr, contr_diag = contrastive_aux_loss(
+                    mods=contrastive_mods,
+                    mri=mri5, pet=pet5, pet_hat=fake,
+                    brain_mask=brain_mask,
+                    tau=contrast_cfg["tau"],
+                    use_patches=contrast_cfg["use_patches"],
+                    patch_size=contrast_cfg["patch_size"],
+                    patches_per_subj=contrast_cfg["patches_per_subj"]
+                )
 
             # Gradients wrt EACH VIEW (b, u3, fake). We normalize per-sample.
             # --- bottleneck view ---
@@ -252,27 +285,34 @@ def train_paggan(
             if MVIEWS_ENABLE:
                 w_b, w_u3, w_out = MVIEWS_WEIGHTS
                 s = float(w_b + w_u3 + w_out) if (w_b + w_u3 + w_out) != 0 else 1.0
-                w_b   = float(w_b)   / s
-                w_u3  = float(w_u3)  / s
-                w_out = float(w_out) / s
-
-                # One backward with multiple roots; autograd sums parameter grads
+                w_b, w_u3, w_out = float(w_b)/s, float(w_u3)/s, float(w_out)/s
+            
                 opt_G.zero_grad(set_to_none=True)
+                # keep graph because we'll add a second backward for L_contr
                 torch.autograd.backward(
                     tensors=[b, u3, fake],
                     grad_tensors=[w_b * v_b_comb, w_u3 * v_u3_comb, w_out * v_out_comb],
-                    retain_graph=False
+                    retain_graph=True
                 )
             else:
-                # Fallback: use output view only (your original single-view behavior)
                 opt_G.zero_grad(set_to_none=True)
-                fake.backward(v_out_comb, retain_graph=False)
-
+                # keep graph because we'll add a second backward for L_contr
+                fake.backward(v_out_comb, retain_graph=True)
+            
+            # >>> NEW: backprop the scalar contrastive loss into G
+            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
+                (contrast_cfg["lambda_contrast"] * L_contr).backward()
+            
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
+
             # Logging proxy (not used for backward)
-            loss_G_log = (loss_recon + loss_gan).detach().item()
+            if (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False):
+                loss_G_log = (loss_recon + loss_gan + contrast_cfg["lambda_contrast"] * L_contr).detach().item()
+            else:
+                loss_G_log = (loss_recon + loss_gan).detach().item()
+
 
 
             g_running += float(loss_G_log)
