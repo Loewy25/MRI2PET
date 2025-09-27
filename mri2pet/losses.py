@@ -103,3 +103,13 @@ def mmd_gaussian(real: torch.Tensor,
         mmd /= len(sigmas)
         total += mmd.item()
     return total / B
+
+# === Contrastive helpers (cosine + InfoNCE cross-entropy) ===
+def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a @ b.t()
+
+def info_nce_ce(sim_logits: torch.Tensor, tau: float) -> torch.Tensor:
+    N = sim_logits.size(0)
+    logits = sim_logits / tau
+    labels = torch.arange(N, device=logits.device)
+    return F.cross_entropy(logits, labels)
