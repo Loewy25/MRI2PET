@@ -66,6 +66,11 @@ if __name__ == "__main__":
         if os.path.exists(CONTRAST_CKPT):
             load_teachers(contrastive_mods, CONTRAST_CKPT, map_location=device)
             print(f"[Contrast] Loaded teachers from {CONTRAST_CKPT}")
+
+        # >>> ensure teachers on device <<<
+        for m in contrastive_mods.values():
+            m.to(device)
+
         # Freeze them for GAN stage
         freeze_teachers(contrastive_mods)
     
