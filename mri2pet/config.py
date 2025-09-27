@@ -58,3 +58,26 @@ MVIEWS_ENABLE = True
 # Fixed fusion weights for (bottleneck, u3, output). Must sum ≈ 1.0 (we re-normalize in code).
 # Good starting guess (can tune later):
 MVIEWS_WEIGHTS = (0.20, 0.30, 0.50)
+
+# ===== Contrastive pre-alignment & auxiliary loss =====
+# Master switches
+USE_CONTRAST: bool = True              # turn on contrastive aux loss in GAN stage
+PREALIGNMENT: bool = True              # run Step-1 pretraining (global InfoNCE) before GAN
+
+# Teacher / embedding space
+CONTRAST_DIM: int = 128                # projection head output dim
+CONTRAST_TAU: float = 0.10             # InfoNCE temperature
+FINETUNE_PCT: float = 0.30             # during pretrain: % of encoder to unfreeze (top-most)
+
+# Optim for pretraining
+PRETRAIN_EPOCHS: int = 30
+LR_CONTRAST: float = 1e-4
+CONTRAST_CKPT: str = os.path.join(CKPT_DIR, "contrast_teachers.pt")
+
+# Aux loss weight in GAN stage (if you don't use MGDA for it)
+LAMBDA_CONTRAST: float = 0.20
+
+# Patch-level contrast used ONLY in GAN stage
+PATCH_CONTRAST: bool = True
+PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
+PATCHES_PER_SUBJ: int = 16             # with B=1, this gives you 16 in-batch negatives
