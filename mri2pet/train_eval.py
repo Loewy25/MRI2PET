@@ -112,13 +112,15 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
     return w_best, v_comb
 # ------------------------------------------------------------
 # add near other MGDA helpers
+# add near other imports
 import itertools
 
+# add right after _mgda3_normed
 @torch.no_grad()
 def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
     """
-    4-task MGDA on the simplex. Enumerates interior, all 3-task faces, all 2-task edges,
-    and singletons; returns the min-norm combination.
+    4-task MGDA on the simplex. Enumerates interior, 3-task faces, 2-task edges, and singletons;
+    returns the min-norm combination.
     vs_normed: list of 4 tensors [B,1,D,H,W], already per-sample L2-normalized.
     Returns (w_best [4], v_comb tensor with same shape as inputs).
     Assumes B=1 (as in our setup).
@@ -127,37 +129,36 @@ def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
     U = [_flatten5d(vn).squeeze(0) for vn in vs_normed]  # each [N]
     device = U[0].device
     dtype = U[0].dtype
+    epsI = eps * torch.eye(4, device=device, dtype=dtype)
 
     def _norm_sq(weights):
         c = sum(w * u for w, u in zip(weights, U))
-        return torch.dot(c, c).item(), c
+        return torch.dot(c, c).item()
 
     candidates = []
 
     # Interior candidate
     G = torch.stack([torch.stack([torch.dot(ui, uj) for uj in U]) for ui in U])  # [4,4]
     ones = torch.ones(4, device=device, dtype=dtype)
-    I = torch.eye(4, device=device, dtype=dtype)
     try:
-        a_tilde = torch.linalg.solve(G + eps * I, ones)
+        a_tilde = torch.linalg.solve(G + epsI, ones)
     except RuntimeError:
         a_tilde = torch.linalg.lstsq(G, ones).solution
-    a_int = a_tilde / (a_tilde.sum() + eps)
-    if (a_int >= -1e-8).all():
-        w = torch.clamp(a_int, 0.0, 1.0)
-        w = w / (w.sum() + eps)
-        candidates.append(w)
+    a = a_tilde / (a_tilde.sum() + eps)
+    if (a >= -1e-8).all():
+        a = torch.clamp(a, 0.0, 1.0); a = a / (a.sum() + eps)
+        candidates.append(a)
 
-    # All 3-task faces (interior + edges of each face)
+    # All 3-task faces (interior + edges)
     for idxs in itertools.combinations(range(4), 3):
         subU = [U[i] for i in idxs]
         G3 = torch.stack([torch.stack([torch.dot(ui, uj) for uj in subU]) for ui in subU])  # [3,3]
         ones3 = torch.ones(3, device=device, dtype=dtype)
-        I3 = torch.eye(3, device=device, dtype=dtype)
+        epsI3 = eps * torch.eye(3, device=device, dtype=dtype)
 
         # interior on the face
         try:
-            a_tilde3 = torch.linalg.solve(G3 + eps * I3, ones3)
+            a_tilde3 = torch.linalg.solve(G3 + epsI3, ones3)
         except RuntimeError:
             a_tilde3 = torch.linalg.lstsq(G3, ones3).solution
         a3 = a_tilde3 / (a_tilde3.sum() + eps)
@@ -172,47 +173,47 @@ def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
             diff = uj - ui
             num = torch.dot(diff, uj)
             den = torch.dot(diff, diff) + eps
-            a = torch.clamp(num / den, 0.0, 1.0)
+            aij = torch.clamp(num / den, 0.0, 1.0)
             w3 = torch.zeros(3, device=device, dtype=dtype)
-            w3[i_local] = a
-            w3[j_local] = 1.0 - a
+            w3[i_local] = aij
+            w3[j_local] = 1.0 - aij
             face_ws.append(w3)
 
-        # lift 3-task weights to 4-task by inserting zeros
+        # lift to 4D
         for w3 in face_ws:
             w4 = torch.zeros(4, device=device, dtype=dtype)
             for k_local, k_global in enumerate(idxs):
                 w4[k_global] = w3[k_local]
             candidates.append(w4)
 
-    # All 2-task edges directly in 4D
+    # All 2-task edges in 4D
     for i in range(4):
         for j in range(i+1, 4):
             ui, uj = U[i], U[j]
             diff = uj - ui
             num = torch.dot(diff, uj)
             den = torch.dot(diff, diff) + eps
-            a = torch.clamp(num / den, 0.0, 1.0)
+            aij = torch.clamp(num / den, 0.0, 1.0)
             w = torch.zeros(4, device=device, dtype=dtype)
-            w[i] = a
-            w[j] = 1.0 - a
+            w[i] = aij
+            w[j] = 1.0 - aij
             candidates.append(w)
 
     # Singletons
     for i in range(4):
-        w = torch.zeros(4, device=device, dtype=dtype)
-        w[i] = 1.0
+        w = torch.zeros(4, device=device, dtype=dtype); w[i] = 1.0
         candidates.append(w)
 
-    # Pick minimum-norm candidate
+    # Pick min-norm candidate
     best_w, best_n = None, None
     for w in candidates:
-        n, _ = _norm_sq(w)
+        n = _norm_sq(w)
         if (best_n is None) or (n < best_n):
             best_n, best_w = n, w
 
     v_comb = sum(best_w[i] * vs_normed[i] for i in range(4))
     return best_w, v_comb
+
 
 
 def train_paggan(
