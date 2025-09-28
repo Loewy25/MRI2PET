@@ -462,38 +462,52 @@ def train_paggan(
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, v_batches = 0.0, 0
+                val_recon = 0.0
+                v_batches = 0
                 for batch in val_loader:
-                    ...
-                val_recon /= max(1, v_batches)
+                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                        mri_v, pet_v, _ = batch
+                    else:
+                        mri_v, pet_v = batch
+
+                    mri_v = mri_v.to(device, non_blocking=True)
+                    pet_v = pet_v.to(device, non_blocking=True)
+                    if mri_v.dim() == 4:  # [1,D,H,W] -> [B=1,1,D,H,W]
+                        mri_v = mri_v.unsqueeze(0)
+                    if pet_v.dim() == 4:
+                        pet_v = pet_v.unsqueeze(0)
+
+                    fake_v = G(mri_v)
+                    L1_v   = l1_loss(fake_v, pet_v)
+                    SSIM_v = ssim3d(fake_v, pet_v, data_range=data_range)
+                    val_recon += (L1_v + (1.0 - SSIM_v)).item()
+                    v_batches += 1
+
+                val_recon = val_recon / max(1, v_batches)
                 hist["val_recon"].append(val_recon)
-        
+
                 if val_recon < best_val:
                     best_val = val_recon
                     best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                     best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                     torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                     torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
-        
-                # >>> NEW: update learning-rate schedulers
+
+                # Update LR schedulers based on validation loss
                 sch_G.step(val_recon)
                 sch_D.step(val_recon)
-        
-                # >>> NEW: optional log the new LRs
+
                 if verbose:
                     lrG = opt_G.param_groups[0]["lr"]
                     lrD = opt_D.param_groups[0]["lr"]
+                    dt  = time.time() - t0
                     print(f"    LR update: G={lrG:.2e}, D={lrD:.2e}")
-        
-                if verbose:
-                    dt = time.time() - t0
                     print(f"Epoch [{epoch:03d}/{epochs}]  "
                           f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                           f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                           f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
-
-
             G.train()
+
         elif verbose:
             dt = time.time() - t0
             print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
