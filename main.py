@@ -10,17 +10,12 @@ from mri2pet.data import build_loaders
 from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
-from mri2pet.config import (
-    ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
-    # NEW:
-    USE_CONTRAST, PREALIGNMENT, CONTRAST_DIM, CONTRAST_TAU, FINETUNE_PCT,
-    PRETRAIN_EPOCHS, LR_CONTRAST, CONTRAST_CKPT,
-    LAMBDA_CONTRAST, PATCH_CONTRAST, PATCH_SIZE, PATCHES_PER_SUBJ
-)
+
+# >>> use a single module import for all contrast/patch flags <<<
+import mri2pet.config as cfg
+
 from mri2pet.pretrain_contrast import pretrain_encoders
 from mri2pet.encoders import build_encoders_and_heads, load_teachers, freeze_teachers
-
 
 
 if __name__ == "__main__":
@@ -44,57 +39,52 @@ if __name__ == "__main__":
             sid0 = "NA"
         print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {sid0}")
 
-
-    # ---- Optional Step-1: Pretrain encoders (global CLIP-style) ----
+    # ---- Optional Step-1: Pretrain encoders (global InfoNCE) ----
     contrastive_mods = None
-    if USE_CONTRAST:
-        # Build teacher slots
-        contrastive_mods = build_encoders_and_heads(in_ch_mri=1, in_ch_pet=1, proj_dim=CONTRAST_DIM)
-        # If requested, run pretraining then save
-        if PREALIGNMENT:
+    if cfg.USE_CONTRAST:
+        contrastive_mods = build_encoders_and_heads(in_ch_mri=1, in_ch_pet=1, proj_dim=cfg.CONTRAST_DIM)
+
+        if cfg.PREALIGNMENT:
             print("[Contrast] Pretraining encoders (global InfoNCE)...")
-            # >>> build a *separate* loader with batch_size >= 4 for pretraining
+            # build a separate loader with batch_size >= 4 for pretraining
             pretrain_train_loader, _, _, _, _, _, _ = build_loaders(batch_size=4)
             pretrain_encoders(
                  pretrain_train_loader, val_loader, device,
-                 proj_dim=CONTRAST_DIM, tau=CONTRAST_TAU, finetune_pct=FINETUNE_PCT,
-                 lr=LR_CONTRAST, epochs=PRETRAIN_EPOCHS, ckpt_path=CONTRAST_CKPT
+                 proj_dim=cfg.CONTRAST_DIM, tau=cfg.CONTRAST_TAU, finetune_pct=cfg.FINETUNE_PCT,
+                 lr=cfg.LR_CONTRAST, epochs=cfg.PRETRAIN_EPOCHS, ckpt_path=cfg.CONTRAST_CKPT
              )
-            print(f"[Contrast] Saved teachers -> {CONTRAST_CKPT}")
-    
-        # Load (either newly saved or an existing ckpt)
-        if os.path.exists(CONTRAST_CKPT):
-            load_teachers(contrastive_mods, CONTRAST_CKPT, map_location=device)
-            print(f"[Contrast] Loaded teachers from {CONTRAST_CKPT}")
+            print(f"[Contrast] Saved teachers -> {cfg.CONTRAST_CKPT}")
 
-        # >>> ensure teachers on device <<<
+        if os.path.exists(cfg.CONTRAST_CKPT):
+            load_teachers(contrastive_mods, cfg.CONTRAST_CKPT, map_location=device)
+            print(f"[Contrast] Loaded teachers from {cfg.CONTRAST_CKPT}")
+
+        # ensure teachers are on the training device
         for m in contrastive_mods.values():
             m.to(device)
 
         # Freeze them for GAN stage
         freeze_teachers(contrastive_mods)
-    
+
     contrast_cfg = {
-        "use": USE_CONTRAST,
-        "tau": CONTRAST_TAU,
-        "lambda_contrast": LAMBDA_CONTRAST,
-        "use_patches": PATCH_CONTRAST,
-        "patch_size": PATCH_SIZE,
-        "patches_per_subj": PATCHES_PER_SUBJ,
+        "use": cfg.USE_CONTRAST,
+        "tau": cfg.CONTRAST_TAU,
+        "lambda_contrast": cfg.LAMBDA_CONTRAST,
+        "use_patches": cfg.PATCH_CONTRAST,
+        "patch_size": cfg.PATCH_SIZE,
+        "patches_per_subj": cfg.PATCHES_PER_SUBJ,
     }
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
     D = CondPatchDiscriminator3D(in_ch=2)
 
-
     # Train
     out = train_paggan(
-    G, D, train_loader, val_loader,
-    device=device, epochs=EPOCHS, gamma=GAMMA, lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE, verbose=True,
-    contrastive_mods=contrastive_mods, contrast_cfg=contrast_cfg
+        G, D, train_loader, val_loader,
+        device=device, epochs=EPOCHS, gamma=GAMMA, lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE, verbose=True,
+        contrastive_mods=contrastive_mods, contrast_cfg=contrast_cfg
     )
-
 
     # Save curves & CSV
     curves_path = os.path.join(OUT_RUN, "loss_curves.png")
@@ -118,3 +108,4 @@ if __name__ == "__main__":
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
