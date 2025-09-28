@@ -23,7 +23,7 @@ BATCH_SIZE     = 1
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
-EPOCHS      = 150
+EPOCHS      = 140
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
