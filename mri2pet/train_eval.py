@@ -1,6 +1,7 @@
 import os, time, itertools
 from typing import Any, Dict, Iterable, Optional
 import numpy as np
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import torch
 import torch.nn as nn
@@ -228,6 +229,16 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
+
+    sch_G = ReduceLROnPlateau(
+    opt_G, mode="min", factor=0.5, patience=15,
+    threshold=1e-4, cooldown=5, min_lr=1e-6, verbose=True
+    )
+    sch_D = ReduceLROnPlateau(
+        opt_D, mode="min", factor=0.5, patience=15,
+        threshold=1e-4, cooldown=5, min_lr=5e-6, verbose=True
+    )
+
     bce = nn.BCEWithLogitsLoss()
 
     # kept (unused controller params preserved for compatibility/logs)
@@ -447,39 +458,40 @@ def train_paggan(
             del cos_sum, cos_cnt
 
         # ---- Validation ----
+        # ---- Validation ----
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
                 val_recon, v_batches = 0.0, 0
                 for batch in val_loader:
-                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                        mri, pet, _ = batch
-                    else:
-                        mri, pet = batch
-                    mri = mri.to(device, non_blocking=True)
-                    pet = pet.to(device, non_blocking=True)
-                    fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
-                    loss_l1_v = l1_loss(fake, pet if pet.dim()==5 else pet.unsqueeze(0))
-                    ssim_v  = ssim3d(fake, pet if pet.dim()==5 else pet.unsqueeze(0),
-                                     data_range=data_range)
-                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
-                    v_batches += 1
-            val_recon /= max(1, v_batches)
-            hist["val_recon"].append(val_recon)
+                    ...
+                val_recon /= max(1, v_batches)
+                hist["val_recon"].append(val_recon)
+        
+                if val_recon < best_val:
+                    best_val = val_recon
+                    best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
+                    best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
+                    torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
+                    torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
+        
+                # >>> NEW: update learning-rate schedulers
+                sch_G.step(val_recon)
+                sch_D.step(val_recon)
+        
+                # >>> NEW: optional log the new LRs
+                if verbose:
+                    lrG = opt_G.param_groups[0]["lr"]
+                    lrD = opt_D.param_groups[0]["lr"]
+                    print(f"    LR update: G={lrG:.2e}, D={lrD:.2e}")
+        
+                if verbose:
+                    dt = time.time() - t0
+                    print(f"Epoch [{epoch:03d}/{epochs}]  "
+                          f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
+                          f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
+                          f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
 
-            if val_recon < best_val:
-                best_val = val_recon
-                best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
-                best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
-                torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
-                torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
-
-            if verbose:
-                dt = time.time() - t0
-                print(f"Epoch [{epoch:03d}/{epochs}]  "
-                      f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                      f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                      f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
 
             G.train()
         elif verbose:
