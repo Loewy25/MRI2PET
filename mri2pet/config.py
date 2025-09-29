@@ -54,7 +54,7 @@ CONTRAST_TAU: float = 0.10             # InfoNCE temperature
 FINETUNE_PCT: float = 0.30             # during pretrain: % of encoder to unfreeze (top-most)
 
 # Optim for pretraining
-PRETRAIN_EPOCHS: int = 70
+PRETRAIN_EPOCHS: int = 60
 LR_CONTRAST: float = 1e-4
 CONTRAST_CKPT: str = os.path.join(CKPT_DIR, "contrast_teachers.pt")
 
