@@ -35,22 +35,6 @@ DATA_RANGE  = 3.5
 # Torch flags
 torch.backends.cudnn.benchmark = True
 
-# ---- Dynamic L1/SSIM grouping (Idea 1) ----
-# Turn the controller on/off
-DYN_GROUP = True
-
-# Cosine smoothing across steps (B=1 so we smooth per-epoch)
-COS_EMA_BETA = 0.85
-
-# Hysteresis thresholds to avoid flip-flop
-COS_HIGH = 0.8   # if cos >= COS_HIGH -> merge L1+SSIM
-COS_LOW  = 0.70   # if cos <= COS_LOW  -> split L1 vs SSIM
-
-# Don't switch more than once per this many epochs
-MIN_HOLD_EPOCHS = 1
-
-# Optional: if you later want Adam-aware whitening before cos/MGDA (leave False for now)
-ADAM_AWARE_NORM = False
 # ---- Multi-view MGDA-UB (Idea 2) ----
 # Turn the multi-view fusion ON/OFF (set to False to revert to single-view)
 MVIEWS_ENABLE = True
@@ -81,3 +65,11 @@ LAMBDA_CONTRAST: float = 0.20
 PATCH_CONTRAST: bool = True
 PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
 PATCHES_PER_SUBJ: int = 16             # with B=1, this gives you 16 in-batch negatives
+
+
+# --- Plan-3 (contrast outside MGDA) ---
+CONTRAST_OUTSIDE_MGDA: bool = True     # keep contrast separate from MGDA mixing
+LAMBDA_M2PH: float = 0.20              # weight for MRI → PET̂ contrast
+LAMBDA_PH2P: float = 0.20              # weight for PET̂ → PET contrast
+PCGRAD_CONTRAST: bool = True           # project contrast away from core if it conflicts
+PRINT_GRAD_COSINES: bool = True        # print pairwise cosine(grad_i, grad_j) each epoch
