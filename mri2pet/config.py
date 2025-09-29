@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_stable_contra_70_batch2_hierachy"
+RUN_NAME   = "MGDA_UB_c_stable_contra_70_batch1_hierachy"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -19,7 +19,7 @@ RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = 2
+BATCH_SIZE     = 1
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
