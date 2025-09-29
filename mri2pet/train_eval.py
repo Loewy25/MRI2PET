@@ -1,36 +1,35 @@
 import os, time, itertools
 from typing import Any, Dict, Iterable, Optional
-from collections import defaultdict
-
 import numpy as np
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from scipy.ndimage import zoom as nd_zoom
 
+# Local imports
 from .contrastive import contrastive_aux_loss
 from .config import (
-    # core training knobs
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE, LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
-    # multi-view fusion
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
     MVIEWS_ENABLE, MVIEWS_WEIGHTS,
-    # plan-3 (contrast outside MGDA)
-    CONTRAST_OUTSIDE_MGDA, LAMBDA_M2PH, LAMBDA_PH2P, PCGRAD_CONTRAST, PRINT_GRAD_COSINES,
 )
+import mri2pet.config as cfg  # to read Plan-4 floors & logging knobs dynamically
+
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 
 
-# ---------- MGDA-UB helpers ----------
+# ---------- MGDA helpers ----------
 def _flatten5d(x: torch.Tensor) -> torch.Tensor:
     # [B, C, D, H, W] -> [B, C*D*H*W]
     return x.flatten(start_dim=1)
 
 def _l2_normalize_per_sample(v: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     # Normalize each sample vector to unit L2 in output-space (B-wise)
+    B = v.size(0)
     v2d = _flatten5d(v)
     n = v2d.norm(dim=1, keepdim=True) + eps
     v2d = v2d / n
@@ -49,6 +48,7 @@ def _mgda2_normed(v1n: torch.Tensor, v2n: torch.Tensor, eps: float = 1e-12):
     2-task MGDA in output-space, closed-form on the line segment.
     v1n, v2n are already per-sample L2-normalized; shape [B,1,D,H,W]
     Returns (alpha_scalar, v_comb) where v_comb has shape like v1n.
+    alpha is the weight for v1n; (1-alpha) for v2n.
     """
     V1 = _flatten5d(v1n)  # [B,N]
     V2 = _flatten5d(v2n)  # [B,N]
@@ -56,6 +56,7 @@ def _mgda2_normed(v1n: torch.Tensor, v2n: torch.Tensor, eps: float = 1e-12):
     num  = (diff * V2).sum(dim=1)                 # (v2-v1)·v2
     den  = (diff * diff).sum(dim=1) + eps         # ||v1-v2||^2
     alpha_b = torch.clamp(num / den, 0.0, 1.0)    # per-sample
+    # robust aggregate (median)
     alpha = alpha_b.median()
     v_comb = alpha * v1n + (1.0 - alpha) * v2n
     return alpha, v_comb
@@ -67,10 +68,10 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
       - try interior solution a ∝ G^{-1} 1 (if all >=0)
       - else try each edge (2-task closed forms) and pick min-norm.
     vs_normed: [v1n, v2n, v3n], each [B,1,D,H,W], per-sample normalized.
-    Returns (w_best [3], v_comb)
+    Returns (w_best [3], v_comb). Assumes B>=1, we operate on batch-mean proxy.
     """
     assert len(vs_normed) == 3, "Need 3 normalized vectors"
-    U = [_flatten5d(vn).mean(dim=0) for vn in vs_normed]  # average over batch for stability
+    U = [_flatten5d(vn).mean(dim=0) for vn in vs_normed]  # reduce B by mean for QP proxy
     G = torch.stack([torch.stack([torch.dot(Ui, Uj) for Uj in U]) for Ui in U])  # [3,3]
     ones = torch.ones(3, device=G.device, dtype=G.dtype)
 
@@ -78,20 +79,20 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
 
     # interior candidate
     try:
-        a_tilde = torch.linalg.solve(G + eps * torch.eye(3, device=G.device, dtype=G.dtype), ones)
+        a_tilde = torch.linalg.solve(G + 1e-12 * torch.eye(3, device=G.device, dtype=G.dtype), ones)
     except RuntimeError:
         a_tilde = torch.linalg.lstsq(G, ones).solution
-    a_int = a_tilde / (a_tilde.sum() + eps)
+    a_int = a_tilde / (a_tilde.sum() + 1e-12)
     if (a_int >= -1e-8).all():
         a_int = torch.clamp(a_int, 0.0, 1.0)
-        a_int = a_int / (a_int.sum() + eps)
+        a_int = a_int / (a_int.sum() + 1e-12)
         candidates.append(a_int)
 
     # edges (i,j)
     def edge_2task(u_i, u_j, i, j):
         diff = u_j - u_i
         num = torch.dot(diff, u_j)
-        den = torch.dot(diff, diff) + eps
+        den = torch.dot(diff, diff) + 1e-12
         a = torch.clamp(num / den, 0.0, 1.0)
         w = torch.zeros(3, device=G.device, dtype=G.dtype)
         w[i] = a
@@ -110,25 +111,20 @@ def _mgda3_normed(vs_normed: list, eps: float = 1e-12):
         n = torch.dot(c, c)
         if (n_best is None) or (n < n_best):
             n_best, w_best = n, w
-
     v_comb = w_best[0] * vs_normed[0] + w_best[1] * vs_normed[1] + w_best[2] * vs_normed[2]
     return w_best, v_comb
 
 
-# --- PCGrad-like projection helper (used for Plan-3 contrast vs core) ---
-def _project_if_conflict(g: torch.Tensor, ref: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+def _apply_weight_floors(w: torch.Tensor, floors: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """
-    Project g onto the half-space that does not conflict with ref.
-    If <g, ref> < 0 => g := g - proj_ref(g).
-    Both g and ref are 5D tensors [B,1,D,H,W].
+    Apply elementwise lower bounds and renormalize to simplex.
+    w, floors: shape [n].
     """
-    a = _flatten5d(g)
-    r = _flatten5d(ref)
-    dot = (a * r).sum()
-    if dot.item() < 0.0:
-        denom = (r * r).sum() + eps
-        g = g - (dot / denom) * ref
-    return g
+    w = torch.maximum(w, floors)
+    s = w.sum()
+    if s.item() > 0:
+        w = w / (s + eps)
+    return w
 
 
 def train_paggan(
@@ -142,7 +138,7 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,   # kept for logging compatibility
     data_range: float = DATA_RANGE,
     verbose: bool = True,
-    # >>> frozen teacher encoders + config dict
+    # frozen teacher encoders + config dict
     contrastive_mods: Optional[Dict[str, nn.Module]] = None,
     contrast_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -154,11 +150,11 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
 
     sch_G = ReduceLROnPlateau(
-        opt_G, mode="min", factor=0.5, patience=155,
+        opt_G, mode="min", factor=0.5, patience=15,
         threshold=1e-4, cooldown=5, min_lr=1e-6, verbose=True
     )
     sch_D = ReduceLROnPlateau(
-        opt_D, mode="min", factor=0.5, patience=155,
+        opt_D, mode="min", factor=0.5, patience=15,
         threshold=1e-4, cooldown=5, min_lr=5e-6, verbose=True
     )
 
@@ -170,50 +166,69 @@ def train_paggan(
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
+    # Epoch accumulators for angles and weights
+    from collections import defaultdict
+    angle_accum = defaultdict(float)
+    angle_count = 0
+
+    # Weight accumulators (average per-epoch)
+    w_rec_sums  = {"b": torch.zeros(2), "u3": torch.zeros(2), "out": torch.zeros(2)}   # [w_L1, w_SSIM]
+    w_con_sums  = {"b": torch.zeros(2), "u3": torch.zeros(2), "out": torch.zeros(2)}   # [w_M2Ph, w_Ph2P]
+    w_l2_sums   = {"b": torch.zeros(3), "u3": torch.zeros(3), "out": torch.zeros(3)}   # [w_Recon, w_GAN, w_Contr]
+    w_counts    = 0
+
+    # Floors from config (Plan-4)
+    flo_L1    = float(getattr(cfg, "HMGDA_FLOOR_L1", 0.0))
+    flo_SSIM  = float(getattr(cfg, "HMGDA_FLOOR_SSIM", 0.0))
+    flo_M2PH  = float(getattr(cfg, "HMGDA_FLOOR_M2PH", 0.0))
+    flo_PH2P  = float(getattr(cfg, "HMGDA_FLOOR_PH2P", 0.0))
+    flo_RECON = float(getattr(cfg, "HMGDA_FLOOR_RECON", 0.0))
+    flo_GAN   = float(getattr(cfg, "HMGDA_FLOOR_GAN", 0.0))
+    flo_CONTR = float(getattr(cfg, "HMGDA_FLOOR_CONTR", 0.0))
+
+    use_contrast = (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False)
+
     for epoch in range(1, epochs + 1):
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
-        # angle accumulators for this epoch
-        angle_accum = defaultdict(float)
+        # reset per-epoch accumulators
+        for k in w_rec_sums:  w_rec_sums[k].zero_()
+        for k in w_con_sums:  w_con_sums[k].zero_()
+        for k in w_l2_sums:   w_l2_sums[k].zero_()
+        w_counts = 0
+        for k in list(angle_accum.keys()): angle_accum[k] = 0.0
         angle_count = 0
 
-        # contrast diagnostics accumulators
-        contr_diag = defaultdict(float)
-        contr_diag_count = 0
-
         for batch in train_loader:
+            # --- Unpack batch & build B-aware brain mask ---
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
                 mri, pet, meta = batch
             else:
                 raise ValueError("There is something wrong happened when passing data")
 
-            # ---- Move to device, build B-aware brain mask ----
-            mri = mri.to(device, non_blocking=True)     # [B,1,D,H,W]
-            pet = pet.to(device, non_blocking=True)     # [B,1,D,H,W]
+            mri = mri.to(device, non_blocking=True)  # [B,1,D,H,W]
+            pet = pet.to(device, non_blocking=True)  # [B,1,D,H,W]
             B = mri.size(0)
 
-            # Build [B,D,H,W] boolean brain mask if present in meta; else fallback to pet>0
-            if isinstance(meta, list) and len(meta) == B and ("brain_mask" in meta[0]):
+            # meta may be a list of dicts (B>1) or a dict (B=1)
+            if isinstance(meta, list) and len(meta) == B and isinstance(meta[0], dict) and ("brain_mask" in meta[0]):
                 mask_list = []
                 for i in range(B):
                     bm_np = meta[i].get("brain_mask", None)
                     if bm_np is not None:
-                        if torch.is_tensor(bm_np):
-                            bm_t = bm_np
-                        else:
-                            bm_t = torch.from_numpy(bm_np)
+                        bm_t = bm_np if torch.is_tensor(bm_np) else torch.from_numpy(bm_np)
                         mask_list.append(bm_t.to(device).bool())
                     else:
                         mask_list.append((pet[i, 0] > 0))
-                brain_mask = torch.stack(mask_list, dim=0)   # [B,D,H,W]
+                brain_mask = torch.stack(mask_list, dim=0)  # [B,D,H,W]
             else:
-                brain_mask = (pet[:, 0] > 0)                 # [B,D,H,W]
-
-            mri5 = mri
-            pet5 = pet
+                brain_mask = (pet[:, 0] > 0)
 
             # ---- Update D ----
+            mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
+            pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+
             with torch.no_grad():
                 fake = G(mri5)
 
@@ -230,19 +245,21 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-            # ---- Update G: forward once to get all views ----
+            # ---- Update G (Hierarchical MGDA) ----
             G.zero_grad(set_to_none=True)
+
+            # Forward ONCE to get all views
             fake, u3, b = G.forward_with_intermediates(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # --- atomic losses
+            # Atomic losses
             loss_gan  = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
             loss_l1   = l1_loss(fake, pet5)
             ssim_val  = ssim3d(fake, pet5, data_range=data_range)      # ∈ [0,1]
             loss_ssim = (1.0 - ssim_val)
 
-            # --- gradients wrt each view, normalized
-            # bottleneck
+            # Gradients wrt EACH VIEW (b, u3, fake). Normalize per-sample.
+            # --- bottleneck view ---
             v_l1_b   = torch.autograd.grad(loss_l1,   b, retain_graph=True)[0]
             v_ssim_b = torch.autograd.grad(loss_ssim, b, retain_graph=True)[0]
             v_gan_b  = torch.autograd.grad(loss_gan,  b, retain_graph=True)[0]
@@ -252,7 +269,7 @@ def train_paggan(
                 _l2_normalize_per_sample(v_gan_b),
             )
 
-            # u3
+            # --- u3 view ---
             v_l1_u3   = torch.autograd.grad(loss_l1,   u3, retain_graph=True)[0]
             v_ssim_u3 = torch.autograd.grad(loss_ssim, u3, retain_graph=True)[0]
             v_gan_u3  = torch.autograd.grad(loss_gan,  u3, retain_graph=True)[0]
@@ -262,7 +279,7 @@ def train_paggan(
                 _l2_normalize_per_sample(v_gan_u3),
             )
 
-            # output (fake)
+            # --- output view (fake) ---
             v_l1_out   = torch.autograd.grad(loss_l1,   fake, retain_graph=True)[0]
             v_ssim_out = torch.autograd.grad(loss_ssim, fake, retain_graph=True)[0]
             v_gan_out  = torch.autograd.grad(loss_gan,  fake, retain_graph=True)[0]
@@ -272,15 +289,12 @@ def train_paggan(
                 _l2_normalize_per_sample(v_gan_out),
             )
 
-            # --- Core MGDA over {L1, SSIM, GAN} per view
-            _, v_b_core   = _mgda3_normed([v_l1_b_n,   v_ssim_b_n,   v_gan_b_n])
-            _, v_u3_core  = _mgda3_normed([v_l1_u3_n,  v_ssim_u3_n,  v_gan_u3_n])
-            _, v_out_core = _mgda3_normed([v_l1_out_n, v_ssim_out_n, v_gan_out_n])
-
-            # --- Contrast (two directions) OUTSIDE MGDA
-            contrast_used = (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False)
-            if contrast_used:
-                L_m2ph_total, L_ph2p_total, diag_c = contrastive_aux_loss(
+            # ===== Contrast losses (two directions) =====
+            L_m2ph_total = torch.tensor(0.0, device=device)
+            L_ph2p_total = torch.tensor(0.0, device=device)
+            have_contrast = False
+            if use_contrast:
+                L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss(
                     mods=contrastive_mods,
                     mri=mri5, pet=pet5, pet_hat=fake,
                     brain_mask=brain_mask,
@@ -289,103 +303,124 @@ def train_paggan(
                     patch_size=contrast_cfg["patch_size"],
                     patches_per_subj=contrast_cfg["patches_per_subj"]
                 )
-                # Accumulate diagnostics
-                for k, v in diag_c.items():
-                    contr_diag[k] += float(v)
-                contr_diag_count += 1
 
-                # Per-view contrast grads (two directions), normalized
-                # MRI → PET̂
+                # Per-view contrast grads (two directions)
                 v_m2ph_b   = torch.autograd.grad(L_m2ph_total, b,    retain_graph=True)[0]
                 v_m2ph_u3  = torch.autograd.grad(L_m2ph_total, u3,   retain_graph=True)[0]
                 v_m2ph_out = torch.autograd.grad(L_m2ph_total, fake, retain_graph=True)[0]
-                v_m2ph_b_n,  v_m2ph_u3_n,  v_m2ph_out_n  = (
-                    _l2_normalize_per_sample(v_m2ph_b),
-                    _l2_normalize_per_sample(v_m2ph_u3),
-                    _l2_normalize_per_sample(v_m2ph_out),
-                )
-                # PET̂ → PET
+
                 v_ph2p_b   = torch.autograd.grad(L_ph2p_total, b,    retain_graph=True)[0]
                 v_ph2p_u3  = torch.autograd.grad(L_ph2p_total, u3,   retain_graph=True)[0]
                 v_ph2p_out = torch.autograd.grad(L_ph2p_total, fake, retain_graph=True)[0]
-                v_ph2p_b_n,  v_ph2p_u3_n,  v_ph2p_out_n  = (
-                    _l2_normalize_per_sample(v_ph2p_b),
-                    _l2_normalize_per_sample(v_ph2p_u3),
-                    _l2_normalize_per_sample(v_ph2p_out),
+
+                # Normalize
+                v_m2ph_b_n,  v_m2ph_u3_n,  v_m2ph_out_n  = (
+                    _l2_normalize_per_sample(v_m2ph_b), _l2_normalize_per_sample(v_m2ph_u3), _l2_normalize_per_sample(v_m2ph_out)
                 )
+                v_ph2p_b_n,  v_ph2p_u3_n,  v_ph2p_out_n  = (
+                    _l2_normalize_per_sample(v_ph2p_b), _l2_normalize_per_sample(v_ph2p_u3), _l2_normalize_per_sample(v_ph2p_out)
+                )
+                have_contrast = True
+
+            # ===== Level-1: inside-group MGDA =====
+            # Recon = {L1, SSIM}
+            def _group2(v_a_n, v_b_n, flo_a, flo_b):
+                alpha, v_ab = _mgda2_normed(v_a_n, v_b_n)  # alpha for v_a, 1-alpha for v_b
+                w = torch.stack([alpha, 1.0 - alpha]).to(v_a_n.device)
+                # floors (post-solve)
+                floors = torch.tensor([flo_a, flo_b], device=v_a_n.device, dtype=w.dtype)
+                if floors.max().item() > 0:
+                    w = _apply_weight_floors(w, floors)
+                    v_ab = w[0] * v_a_n + w[1] * v_b_n
+                return w, v_ab
+
+            w_rec_b,   v_rec_b   = _group2(v_l1_b_n,   v_ssim_b_n,  flo_L1,   flo_SSIM)
+            w_rec_u3,  v_rec_u3  = _group2(v_l1_u3_n,  v_ssim_u3_n, flo_L1,   flo_SSIM)
+            w_rec_out, v_rec_out = _group2(v_l1_out_n, v_ssim_out_n, flo_L1,   flo_SSIM)
+
+            # Contrast = {M→P̂, P̂→P}
+            if have_contrast:
+                w_con_b,   v_con_b   = _group2(v_m2ph_b_n,   v_ph2p_b_n,   flo_M2PH, flo_PH2P)
+                w_con_u3,  v_con_u3  = _group2(v_m2ph_u3_n,  v_ph2p_u3_n,  flo_M2PH, flo_PH2P)
+                w_con_out, v_con_out = _group2(v_m2ph_out_n, v_ph2p_out_n, flo_M2PH, flo_PH2P)
             else:
-                # dummy tensors to avoid NameError in logging block
-                L_m2ph_total = L_ph2p_total = torch.tensor(0.0, device=device)
+                # no contrast present this batch
+                w_con_b = w_con_u3 = w_con_out = torch.tensor([0.0, 0.0], device=device)
+                v_con_b = v_con_u3 = v_con_out = None
 
-            # --- Angle logging at OUTPUT view
-            # core grads
-            gL, gS, gG = v_l1_out_n, v_ssim_out_n, v_gan_out_n
-            angle_accum["cos(L1,SSIM)"] += _cos_batch(gL, gS)
-            angle_accum["cos(L1,GAN)"]  += _cos_batch(gL, gG)
-            angle_accum["cos(SSIM,GAN)"]+= _cos_batch(gS, gG)
+            # ===== Level-2: MGDA across {Recon, GAN, Contrast} per view =====
+            def _level2(v_rec, v_gan_n, v_contr):
+                if v_contr is not None:
+                    w_raw, v_comb = _mgda3_normed([v_rec, v_gan_n, v_contr])
+                    floors = torch.tensor([flo_RECON, flo_GAN, flo_CONTR], device=v_rec.device, dtype=w_raw.dtype)
+                    if floors.max().item() > 0:
+                        w_adj = _apply_weight_floors(w_raw, floors)
+                        v_comb = w_adj[0] * v_rec + w_adj[1] * v_gan_n + w_adj[2] * v_contr
+                        return w_adj, v_comb
+                    else:
+                        return w_raw, v_comb
+                else:
+                    # No contrast → reduce to 2-task MGDA
+                    alpha_rg, v_rg = _mgda2_normed(v_rec, v_gan_n)
+                    w2 = torch.stack([alpha_rg, 1.0 - alpha_rg, torch.tensor(0.0, device=v_rec.device, dtype=alpha_rg.dtype)])
+                    return w2, v_rg
 
-            if contrast_used:
-                gM, gP = v_m2ph_out_n, v_ph2p_out_n
-                angle_accum["cos(M→P̂, L1)"]   += _cos_batch(gM, gL)
-                angle_accum["cos(M→P̂, SSIM)"] += _cos_batch(gM, gS)
-                angle_accum["cos(M→P̂, GAN)"]  += _cos_batch(gM, gG)
-                angle_accum["cos(P̂→P, L1)"]   += _cos_batch(gP, gL)
-                angle_accum["cos(P̂→P, SSIM)"] += _cos_batch(gP, gS)
-                angle_accum["cos(P̂→P, GAN)"]  += _cos_batch(gP, gG)
-                angle_accum["cos(M→P̂, P̂→P)"] += _cos_batch(gM, gP)
-                g_core_out_n = _l2_normalize_per_sample(v_out_core)
-                angle_accum["cos(M→P̂, core)"] += _cos_batch(gM, g_core_out_n)
-                angle_accum["cos(P̂→P, core)"] += _cos_batch(gP, g_core_out_n)
+            w_l2_b,   v_b_hier   = _level2(v_rec_b,   v_gan_b_n,   v_con_b)
+            w_l2_u3,  v_u3_hier  = _level2(v_rec_u3,  v_gan_u3_n,  v_con_u3)
+            w_l2_out, v_out_hier = _level2(v_rec_out, v_gan_out_n, v_con_out)
 
+            # ===== Angle logging (task & group) at OUTPUT view =====
+            v_rec_out_n  = _l2_normalize_per_sample(v_rec_out)
+            v_out_hier_n = _l2_normalize_per_sample(v_out_hier)
+            angle_accum["cos(L1,SSIM)"]   += _cos_batch(v_l1_out_n,  v_ssim_out_n)
+            angle_accum["cos(L1,GAN)"]    += _cos_batch(v_l1_out_n,  v_gan_out_n)
+            angle_accum["cos(SSIM,GAN)"]  += _cos_batch(v_ssim_out_n, v_gan_out_n)
+            angle_accum["cos(Recon,GAN)"] += _cos_batch(v_rec_out_n, v_gan_out_n)
+            if have_contrast:
+                v_con_out_n = _l2_normalize_per_sample(v_con_out)
+                angle_accum["cos(Recon,Contrast)"]  += _cos_batch(v_rec_out_n,   v_con_out_n)
+                angle_accum["cos(Contrast,GAN)"]    += _cos_batch(v_con_out_n,   v_gan_out_n)
+                angle_accum["cos(HierOut,Contrast)"]+= _cos_batch(v_out_hier_n,  v_con_out_n)
+            angle_accum["cos(HierOut,Recon)"] += _cos_batch(v_out_hier_n, v_rec_out_n)
+            angle_accum["cos(HierOut,GAN)"]   += _cos_batch(v_out_hier_n, v_gan_out_n)
             angle_count += 1
 
-            # --- Build final grad tensors for ONE backward call
-            if MVIEWS_ENABLE:
-                w_b, w_u3, w_out = MVIEWS_WEIGHTS
-                s = float(w_b + w_u3 + w_out) if (w_b + w_u3 + w_out) != 0 else 1.0
-                w_b, w_u3, w_out = float(w_b)/s, float(w_u3)/s, float(w_out)/s
-            else:
-                w_b, w_u3, w_out = 0.0, 0.0, 1.0
+            # ===== Accumulate weights (for per-epoch averages) =====
+            # Level-1 Recon weights: [w_L1, w_SSIM]
+            w_rec_sums["b"]   += w_rec_b.detach().cpu()
+            w_rec_sums["u3"]  += w_rec_u3.detach().cpu()
+            w_rec_sums["out"] += w_rec_out.detach().cpu()
+            # Level-1 Contrast weights: [w_M2Ph, w_Ph2P]
+            w_con_sums["b"]   += w_con_b.detach().cpu()
+            w_con_sums["u3"]  += w_con_u3.detach().cpu()
+            w_con_sums["out"] += w_con_out.detach().cpu()
+            # Level-2 group weights: [w_Recon, w_GAN, w_Contr]
+            w_l2_sums["b"]    += w_l2_b.detach().cpu()
+            w_l2_sums["u3"]   += w_l2_u3.detach().cpu()
+            w_l2_sums["out"]  += w_l2_out.detach().cpu()
+            w_counts += 1
 
-            grad_b   = w_b  * v_b_core
-            grad_u3  = w_u3 * v_u3_core
-            grad_out = w_out* v_out_core
+            # ===== View fusion and backward =====
+            w_b, w_u3, w_out = (MVIEWS_WEIGHTS if MVIEWS_ENABLE else (0.0, 0.0, 1.0))
+            s = (w_b + w_u3 + w_out) or 1.0
+            w_b, w_u3, w_out = w_b/s, w_u3/s, w_out/s
 
-            # Add contrast outside MGDA (two directions, separate λ), with optional PCGrad
-            if contrast_used and contrast_cfg.get("outside_mgda", CONTRAST_OUTSIDE_MGDA):
-                lam_m = float(contrast_cfg.get("lambda_m2ph", LAMBDA_M2PH))
-                lam_p = float(contrast_cfg.get("lambda_ph2p", LAMBDA_PH2P))
+            grad_b, grad_u3, grad_out = w_b * v_b_hier, w_u3 * v_u3_hier, w_out * v_out_hier
 
-                g_contr_b   = lam_m * v_m2ph_b_n   + lam_p * v_ph2p_b_n
-                g_contr_u3  = lam_m * v_m2ph_u3_n  + lam_p * v_ph2p_u3_n
-                g_contr_out = lam_m * v_m2ph_out_n + lam_p * v_ph2p_out_n
-
-                if contrast_cfg.get("pcgrad", PCGRAD_CONTRAST):
-                    g_contr_b   = _project_if_conflict(g_contr_b,   v_b_core)
-                    g_contr_u3  = _project_if_conflict(g_contr_u3,  v_u3_core)
-                    g_contr_out = _project_if_conflict(g_contr_out, v_out_core)
-
-                grad_b   = grad_b   + g_contr_b
-                grad_u3  = grad_u3  + g_contr_u3
-                grad_out = grad_out + g_contr_out
-
-            # --- Backprop once
             opt_G.zero_grad(set_to_none=True)
             torch.autograd.backward(
                 tensors=[b, u3, fake],
                 grad_tensors=[grad_b, grad_u3, grad_out],
                 retain_graph=False
             )
+
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # --- Logging proxy (align with Plan-3 objective)
-            if contrast_used and contrast_cfg.get("outside_mgda", CONTRAST_OUTSIDE_MGDA):
-                lam_m = float(contrast_cfg.get("lambda_m2ph", LAMBDA_M2PH))
-                lam_p = float(contrast_cfg.get("lambda_ph2p", LAMBDA_PH2P))
+            # Logging proxy (only for monitoring)
+            if have_contrast:
                 loss_G_log = (gamma * (loss_l1 + loss_ssim) + loss_gan +
-                              lam_m * L_m2ph_total.detach().item() +
-                              lam_p * L_ph2p_total.detach().item())
+                              L_m2ph_total.item() + L_ph2p_total.item())
             else:
                 loss_G_log = (gamma * (loss_l1 + loss_ssim) + loss_gan).detach().item()
 
@@ -393,34 +428,18 @@ def train_paggan(
             d_running += loss_D.item()
             n_batches += 1
 
-        # ---- End of epoch: averages, printing
+        # ---- End of epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
 
-        if PRINT_GRAD_COSINES and angle_count > 0:
-            print("  Pairwise cosine averages @OUTPUT view (epoch):")
-            keys = [
-                "cos(L1,SSIM)", "cos(L1,GAN)", "cos(SSIM,GAN)",
-                "cos(M→P̂, L1)", "cos(M→P̂, SSIM)", "cos(M→P̂, GAN)",
-                "cos(P̂→P, L1)", "cos(P̂→P, SSIM)", "cos(P̂→P, GAN)",
-                "cos(M→P̂, P̂→P)", "cos(M→P̂, core)", "cos(P̂→P, core)"
-            ]
-            for k in keys:
-                if k in angle_accum:
-                    print(f"    {k:>16}: {angle_accum[k] / angle_count:.3f}")
-
-        if contr_diag_count > 0:
-            print("  Contrast diagnostics (epoch means):")
-            for k in sorted(contr_diag.keys()):
-                print(f"    {k:>16}: {contr_diag[k] / contr_diag_count:.4f}")
-
         # ---- Validation ----
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, v_batches = 0.0, 0
+                val_recon = 0.0
+                v_batches = 0
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
                         mri_v, pet_v, _ = batch
@@ -450,7 +469,7 @@ def train_paggan(
                     torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                     torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
 
-                # Update LR schedulers based on validation loss
+                # Update LR schedulers
                 sch_G.step(val_recon)
                 sch_D.step(val_recon)
 
@@ -464,10 +483,43 @@ def train_paggan(
                           f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                           f"| best {best_val:.4f}  | λ_g={float(lambda_gan):.4f}  | {dt:.1f}s")
             G.train()
-        elif verbose:
-            dt = time.time() - t0
-            print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
+        else:
+            if verbose:
+                dt = time.time() - t0
+                print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
 
+        # ---- Epoch-end: print cosines and MGDA weights ----
+        if getattr(cfg, "PRINT_GRAD_COSINES", True) and angle_count > 0:
+            print("  Pairwise cosine averages @OUTPUT view this epoch:")
+            keys = [
+                "cos(L1,SSIM)", "cos(L1,GAN)", "cos(SSIM,GAN)",
+                "cos(Recon,GAN)", "cos(Recon,Contrast)", "cos(Contrast,GAN)",
+                "cos(HierOut,Recon)", "cos(HierOut,GAN)", "cos(HierOut,Contrast)"
+            ]
+            for k in keys:
+                if k in angle_accum:
+                    print(f"    {k:>20}: {angle_accum[k] / angle_count:.3f}")
+
+        # Print averaged Level-1 and Level-2 weights per view
+        if w_counts > 0:
+            def _avg(v): return (v / w_counts).tolist()
+
+            print("  Level-1 Recon weights [L1, SSIM] avg:")
+            print(f"    bottleneck: {_avg(w_rec_sums['b'])}")
+            print(f"    u3       : {_avg(w_rec_sums['u3'])}")
+            print(f"    output   : {_avg(w_rec_sums['out'])}")
+
+            print("  Level-1 Contrast weights [M→P̂, P̂→P] avg:")
+            print(f"    bottleneck: {_avg(w_con_sums['b'])}")
+            print(f"    u3       : {_avg(w_con_sums['u3'])}")
+            print(f"    output   : {_avg(w_con_sums['out'])}")
+
+            print("  Level-2 GROUP weights [Recon, GAN, Contrast] avg:")
+            print(f"    bottleneck: {_avg(w_l2_sums['b'])}")
+            print(f"    u3       : {_avg(w_l2_sums['u3'])}")
+            print(f"    output   : {_avg(w_l2_sums['out'])}")
+
+    # restore best
     if best_G is not None:
         G.load_state_dict(best_G)
     if best_D is not None:
