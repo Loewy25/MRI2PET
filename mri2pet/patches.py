@@ -48,34 +48,50 @@ def _embed(mods, x: torch.Tensor, which: str) -> torch.Tensor:
         f = mods["enc_P"](x); p = mods["proj_P"](f)
     return l2_normalize(p)
 
+# --- BEGIN PATCH: mri2pet/patches.py::sample_aligned_patches ---
 def sample_aligned_patches(
     mods,
     mri: torch.Tensor, pet: torch.Tensor, pet_hat: torch.Tensor,
-    brain_mask, patch_size: Tuple[int,int,int], K: int
+    brain_mask: torch.Tensor,       # [B, D, H, W] boolean or None
+    patch_size: Tuple[int,int,int], K: int
 ):
     """
-    Returns L2-normalized patch embeddings (uM, uP, uPh) each [K, d].
+    Returns L2-normalized patch embeddings (uM, uP, uPh) each [B*K, d].
+    For each subject i in batch, sample K aligned patch centers within brain_mask[i].
+    Positives are aligned across modalities at the same (subject, patch) index.
     """
+    assert mri.dim() == 5 and pet.dim() == 5 and pet_hat.dim() == 5, "Expected [B,1,D,H,W]"
     B, _, D, H, W = mri.shape
-    assert B == 1, "B=1 expected in your config; extend here if needed."
-    mask3d = brain_mask if isinstance(brain_mask, torch.Tensor) else None
-    if mask3d is None:
-        mask3d = (mri[0,0] != 0).to(mri.device)
+
+    # Build a [B, D, H, W] boolean mask tensor if none provided
+    if brain_mask is None:
+        brain_mask = (pet[:, 0] != 0)  # [B,D,H,W]
+    else:
+        if isinstance(brain_mask, torch.Tensor):
+            brain_mask = brain_mask.to(mri.device).bool()
+        else:
+            raise TypeError("brain_mask must be a torch.Tensor or None")
 
     uM_list, uP_list, uPh_list = [], [], []
-    for _ in range(K):
-        center = _rand_center_within(mask3d, patch_size)
-        m = _crop_3d(mri,     center, patch_size)
-        p = _crop_3d(pet,     center, patch_size)
-        ph= _crop_3d(pet_hat, center, patch_size)
-        # teachers (MRI, PET): no grad
-        with torch.no_grad():
-            uM_list.append(_embed(mods, m, "M"))
-            uP_list.append(_embed(mods, p, "P"))
-       # PET-hat: KEEP GRAD so loss updates G via ph
-        uPh_list.append(_embed(mods, ph, "P"))
 
-    uM  = torch.cat(uM_list,  dim=0)   # [K,d]
-    uP  = torch.cat(uP_list,  dim=0)   # [K,d]
-    uPh = torch.cat(uPh_list, dim=0)   # [K,d]
+    for i in range(B):
+        mask3d = brain_mask[i]
+        for _ in range(K):
+            center = _rand_center_within(mask3d, patch_size)
+            m  = _crop_3d(mri[i:i+1],     center, patch_size)
+            p  = _crop_3d(pet[i:i+1],     center, patch_size)
+            ph = _crop_3d(pet_hat[i:i+1], center, patch_size)
+
+            # teachers (MRI, PET): no grad
+            with torch.no_grad():
+                uM_list.append(_embed(mods, m,  "M"))
+                uP_list.append(_embed(mods, p,  "P"))
+            # PET-hat: keep grad to update G via ph
+            uPh_list.append(_embed(mods, ph, "P"))
+
+    uM  = torch.cat(uM_list,  dim=0)   # [B*K, d]
+    uP  = torch.cat(uP_list,  dim=0)   # [B*K, d]
+    uPh = torch.cat(uPh_list, dim=0)   # [B*K, d]
     return uM, uP, uPh
+# --- END PATCH ---
+
