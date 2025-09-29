@@ -207,6 +207,17 @@ def _mgda4_normed(vs_normed: list, eps: float = 1e-12):
     return best_w, v_comb
 # ------------------------------------------------------------
 
+# --- BEGIN PATCH: mri2pet/train_eval.py::helpers ---
+def _project_if_conflict(g: torch.Tensor, ref: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Project g onto the half-space that does not conflict with ref (PCGrad-style)."""
+    a = _flatten5d(g)
+    r = _flatten5d(ref)
+    dot = (a * r).sum()
+    if dot.item() < 0.0:
+        denom = (r * r).sum() + eps
+        g = g - (dot / denom) * ref
+    return g
+# --- END PATCH ---
 
 def train_paggan(
     G: nn.Module,
@@ -269,15 +280,30 @@ def train_paggan(
             else:
                 raise ValueError("There is something wrong happened when passing data")
 
-            mri = mri.to(device, non_blocking=True)
-            pet = pet.to(device, non_blocking=True)
-            if isinstance(meta, dict) and meta.get("brain_mask", None) is not None:
-                bm = meta["brain_mask"]
-                if not torch.is_tensor(bm):
-                    bm = torch.from_numpy(bm)
-                brain_mask = bm.to(device).squeeze().bool()  # [D,H,W]
+            # --- BEGIN PATCH: mri2pet/train_eval.py::train_paggan mask build ---
+            mri = mri.to(device, non_blocking=True)     # [B,1,D,H,W]
+            pet = pet.to(device, non_blocking=True)     # [B,1,D,H,W]
+            
+            # Build [B,D,H,W] boolean brain mask if present in meta; else fallback to pet>0
+            B = mri.size(0)
+            if isinstance(meta, list) and len(meta) == B and ("brain_mask" in meta[0]):
+                mask_list = []
+                for i in range(B):
+                    bm_np = meta[i].get("brain_mask", None)
+                    if bm_np is not None:
+                        if torch.is_tensor(bm_np):
+                            bm_t = bm_np
+                        else:
+                            # numpy -> torch
+                            bm_t = torch.from_numpy(bm_np)
+                        mask_list.append(bm_t.to(device).bool())
+                    else:
+                        mask_list.append((pet[i,0] > 0))
+                brain_mask = torch.stack(mask_list, dim=0)   # [B,D,H,W]
             else:
-                brain_mask = (pet if pet.dim()==5 else pet.unsqueeze(0))[0, 0] > 0
+                # dict (B==1) or no mask in meta -> fallback
+                brain_mask = (pet[:, 0] > 0)                 # [B,D,H,W]
+            # --- END PATCH ---
 
             B = mri.size(0) if mri.dim() == 5 else 1
 
