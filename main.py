@@ -67,19 +67,16 @@ if __name__ == "__main__":
         freeze_teachers(contrastive_mods)
 
     # --- BEGIN PATCH: main.py::contrast_cfg ---
+# --- BEGIN PATCH: main.py::contrast_cfg (Plan-4) ---
     contrast_cfg = {
         "use": cfg.USE_CONTRAST,
         "tau": cfg.CONTRAST_TAU,
         "use_patches": cfg.PATCH_CONTRAST,
         "patch_size": cfg.PATCH_SIZE,
         "patches_per_subj": cfg.PATCHES_PER_SUBJ,
-    
-        # Plan-3 specifics:
-        "outside_mgda": cfg.CONTRAST_OUTSIDE_MGDA,
-        "lambda_m2ph":  cfg.LAMBDA_M2PH,
-        "lambda_ph2p":  cfg.LAMBDA_PH2P,
-        "pcgrad":       cfg.PCGRAD_CONTRAST,
     }
+# --- END PATCH ---
+
     # --- END PATCH ---
 
 
