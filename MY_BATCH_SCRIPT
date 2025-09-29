@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=MGDA_UB_dynamic_stable
-#SBATCH --mem=40G
+#SBATCH --mem=30G
 #SBATCH -t 23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --exclude=gpu01
+##SBATCH --exclude=gpu01
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
 
