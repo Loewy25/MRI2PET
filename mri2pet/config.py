@@ -67,9 +67,23 @@ PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
 PATCHES_PER_SUBJ: int = 16             # with B=1, this gives you 16 in-batch negatives
 
 
-# --- Plan-3 (contrast outside MGDA) ---
-CONTRAST_OUTSIDE_MGDA: bool = True     # keep contrast separate from MGDA mixing
-LAMBDA_M2PH: float = 0.10              # weight for MRI → PET̂ contrast
-LAMBDA_PH2P: float = 0.10              # weight for PET̂ → PET contrast
-PCGRAD_CONTRAST: bool = True           # project contrast away from core if it conflicts
-PRINT_GRAD_COSINES: bool = True        # print pairwise cosine(grad_i, grad_j) each epoch
+# --- Hierarchical MGDA (Plan-4) ---
+HMGDA_ENABLE: bool = True
+
+# Optional floors to prevent a group from being zeroed at Level-2
+HMGDA_FLOOR_RECON: float = 0.00
+HMGDA_FLOOR_GAN:   float = 0.00
+HMGDA_FLOOR_CONTR: float = 0.00   # small floor so Contrast isn't silenced
+
+# Optional floors inside each group at Level-1 (usually 0.0 is fine)
+HMGDA_FLOOR_L1:    float = 0.00
+HMGDA_FLOOR_SSIM:  float = 0.00
+HMGDA_FLOOR_M2PH:  float = 0.00
+HMGDA_FLOOR_PH2P:  float = 0.00
+
+# Turn OFF Plan-3 "contrast outside MGDA" in this branch
+CONTRAST_OUTSIDE_MGDA: bool = False
+
+# Logging (keep the earlier flag; add group-level switch)
+PRINT_GRAD_COSINES: bool = True
+PRINT_GROUP_COSINES: bool = True
