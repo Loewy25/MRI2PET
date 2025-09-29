@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_dynamic_stable_contra_70_reducehalf_batch4"
+RUN_NAME   = "MGDA_UB_c_stable_contra_70_batch3_33"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -19,7 +19,7 @@ RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = 2
+BATCH_SIZE     = 3
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
@@ -69,7 +69,7 @@ PATCHES_PER_SUBJ: int = 16             # with B=1, this gives you 16 in-batch ne
 
 # --- Plan-3 (contrast outside MGDA) ---
 CONTRAST_OUTSIDE_MGDA: bool = True     # keep contrast separate from MGDA mixing
-LAMBDA_M2PH: float = 0.20              # weight for MRI → PET̂ contrast
-LAMBDA_PH2P: float = 0.20              # weight for PET̂ → PET contrast
+LAMBDA_M2PH: float = 0.30              # weight for MRI → PET̂ contrast
+LAMBDA_PH2P: float = 0.30              # weight for PET̂ → PET contrast
 PCGRAD_CONTRAST: bool = True           # project contrast away from core if it conflicts
 PRINT_GRAD_COSINES: bool = True        # print pairwise cosine(grad_i, grad_j) each epoch
