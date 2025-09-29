@@ -46,7 +46,7 @@ MVIEWS_WEIGHTS = (0.20, 0.30, 0.50)
 # ===== Contrastive pre-alignment & auxiliary loss =====
 # Master switches
 USE_CONTRAST: bool = True              # turn on contrastive aux loss in GAN stage
-PREALIGNMENT: bool = False              # run Step-1 pretraining (global InfoNCE) before GAN
+PREALIGNMENT: bool = True              # run Step-1 pretraining (global InfoNCE) before GAN
 
 # Teacher / embedding space
 CONTRAST_DIM: int = 128                # projection head output dim
