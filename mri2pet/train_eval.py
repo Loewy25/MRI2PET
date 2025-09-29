@@ -154,11 +154,11 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
 
     sch_G = ReduceLROnPlateau(
-        opt_G, mode="min", factor=0.5, patience=15,
+        opt_G, mode="min", factor=0.5, patience=155,
         threshold=1e-4, cooldown=5, min_lr=1e-6, verbose=True
     )
     sch_D = ReduceLROnPlateau(
-        opt_D, mode="min", factor=0.5, patience=15,
+        opt_D, mode="min", factor=0.5, patience=155,
         threshold=1e-4, cooldown=5, min_lr=5e-6, verbose=True
     )
 
