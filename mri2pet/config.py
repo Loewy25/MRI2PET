@@ -64,7 +64,7 @@ LAMBDA_CONTRAST: float = 0.20
 # Patch-level contrast used ONLY in GAN stage
 PATCH_CONTRAST: bool = True
 PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
-PATCHES_PER_SUBJ: int = 16             # with B=1, this gives you 16 in-batch negatives
+PATCHES_PER_SUBJ: int = 32             # with B=1, this gives you 16 in-batch negatives
 
 
 # --- Hierarchical MGDA (Plan-4) ---
