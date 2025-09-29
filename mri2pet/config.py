@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_stable_contra_3264_batch1_hierachy"
+RUN_NAME   = "MGDA_UB_c_stable_contra_2464_batch1_hierachy"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -63,7 +63,7 @@ LAMBDA_CONTRAST: float = 0.20
 
 # Patch-level contrast used ONLY in GAN stage
 PATCH_CONTRAST: bool = True
-PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
+PATCH_SIZE: Tuple[int,int,int] = (24, 24,24)
 PATCHES_PER_SUBJ: int = 64             # with B=1, this gives you 16 in-batch negatives
 
 
