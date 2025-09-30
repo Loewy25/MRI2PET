@@ -105,4 +105,4 @@ ROI_AGG_WEIGHTS = {
 
 # optional per-ROI memory queue (safe with B=1); OFF by default
 ROI_MEMORY_ENABLE: bool = False
-ROI_MEMORY_LEN: int = 512   # per ROI per direction, embeddings only (tiny memory)
+ROI_MEMORY_LEN: int = 512   # entries per ROI per direction (embeddings only)
