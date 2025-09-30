@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY"
+RUN_NAME   = "MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -41,7 +41,7 @@ MVIEWS_ENABLE = True
 
 # Fixed fusion weights for (bottleneck, u3, output). Must sum ≈ 1.0 (we re-normalize in code).
 # Good starting guess (can tune later):
-MVIEWS_WEIGHTS = (0.20, 0.30, 0.50)
+MVIEWS_WEIGHTS = (0.0, 0.0, 1)
 
 # ===== Contrastive pre-alignment & auxiliary loss =====
 # Master switches
