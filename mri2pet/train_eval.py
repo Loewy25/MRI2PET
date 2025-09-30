@@ -294,15 +294,35 @@ def train_paggan(
             L_ph2p_total = torch.tensor(0.0, device=device)
             have_contrast = False
             if use_contrast:
-                L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss(
-                    mods=contrastive_mods,
-                    mri=mri5, pet=pet5, pet_hat=fake,
-                    brain_mask=brain_mask,
-                    tau=contrast_cfg["tau"],
-                    use_patches=contrast_cfg["use_patches"],
-                    patch_size=contrast_cfg["patch_size"],
-                    patches_per_subj=contrast_cfg["patches_per_subj"]
-                )
+                roi_masks = None
+                # meta can be dict (B=1) or list[dict] (B>1). You run B=1.
+                if isinstance(meta, dict) and "roi_masks" in meta:
+                    # convert np arrays to torch bool on device
+                    roi_masks = {k: torch.as_tensor(v>0, device=device) for k, v in meta["roi_masks"].items()}
+                
+                if cfg.ROI_CONTRAST_ENABLE and roi_masks and len(roi_masks) > 0:
+                    from .contrastive import contrastive_aux_loss_roi
+                    L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss_roi(
+                        mods=contrastive_mods,
+                        mri=mri5, pet=pet5, pet_hat=fake,
+                        roi_masks=roi_masks,
+                        tau=cfg.CONTRAST_TAU,
+                        patches_per_roi=cfg.ROI_PATCHES_PER_ROI,
+                        patch_size=cfg.ROI_PATCH_SIZE,
+                        roi_weights=cfg.ROI_AGG_WEIGHTS,
+                        roi_memory=None  # wired in step 6 if you enable memory
+                    )
+                else:
+                    # fallback to your old global/brain-mask contrast if ROI masks missing/disabled
+                    L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss(
+                        mods=contrastive_mods,
+                        mri=mri5, pet=pet5, pet_hat=fake,
+                        brain_mask=brain_mask,
+                        tau=contrast_cfg["tau"],
+                        use_patches=contrast_cfg["use_patches"],
+                        patch_size=contrast_cfg["patch_size"],
+                        patches_per_subj=contrast_cfg["patches_per_subj"]
+                    )
 
                 # Per-view contrast grads (two directions)
                 v_m2ph_b   = torch.autograd.grad(L_m2ph_total, b,    retain_graph=True)[0]
