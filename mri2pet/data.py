@@ -122,6 +122,29 @@ class KariAV1451Dataset(Dataset):
             "resized_to": self.resize_to,
             "brain_mask": mask.astype(np.uint8) if mask is not None else None,
         }
+        # --- NEW: load ROI masks if present ---
+        roi_files = {
+            "Hippocampus":        "ROI_Hippocampus.nii.gz",
+            "PosteriorCingulate": "ROI_PosteriorCingulate.nii.gz",
+            "Precuneus":          "ROI_Precuneus.nii.gz",
+            "TemporalLobe":       "ROI_TemporalLobe.nii.gz",
+            "LimbicCortex":       "ROI_LimbicCortex.nii.gz",
+        }
+        roi_masks = {}
+        subj_dir = os.path.dirname(t1_path)
+        for name, fn in roi_files.items():
+            p = os.path.join(subj_dir, fn)
+            if os.path.exists(p):
+                arr = np.asarray(nib.load(p).get_fdata()) > 0
+                # resize ROI mask to current grid if needed
+                if self.resize_to is not None and arr.shape != t1.shape:
+                    Dz, Hy, Wx = arr.shape; td, th, tw = self.resize_to
+                    arr = (nd_zoom(arr.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5)
+                roi_masks[name] = arr.astype(np.uint8)
+        
+        # in meta:
+        meta["roi_masks"] = roi_masks  # dict[str]->np.uint8 ndarray [D,H,W]; may be empty
+
         return t1n_t, petn_t, meta
 
 def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
