@@ -188,6 +188,12 @@ def train_paggan(
 
     use_contrast = (contrastive_mods is not None) and (contrast_cfg is not None) and contrast_cfg.get("use", False)
 
+    # --- NEW: optional per-ROI memory (persists across batches/epochs)
+    roi_memory = None
+    if use_contrast and getattr(cfg, "ROI_CONTRAST_ENABLE", False) and getattr(cfg, "ROI_MEMORY_ENABLE", False):
+        from .memory import ROIMemory
+        roi_memory = ROIMemory(max_len=getattr(cfg, "ROI_MEMORY_LEN", 512))
+
     for epoch in range(1, epochs + 1):
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
@@ -207,8 +213,8 @@ def train_paggan(
             else:
                 raise ValueError("There is something wrong happened when passing data")
 
-            mri = mri.to(device, non_blocking=True)  # [B,1,D,H,W]
-            pet = pet.to(device, non_blocking=True)  # [B,1,D,H,W]
+            mri = mri.to(device, non_blocking=True)  # [B,1,D,H,W] or [1,1,D,H,W] after collate tweak
+            pet = pet.to(device, non_blocking=True)
             B = mri.size(0)
 
             # meta may be a list of dicts (B>1) or a dict (B=1)
@@ -294,13 +300,13 @@ def train_paggan(
             L_ph2p_total = torch.tensor(0.0, device=device)
             have_contrast = False
             if use_contrast:
+                # Gather ROI masks (B=1 typical)
                 roi_masks = None
-                # meta can be dict (B=1) or list[dict] (B>1). You run B=1.
-                if isinstance(meta, dict) and "roi_masks" in meta:
-                    # convert np arrays to torch bool on device
-                    roi_masks = {k: torch.as_tensor(v>0, device=device) for k, v in meta["roi_masks"].items()}
-                
-                if cfg.ROI_CONTRAST_ENABLE and roi_masks and len(roi_masks) > 0:
+                if isinstance(meta, dict) and ("roi_masks" in meta) and (len(meta["roi_masks"]) > 0):
+                    roi_masks = {k: torch.as_tensor(v > 0, device=device) for k, v in meta["roi_masks"].items()}
+
+                if getattr(cfg, "ROI_CONTRAST_ENABLE", False) and roi_masks:
+                    # ROI-only contrast (in-ROI positives/negatives + optional memory)
                     from .contrastive import contrastive_aux_loss_roi
                     L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss_roi(
                         mods=contrastive_mods,
@@ -310,10 +316,11 @@ def train_paggan(
                         patches_per_roi=cfg.ROI_PATCHES_PER_ROI,
                         patch_size=cfg.ROI_PATCH_SIZE,
                         roi_weights=cfg.ROI_AGG_WEIGHTS,
-                        roi_memory=None  # wired in step 6 if you enable memory
+                        roi_memory=roi_memory if getattr(cfg, "ROI_MEMORY_ENABLE", False) else None
                     )
                 else:
-                    # fallback to your old global/brain-mask contrast if ROI masks missing/disabled
+                    # fallback to your original brain-mask patch contrast
+                    from .contrastive import contrastive_aux_loss
                     L_m2ph_total, L_ph2p_total, _ = contrastive_aux_loss(
                         mods=contrastive_mods,
                         mri=mri5, pet=pet5, pet_hat=fake,
@@ -343,7 +350,6 @@ def train_paggan(
                 have_contrast = True
 
             # ===== Level-1: inside-group MGDA =====
-            # Recon = {L1, SSIM}
             def _group2(v_a_n, v_b_n, flo_a, flo_b):
                 alpha, v_ab = _mgda2_normed(v_a_n, v_b_n)  # alpha for v_a, 1-alpha for v_b
                 w = torch.stack([alpha, 1.0 - alpha]).to(v_a_n.device)
@@ -364,7 +370,6 @@ def train_paggan(
                 w_con_u3,  v_con_u3  = _group2(v_m2ph_u3_n,  v_ph2p_u3_n,  flo_M2PH, flo_PH2P)
                 w_con_out, v_con_out = _group2(v_m2ph_out_n, v_ph2p_out_n, flo_M2PH, flo_PH2P)
             else:
-                # no contrast present this batch
                 w_con_b = w_con_u3 = w_con_out = torch.tensor([0.0, 0.0], device=device)
                 v_con_b = v_con_u3 = v_con_out = None
 
@@ -380,7 +385,6 @@ def train_paggan(
                     else:
                         return w_raw, v_comb
                 else:
-                    # No contrast → reduce to 2-task MGDA
                     alpha_rg, v_rg = _mgda2_normed(v_rec, v_gan_n)
                     w2 = torch.stack([alpha_rg, 1.0 - alpha_rg, torch.tensor(0.0, device=v_rec.device, dtype=alpha_rg.dtype)])
                     return w2, v_rg
@@ -406,18 +410,20 @@ def train_paggan(
             angle_count += 1
 
             # ===== Accumulate weights (for per-epoch averages) =====
-            # Level-1 Recon weights: [w_L1, w_SSIM]
-            w_rec_sums["b"]   += w_rec_b.detach().cpu()
-            w_rec_sums["u3"]  += w_rec_u3.detach().cpu()
-            w_rec_sums["out"] += w_rec_out.detach().cpu()
-            # Level-1 Contrast weights: [w_M2Ph, w_Ph2P]
-            w_con_sums["b"]   += w_con_b.detach().cpu()
-            w_con_sums["u3"]  += w_con_u3.detach().cpu()
-            w_con_sums["out"] += w_con_out.detach().cpu()
-            # Level-2 group weights: [w_Recon, w_GAN, w_Contr]
-            w_l2_sums["b"]    += w_l2_b.detach().cpu()
-            w_l2_sums["u3"]   += w_l2_u3.detach().cpu()
-            w_l2_sums["out"]  += w_l2_out.detach().cpu()
+            def _acc(dst, key, w):
+                dst[key] += w.detach().cpu()
+
+            _acc(w_rec_sums, 'b',   w_rec_b)
+            _acc(w_rec_sums, 'u3',  w_rec_u3)
+            _acc(w_rec_sums, 'out', w_rec_out)
+
+            _acc(w_con_sums, 'b',   w_con_b)
+            _acc(w_con_sums, 'u3',  w_con_u3)
+            _acc(w_con_sums, 'out', w_con_out)
+
+            _acc(w_l2_sums, 'b',    w_l2_b)
+            _acc(w_l2_sums, 'u3',   w_l2_u3)
+            _acc(w_l2_sums, 'out',  w_l2_out)
             w_counts += 1
 
             # ===== View fusion and backward =====
@@ -520,10 +526,8 @@ def train_paggan(
                 if k in angle_accum:
                     print(f"    {k:>20}: {angle_accum[k] / angle_count:.3f}")
 
-        # Print averaged Level-1 and Level-2 weights per view
         if w_counts > 0:
             def _avg(v): return (v / w_counts).tolist()
-
             print("  Level-1 Recon weights [L1, SSIM] avg:")
             print(f"    bottleneck: {_avg(w_rec_sums['b'])}")
             print(f"    u3       : {_avg(w_rec_sums['u3'])}")
@@ -546,7 +550,6 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
-
 
 @torch.no_grad()
 def evaluate_paggan(
