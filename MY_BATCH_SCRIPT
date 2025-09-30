@@ -28,8 +28,8 @@ conda activate pasta
 
 python ROI_eval.py \
   --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2464_batch1_hierachy/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2464_batch1_hierachy/roi_metrics \
+  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_3264_batch1_hierachy/volumes \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_3264_batch1_hierachy/roi_metrics \
   --data-range 3.5 \
   --mmd-voxels 2048
 
