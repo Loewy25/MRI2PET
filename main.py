@@ -11,7 +11,7 @@ from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
 
-# >>> use a single module import for all contrast/patch flags <<<
+# One import to read all toggles/hparams
 import mri2pet.config as cfg
 
 from mri2pet.pretrain_contrast import pretrain_encoders
@@ -46,41 +46,50 @@ if __name__ == "__main__":
 
         if cfg.PREALIGNMENT:
             print("[Contrast] Pretraining encoders (global InfoNCE)...")
-            # build a separate loader with batch_size >= 4 for pretraining
+            # Build a small-batch loader for pretraining
             pretrain_train_loader, _, _, _, _, _, _ = build_loaders(batch_size=4)
             pretrain_encoders(
-                 pretrain_train_loader, val_loader, device,
-                 proj_dim=cfg.CONTRAST_DIM, tau=cfg.CONTRAST_TAU, finetune_pct=cfg.FINETUNE_PCT,
-                 lr=cfg.LR_CONTRAST, epochs=cfg.PRETRAIN_EPOCHS, ckpt_path=cfg.CONTRAST_CKPT
-             )
+                pretrain_train_loader, val_loader, device,
+                proj_dim=cfg.CONTRAST_DIM, tau=cfg.CONTRAST_TAU, finetune_pct=cfg.FINETUNE_PCT,
+                lr=cfg.LR_CONTRAST, epochs=cfg.PRETRAIN_EPOCHS, ckpt_path=cfg.CONTRAST_CKPT
+            )
             print(f"[Contrast] Saved teachers -> {cfg.CONTRAST_CKPT}")
 
         if os.path.exists(cfg.CONTRAST_CKPT):
             load_teachers(contrastive_mods, cfg.CONTRAST_CKPT, map_location=device)
             print(f"[Contrast] Loaded teachers from {cfg.CONTRAST_CKPT}")
 
-        # ensure teachers are on the training device
+        # Move to training device & freeze for GAN stage
         for m in contrastive_mods.values():
             m.to(device)
-
-        # Freeze them for GAN stage
         freeze_teachers(contrastive_mods)
 
-    # --- BEGIN PATCH: main.py::contrast_cfg ---
-# --- BEGIN PATCH: main.py::contrast_cfg (Plan-4) ---
-    contrast_cfg.update({
-    "roi_enable": cfg.ROI_CONTRAST_ENABLE,
-    "roi_patches_per_roi": cfg.ROI_PATCHES_PER_ROI,
-    "roi_patch_size": cfg.ROI_PATCH_SIZE,
-    "roi_weights": cfg.ROI_AGG_WEIGHTS,
-    "roi_memory_enable": cfg.ROI_MEMORY_ENABLE,
-    "roi_memory_len": cfg.ROI_MEMORY_LEN,
-})
+    # ---- Contrast configuration passed into the trainer ----
+    # (Note: ROI-* knobs are read directly from cfg inside train_paggan; included here for clarity/logging)
+    contrast_cfg = {
+        "use": cfg.USE_CONTRAST,
+        "tau": cfg.CONTRAST_TAU,
+        "use_patches": cfg.PATCH_CONTRAST,
+        "patch_size": cfg.PATCH_SIZE,
+        "patches_per_subj": cfg.PATCHES_PER_SUBJ,
 
-# --- END PATCH ---
+        # ROI-aware contrast (for completeness; trainer will read cfg.*)
+        "roi_enable": cfg.ROI_CONTRAST_ENABLE,
+        "roi_patches_per_roi": cfg.ROI_PATCHES_PER_ROI,
+        "roi_patch_size": cfg.ROI_PATCH_SIZE,
+        "roi_weights": cfg.ROI_AGG_WEIGHTS,
+        "roi_memory_enable": cfg.ROI_MEMORY_ENABLE,
+        "roi_memory_len": cfg.ROI_MEMORY_LEN,
+    }
 
-    # --- END PATCH ---
-
+    if cfg.ROI_CONTRAST_ENABLE:
+        print("[ROI-Contrast] ENABLED")
+        print(f"  patches/ROI   : {cfg.ROI_PATCHES_PER_ROI}")
+        print(f"  patch size    : {cfg.ROI_PATCH_SIZE}")
+        print(f"  ROI weights   : {cfg.ROI_AGG_WEIGHTS}")
+        print(f"  memory queue  : {'ON' if cfg.ROI_MEMORY_ENABLE else 'OFF'} (len={cfg.ROI_MEMORY_LEN})")
+    else:
+        print("[ROI-Contrast] DISABLED (falling back to brain-mask patch contrast if USE_CONTRAST=True)")
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
