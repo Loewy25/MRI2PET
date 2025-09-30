@@ -5,6 +5,9 @@ from .encoders import l2_normalize
 from .patches import sample_aligned_patches
 from typing import Dict
 from .patches import sample_aligned_patches_per_roi
+from typing import Dict, Optional
+from .memory import ROIMemory
+from .patches import sample_aligned_patches_per_roi
 
 def contrastive_aux_loss_roi(
     mods: Dict[str, torch.nn.Module],
@@ -14,42 +17,79 @@ def contrastive_aux_loss_roi(
     patches_per_roi: int,
     patch_size: Tuple[int,int,int],
     roi_weights: Dict[str, float],
-    roi_memory: Optional[Dict[str, Dict[str, torch.Tensor]]] = None  # optional
+    roi_memory: Optional[ROIMemory] = None
 ):
     """
-    Builds ROI-only contrast:
-      - Per ROI r: L_M->Ph^(r) and L_Ph->P^(r) using ONLY in-ROI negatives (K-1 other samples)
-      - Aggregate across ROIs with weights alpha_r -> two totals (same shape as old code)
-    Returns: (L_m2ph_total, L_ph2p_total, diag)
+    ROI-only contrast:
+      - Per ROI r: compute L_M->P̂^(r) and L_P̂->P^(r) with in-ROI positives
+      - Negatives = other in-ROI patches + (optional) ROI memory (past P̂ or P)
+      - Aggregate with roi_weights -> two totals (same interface as old code)
     """
+    dev = mri.device
     # 1) sample & embed per ROI
     per_roi = sample_aligned_patches_per_roi(
         mods, mri, pet, pet_hat, roi_masks,
         patch_size=patch_size, patches_per_roi=patches_per_roi
     )
 
-    # 2) compute per-ROI InfoNCE (two directions) with in-ROI negatives only
-    L_m_list = []; L_p_list = []; diag = {}
+    # Normalize/guard weights
+    w_sum = sum(float(roi_weights.get(k, 0.0)) for k in per_roi.keys())
+    def w_of(name: str) -> float:
+        if w_sum <= 0:
+            return 0.0
+        return float(roi_weights.get(name, 0.0)) / w_sum
+
+    L_m_list = []
+    L_p_list = []
+    diag = {}
+
+    # Lazy-init memory once we know feature dim
+    if roi_memory is not None:
+        # pick any ROI to read feature dim
+        for _name, (_uM, _uP, _uPh) in per_roi.items():
+            roi_memory.maybe_init(list(per_roi.keys()), dim=_uP.shape[1], device=dev)
+            break
+
     for name, (uM, uP, uPh) in per_roi.items():
-        # N x N cosine for in-ROI candidates
-        sim_M_Ph = cosine_sim(uM,  uPh)  # anchors uM; positives are diagonal
-        sim_Ph_P = cosine_sim(uPh, uP)   # anchors uPh; positives are diagonal
+        K = uM.size(0)
+        if K == 0:
+            continue
 
-        L_MPh_r = info_nce_ce(sim_M_Ph, tau)  # MRI -> P̂
-        L_PhP_r = info_nce_ce(sim_Ph_P, tau)  # P̂  -> P
+        # ----- M -> P̂ : anchors = uM, candidates = [uPh (positives first), memory(Phat) as extra negatives]
+        if roi_memory is not None:
+            mem_ph = roi_memory.get(name, 'Phat')  # [q1,d]
+            cand_MPh = torch.cat([uPh, mem_ph], dim=0) if mem_ph.numel() else uPh
+        else:
+            cand_MPh = uPh
+        sim_M_Ph = cosine_sim(uM, cand_MPh)  # [K, K+q1]
+        L_MPh_r = info_nce_ce(sim_M_Ph, tau)  # labels=0..K-1 (positives on the diagonal block)
 
-        w = float(roi_weights.get(name, 0.0))
+        # ----- P̂ -> P : anchors = uPh, candidates = [uP (positives first), memory(P) as extra negatives]
+        if roi_memory is not None:
+            mem_p = roi_memory.get(name, 'P')  # [q2,d]
+            cand_PhP = torch.cat([uP, mem_p], dim=0) if mem_p.numel() else uP
+        else:
+            cand_PhP = uP
+        sim_Ph_P = cosine_sim(uPh, cand_PhP)  # [K, K+q2]
+        L_PhP_r = info_nce_ce(sim_Ph_P, tau)
+
+        w = w_of(name)
         L_m_list.append(w * L_MPh_r)
         L_p_list.append(w * L_PhP_r)
 
         diag[f"ROI_{name}_M2Ph"] = float(L_MPh_r.item())
         diag[f"ROI_{name}_Ph2P"] = float(L_PhP_r.item())
 
-    # 3) aggregate to two totals (same outputs as your non-ROI contrast)
-    L_m2ph_total = torch.stack(L_m_list).sum() if len(L_m_list) else torch.tensor(0.0, device=mri.device)
-    L_ph2p_total = torch.stack(L_p_list).sum() if len(L_p_list) else torch.tensor(0.0, device=mri.device)
+        # Update memory AFTER reading from it (detach)
+        if roi_memory is not None:
+            roi_memory.enqueue(name, 'Phat', uPh)  # negatives for future M->P̂
+            roi_memory.enqueue(name, 'P',    uP)   # negatives for future P̂->P
+
+    L_m2ph_total = torch.stack(L_m_list).sum() if L_m_list else torch.tensor(0.0, device=dev)
+    L_ph2p_total = torch.stack(L_p_list).sum() if L_p_list else torch.tensor(0.0, device=dev)
 
     return L_m2ph_total, L_ph2p_total, diag
+
 
 def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
