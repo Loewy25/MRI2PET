@@ -1,3 +1,4 @@
+# mri2pet/data.py
 import os, glob
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
@@ -12,6 +13,7 @@ from .config import (
 )
 from .utils import _pad_or_crop_to  # used by models.py; keep import path if needed
 
+
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
     if target is None:
         return vol.astype(np.float32)
@@ -21,6 +23,7 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: 
         return vol.astype(np.float32)
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
     return nd_zoom(vol, zoom_factors, order=order).astype(np.float32)
+
 
 def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     x = vol.astype(np.float32)
@@ -35,6 +38,7 @@ def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     z[~mask] = 0.0
     return z.astype(np.float32)
 
+
 def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     x = vol.astype(np.float32)
     if mask is None:
@@ -43,11 +47,14 @@ def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     x_out[~mask] = 0.0
     return x_out.astype(np.float32)
 
+
 class KariAV1451Dataset(Dataset):
     """
     Loads pairs (T1_masked.nii.gz, PET_in_T1_masked.nii.gz) from AV1451 subject folders,
     normalizes, optional resize, returns (MRI, PET, meta) where MRI/PET are FloatTensors [1,D,H,W].
     Uses aseg_brainmask.nii.gz if available for masking; otherwise T1>0 as mask.
+
+    NEW: also loads per-ROI masks if present in the same subject folder and returns them in meta["roi_masks"].
     """
     def __init__(self, root_dir: str = ROOT_DIR, resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO):
         self.root_dir = root_dir
@@ -95,21 +102,44 @@ class KariAV1451Dataset(Dataset):
         if t1.shape != pet.shape:
             raise TypeError("T1 and PET are not in the same grid")
 
+        # resize MRI, PET to common grid if requested
         t1  = _maybe_resize(t1,  self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
 
+        # resize brain mask to same grid if needed
         if self.resize_to is not None and mask is not None:
             Dz, Hy, Wx = mask.shape
             td, th, tw = self.resize_to
             if (Dz,Hy,Wx) != (td,th,tw):
                 mask = nd_zoom(mask.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5
 
+        # normalize and zero outside brain
         t1n  = norm_mri_to_01(t1,  mask)
         petn = norm_pet_to_01(pet, mask=mask)
 
         t1n_t  = torch.from_numpy(np.expand_dims(t1n,  axis=0))
         petn_t = torch.from_numpy(np.expand_dims(petn, axis=0))
+
+        # --- NEW: load ROI masks (if present) from the subject folder ---
+        roi_files = {
+            "Hippocampus":        "ROI_Hippocampus.nii.gz",
+            "PosteriorCingulate": "ROI_PosteriorCingulate.nii.gz",
+            "Precuneus":          "ROI_Precuneus.nii.gz",
+            "TemporalLobe":       "ROI_TemporalLobe.nii.gz",
+            "LimbicCortex":       "ROI_LimbicCortex.nii.gz",
+        }
+        roi_masks: Dict[str, np.ndarray] = {}
+        subj_dir = os.path.dirname(t1_path)
+        for name, fn in roi_files.items():
+            p = os.path.join(subj_dir, fn)
+            if os.path.exists(p):
+                arr = np.asarray(nib.load(p).get_fdata()) > 0
+                # resize ROI mask to current grid if needed
+                if self.resize_to is not None and arr.shape != t1.shape:
+                    Dz, Hy, Wx = arr.shape; td, th, tw = self.resize_to
+                    arr = (nd_zoom(arr.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5)
+                roi_masks[name] = arr.astype(np.uint8)
 
         meta = {
             "sid": sid,
@@ -121,31 +151,11 @@ class KariAV1451Dataset(Dataset):
             "cur_shape": cur_shape,
             "resized_to": self.resize_to,
             "brain_mask": mask.astype(np.uint8) if mask is not None else None,
+            # NEW
+            "roi_masks": roi_masks,  # dict[str] -> np.uint8 [D,H,W]
         }
-        # --- NEW: load ROI masks if present ---
-        roi_files = {
-            "Hippocampus":        "ROI_Hippocampus.nii.gz",
-            "PosteriorCingulate": "ROI_PosteriorCingulate.nii.gz",
-            "Precuneus":          "ROI_Precuneus.nii.gz",
-            "TemporalLobe":       "ROI_TemporalLobe.nii.gz",
-            "LimbicCortex":       "ROI_LimbicCortex.nii.gz",
-        }
-        roi_masks = {}
-        subj_dir = os.path.dirname(t1_path)
-        for name, fn in roi_files.items():
-            p = os.path.join(subj_dir, fn)
-            if os.path.exists(p):
-                arr = np.asarray(nib.load(p).get_fdata()) > 0
-                # resize ROI mask to current grid if needed
-                if self.resize_to is not None and arr.shape != t1.shape:
-                    Dz, Hy, Wx = arr.shape; td, th, tw = self.resize_to
-                    arr = (nd_zoom(arr.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5)
-                roi_masks[name] = arr.astype(np.uint8)
-        
-        # in meta:
-        meta["roi_masks"] = roi_masks  # dict[str]->np.uint8 ndarray [D,H,W]; may be empty
-
         return t1n_t, petn_t, meta
+
 
 def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
     if len(batch) == 1:
@@ -154,6 +164,7 @@ def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, A
     pet = torch.stack([b[1] for b in batch], dim=0)
     metas = [b[2] for b in batch]
     return mri, pet, metas
+
 
 def build_loaders(
     root: str = ROOT_DIR,
@@ -189,3 +200,4 @@ def build_loaders(
         collate_fn=_collate_keep_meta
     )
     return dl_train, dl_val, dl_test, N, n_train, n_val, n_test
+
