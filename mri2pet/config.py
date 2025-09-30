@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY"
+RUN_NAME   = "MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -92,7 +92,7 @@ ROI_CONTRAST_ENABLE: bool = True          # master switch for ROI-only contrast
 
 # same # patches for every ROI, one size for all
 ROI_PATCHES_PER_ROI: int = 32
-ROI_PATCH_SIZE: Tuple[int,int,int] = (24, 24, 24)
+ROI_PATCH_SIZE: Tuple[int,int,int] = (16 ,16, 16)
 
 # weights to combine per-ROI losses into the two final contrast terms (sum ≈ 1)
 ROI_AGG_WEIGHTS = {
