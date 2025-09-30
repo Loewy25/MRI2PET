@@ -31,6 +31,51 @@ def _rand_center_within(mask3d: torch.Tensor, ps: Tuple[int,int,int]) -> Tuple[i
     cw = min(max(cw, pw//2), max(pw//2, W - pw//2 - 1))
     return cd, ch, cw
 
+from typing import Dict
+
+def sample_aligned_patches_per_roi(
+    mods,
+    mri: torch.Tensor, pet: torch.Tensor, pet_hat: torch.Tensor,
+    roi_masks: Dict[str, torch.Tensor],
+    patch_size: Tuple[int,int,int], patches_per_roi: int
+):
+    """
+    For each ROI name in roi_masks:
+      - sample K=patches_per_roi centers inside that ROI
+      - crop (MRI, PET, P̂) patches, embed to L2-normalized vectors
+    Returns: dict[name] = (uM_r, uP_r, uPh_r) each [K, d] (B=1 assumed in your setup)
+    """
+    assert mri.shape == pet.shape == pet_hat.shape
+    dev = mri.device
+    pd,ph,pw = patch_size
+
+    out: Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+    # assume B=1 (your training); if B>1, you can loop batch dimension similarly
+    for name, mask_np in roi_masks.items():
+        if mask_np is None: 
+            continue
+        mask3d = torch.as_tensor(mask_np, device=dev, dtype=torch.bool)  # [D,H,W]
+
+        m_list=[]; p_list=[]; ph_list=[]
+        for _ in range(patches_per_roi):
+            center = _rand_center_within(mask3d, patch_size)
+            m_list.append( _crop_3d(mri,     center, patch_size) )
+            p_list.append( _crop_3d(pet,     center, patch_size) )
+            ph_list.append(_crop_3d(pet_hat, center, patch_size) )
+
+        M_batch  = torch.cat(m_list,  dim=0)  # [K,1,pd,ph,pw]
+        P_batch  = torch.cat(p_list,  dim=0)
+        Ph_batch = torch.cat(ph_list, dim=0)
+
+        with torch.no_grad():
+            uM  = _embed(mods, M_batch,  "M")  # [K,d]
+            uP  = _embed(mods, P_batch,  "P")  # [K,d]
+        uPh = _embed(mods, Ph_batch, "P")      # [K,d] (grad flows to pet_hat inputs)
+
+        out[name] = (uM, uP, uPh)
+
+    return out
 
 def _crop_3d(x: torch.Tensor, center: Tuple[int,int,int], ps: Tuple[int,int,int]) -> torch.Tensor:
     """
