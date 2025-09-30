@@ -92,7 +92,7 @@ ROI_CONTRAST_ENABLE: bool = True          # master switch for ROI-only contrast
 
 # same # patches for every ROI, one size for all
 ROI_PATCHES_PER_ROI: int = 32
-ROI_PATCH_SIZE: Tuple[int,int,int] = (16, 16, 16)
+ROI_PATCH_SIZE: Tuple[int,int,int] = (24, 24, 24)
 
 # weights to combine per-ROI losses into the two final contrast terms (sum ≈ 1)
 ROI_AGG_WEIGHTS = {
