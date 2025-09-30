@@ -63,7 +63,7 @@ LAMBDA_CONTRAST: float = 0.20
 
 # Patch-level contrast used ONLY in GAN stage
 PATCH_CONTRAST: bool = True
-PATCH_SIZE: Tuple[int,int,int] = (16,16,16)
+PATCH_SIZE: Tuple[int,int,int] = (24,24,24)
 PATCHES_PER_SUBJ: int = 64             # with B=1, this gives you 16 in-batch negatives
 
 
