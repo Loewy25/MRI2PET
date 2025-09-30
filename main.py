@@ -68,13 +68,15 @@ if __name__ == "__main__":
 
     # --- BEGIN PATCH: main.py::contrast_cfg ---
 # --- BEGIN PATCH: main.py::contrast_cfg (Plan-4) ---
-    contrast_cfg = {
-        "use": cfg.USE_CONTRAST,
-        "tau": cfg.CONTRAST_TAU,
-        "use_patches": cfg.PATCH_CONTRAST,
-        "patch_size": cfg.PATCH_SIZE,
-        "patches_per_subj": cfg.PATCHES_PER_SUBJ,
-    }
+    contrast_cfg.update({
+    "roi_enable": cfg.ROI_CONTRAST_ENABLE,
+    "roi_patches_per_roi": cfg.ROI_PATCHES_PER_ROI,
+    "roi_patch_size": cfg.ROI_PATCH_SIZE,
+    "roi_weights": cfg.ROI_AGG_WEIGHTS,
+    "roi_memory_enable": cfg.ROI_MEMORY_ENABLE,
+    "roi_memory_len": cfg.ROI_MEMORY_LEN,
+})
+
 # --- END PATCH ---
 
     # --- END PATCH ---
