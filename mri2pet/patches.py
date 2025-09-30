@@ -31,7 +31,7 @@ def _rand_center_within(mask3d: torch.Tensor, ps: Tuple[int,int,int]) -> Tuple[i
     cw = min(max(cw, pw//2), max(pw//2, W - pw//2 - 1))
     return cd, ch, cw
 
-from typing import Dict
+from typing import Dict, Tuple
 
 def sample_aligned_patches_per_roi(
     mods,
@@ -47,26 +47,26 @@ def sample_aligned_patches_per_roi(
     """
     assert mri.shape == pet.shape == pet_hat.shape
     dev = mri.device
-    pd,ph,pw = patch_size
-
     out: Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
-    # assume B=1 (your training); if B>1, you can loop batch dimension similarly
     for name, mask_np in roi_masks.items():
-        if mask_np is None: 
+        if mask_np is None:
             continue
         mask3d = torch.as_tensor(mask_np, device=dev, dtype=torch.bool)  # [D,H,W]
 
         m_list=[]; p_list=[]; ph_list=[]
         for _ in range(patches_per_roi):
             center = _rand_center_within(mask3d, patch_size)
-            m_list.append( _crop_3d(mri,     center, patch_size) )
+            m_list.append( _crop_3d(mri,     center, patch_size) )  # [1,1,pd,ph,pw]
             p_list.append( _crop_3d(pet,     center, patch_size) )
             ph_list.append(_crop_3d(pet_hat, center, patch_size) )
 
+        if len(m_list) == 0:
+            continue
+
         M_batch  = torch.cat(m_list,  dim=0)  # [K,1,pd,ph,pw]
-        P_batch  = torch.cat(p_list,  dim=0)
-        Ph_batch = torch.cat(ph_list, dim=0)
+        P_batch  = torch.cat(p_list,  dim=0)  # [K,1,pd,ph,pw]
+        Ph_batch = torch.cat(ph_list, dim=0)  # [K,1,pd,ph,pw]
 
         with torch.no_grad():
             uM  = _embed(mods, M_batch,  "M")  # [K,d]
@@ -76,6 +76,7 @@ def sample_aligned_patches_per_roi(
         out[name] = (uM, uP, uPh)
 
     return out
+
 
 def _crop_3d(x: torch.Tensor, center: Tuple[int,int,int], ps: Tuple[int,int,int]) -> torch.Tensor:
     """
