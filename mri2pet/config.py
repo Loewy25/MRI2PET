@@ -87,3 +87,22 @@ CONTRAST_OUTSIDE_MGDA: bool = False
 # Logging (keep the earlier flag; add group-level switch)
 PRINT_GRAD_COSINES: bool = True
 PRINT_GROUP_COSINES: bool = True
+# --- ROI-aware contrast (minimal knobs) ---
+ROI_CONTRAST_ENABLE: bool = True          # master switch for ROI-only contrast
+
+# same # patches for every ROI, one size for all
+ROI_PATCHES_PER_ROI: int = 16
+ROI_PATCH_SIZE: Tuple[int,int,int] = (32, 32, 32)
+
+# weights to combine per-ROI losses into the two final contrast terms (sum ≈ 1)
+ROI_AGG_WEIGHTS = {
+    "TemporalLobe":       0.32,
+    "Hippocampus":        0.26,
+    "LimbicCortex":       0.18,
+    "PosteriorCingulate": 0.12,
+    "Precuneus":          0.12,
+}
+
+# optional per-ROI memory queue (safe with B=1); OFF by default
+ROI_MEMORY_ENABLE: bool = False
+ROI_MEMORY_LEN: int = 512   # per ROI per direction, embeddings only (tiny memory)
