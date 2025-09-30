@@ -3,6 +3,53 @@ import torch
 import torch.nn.functional as F
 from .encoders import l2_normalize
 from .patches import sample_aligned_patches
+from typing import Dict
+from .patches import sample_aligned_patches_per_roi
+
+def contrastive_aux_loss_roi(
+    mods: Dict[str, torch.nn.Module],
+    mri: torch.Tensor, pet: torch.Tensor, pet_hat: torch.Tensor,
+    roi_masks: Dict[str, torch.Tensor],
+    tau: float,
+    patches_per_roi: int,
+    patch_size: Tuple[int,int,int],
+    roi_weights: Dict[str, float],
+    roi_memory: Optional[Dict[str, Dict[str, torch.Tensor]]] = None  # optional
+):
+    """
+    Builds ROI-only contrast:
+      - Per ROI r: L_M->Ph^(r) and L_Ph->P^(r) using ONLY in-ROI negatives (K-1 other samples)
+      - Aggregate across ROIs with weights alpha_r -> two totals (same shape as old code)
+    Returns: (L_m2ph_total, L_ph2p_total, diag)
+    """
+    # 1) sample & embed per ROI
+    per_roi = sample_aligned_patches_per_roi(
+        mods, mri, pet, pet_hat, roi_masks,
+        patch_size=patch_size, patches_per_roi=patches_per_roi
+    )
+
+    # 2) compute per-ROI InfoNCE (two directions) with in-ROI negatives only
+    L_m_list = []; L_p_list = []; diag = {}
+    for name, (uM, uP, uPh) in per_roi.items():
+        # N x N cosine for in-ROI candidates
+        sim_M_Ph = cosine_sim(uM,  uPh)  # anchors uM; positives are diagonal
+        sim_Ph_P = cosine_sim(uPh, uP)   # anchors uPh; positives are diagonal
+
+        L_MPh_r = info_nce_ce(sim_M_Ph, tau)  # MRI -> P̂
+        L_PhP_r = info_nce_ce(sim_Ph_P, tau)  # P̂  -> P
+
+        w = float(roi_weights.get(name, 0.0))
+        L_m_list.append(w * L_MPh_r)
+        L_p_list.append(w * L_PhP_r)
+
+        diag[f"ROI_{name}_M2Ph"] = float(L_MPh_r.item())
+        diag[f"ROI_{name}_Ph2P"] = float(L_PhP_r.item())
+
+    # 3) aggregate to two totals (same outputs as your non-ROI contrast)
+    L_m2ph_total = torch.stack(L_m_list).sum() if len(L_m_list) else torch.tensor(0.0, device=mri.device)
+    L_ph2p_total = torch.stack(L_p_list).sum() if len(L_p_list) else torch.tensor(0.0, device=mri.device)
+
+    return L_m2ph_total, L_ph2p_total, diag
 
 def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
