@@ -28,30 +28,30 @@ conda activate pasta
 
 python ROI_eval.py \
   --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY/roi_metrics \
+  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/volumes \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/roi_metrics \
   --data-range 3.5 \
   --mmd-voxels 2048
 
 
 python ROI_eval.py \
   --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY/roi_metrics \
+  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY_nomultiview/roi_metrics \
   --data-range 3.5 \
   --mmd-voxels 2048
 
 
 python ROI_eval.py \
   --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY/roi_metrics \
+  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY_nomultiview/volumes \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY_nomultiview/roi_metrics \
   --data-range 3.5 \
   --mmd-voxels 2048
 
 python ROI_eval.py \
   --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY/roi_metrics \
+  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/roi_metrics \
   --data-range 3.5 \
   --mmd-voxels 2048
