@@ -26,32 +26,17 @@ python -c "import nibabel; print(nibabel.__version__)"
 . ~/miniconda3/bin/activate
 conda activate pasta
 
-python ROI_eval.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/roi_metrics \
-  --data-range 3.5 \
-  --mmd-voxels 2048
+#python ROI_eval.py \
+#  --roi-root /scratch/l.peiwang/kari_brainv11 \
+#  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/volumes \
+#  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_MEMORY_nomultiview/roi_metrics \
+#  --data-range 3.5 \
+#  --mmd-voxels 2048
 
 
-python ROI_eval.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY_nomultiview/roi_metrics \
-  --data-range 3.5 \
-  --mmd-voxels 2048
+python MI_ROI.py \
+  --root-dir /scratch/l.peiwang/kari_brainv11 \
+  --out /scratch/l.peiwang/kari_brainv11/mi_results \
+  --bins 64 \
+  --verbose
 
-
-python ROI_eval.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY_nomultiview/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_MEMORY_nomultiview/roi_metrics \
-  --data-range 3.5 \
-  --mmd-voxels 2048
-
-python ROI_eval.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/roi_metrics \
-  --data-range 3.5 \
-  --mmd-voxels 2048
