@@ -51,6 +51,11 @@ def _entropy_bits_from_probs(p: np.ndarray) -> float:
     return float(-np.sum(p * np.log2(p))) if p.size else float("nan")
 
 def mi_nmi_bits(x: np.ndarray, y: np.ndarray, bins: int = 64) -> Tuple[float, float]:
+    """
+    Return (MI_bits, NMI_SU) where
+      MI_bits = Hx + Hy - Hxy  (bits, base-2)
+      NMI_SU  = 2*MI / (Hx + Hy)  in [0, 1]   # symmetric uncertainty
+    """
     x = np.asarray(x).ravel()
     y = np.asarray(y).ravel()
     m = np.isfinite(x) & np.isfinite(y)
@@ -71,12 +76,19 @@ def mi_nmi_bits(x: np.ndarray, y: np.ndarray, bins: int = 64) -> Tuple[float, fl
     Px  = Pxy.sum(axis=1)
     Py  = Pxy.sum(axis=0)
 
-    Hx  = _entropy_bits_from_probs(Px)
-    Hy  = _entropy_bits_from_probs(Py)
-    Hxy = _entropy_bits_from_probs(Pxy.ravel())
+    def _H_bits(p):
+        p = p[p > 0]
+        return float(-np.sum(p * np.log2(p))) if p.size else float("nan")
+
+    Hx  = _H_bits(Px)
+    Hy  = _H_bits(Py)
+    Hxy = _H_bits(Pxy.ravel())
     MI  = Hx + Hy - Hxy
-    NMI = (Hx + Hy) / Hxy if np.isfinite(Hxy) and Hxy > 0 else float("nan")
-    return float(MI), float(NMI)
+
+    denom = (Hx + Hy)
+    NMI_SU = (2.0 * MI) / denom if np.isfinite(denom) and denom > 0 else float("nan")
+    return float(MI), float(NMI_SU)
+
 
 def mi_nmi_in_mask(x: np.ndarray, y: np.ndarray, mask: np.ndarray, bins: int = 64) -> Tuple[float, float, int]:
     m = (mask > 0)
