@@ -1,5 +1,6 @@
 import os, glob
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 import numpy as np
 import nibabel as nib
 from scipy.ndimage import zoom as nd_zoom
@@ -12,6 +13,7 @@ from .config import (
 )
 from .utils import _pad_or_crop_to  # used by models.py; keep import path if needed
 
+
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
     if target is None:
         return vol.astype(np.float32)
@@ -21,6 +23,7 @@ def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: 
         return vol.astype(np.float32)
     zoom_factors = (td / Dz, th / Hy, tw / Wx)
     return nd_zoom(vol, zoom_factors, order=order).astype(np.float32)
+
 
 def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     x = vol.astype(np.float32)
@@ -35,6 +38,7 @@ def norm_mri_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     z[~mask] = 0.0
     return z.astype(np.float32)
 
+
 def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarray:
     x = vol.astype(np.float32)
     if mask is None:
@@ -42,6 +46,7 @@ def norm_pet_to_01(vol: np.ndarray, mask: Optional[np.ndarray]=None) -> np.ndarr
     x_out = x.copy()
     x_out[~mask] = 0.0
     return x_out.astype(np.float32)
+
 
 class KariAV1451Dataset(Dataset):
     """
@@ -124,6 +129,43 @@ class KariAV1451Dataset(Dataset):
         }
         return t1n_t, petn_t, meta
 
+
+class _MismatchedPairDataset(torch.utils.data.Dataset):
+    """
+    Wraps a dataset (typically a torch.utils.data.Subset of KariAV1451Dataset) so that:
+      - __getitem__(i) returns (MRI_i, PET_j, meta_i) with j != i (when length > 1).
+      - PET_j is chosen from a fixed derangement permutation for reproducibility.
+    Use ONLY for training. Validation/test must remain matched.
+    """
+    def __init__(self, base_ds: torch.utils.data.Dataset, seed: int = 1999):
+        self.base = base_ds
+        self.n = len(base_ds)
+        self._rng = np.random.default_rng(seed)
+        self._build_perm()
+
+    def _build_perm(self):
+        n = self.n
+        self.perm = np.arange(n)
+        if n <= 1:
+            return
+        self._rng.shuffle(self.perm)
+        # Ensure no fixed points
+        for i in range(n):
+            if self.perm[i] == i:
+                j = (i + 1) % n
+                self.perm[i], self.perm[j] = self.perm[j], self.perm[i]
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx: int):
+        # MRI/meta from subject i
+        mri_i, _pet_i, meta_i = self.base[idx]
+        # PET from a different subject j
+        _mri_j, pet_j, _meta_j = self.base[int(self.perm[idx])]
+        return mri_i, pet_j, meta_i
+
+
 def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
     if len(batch) == 1:
         return batch[0]
@@ -131,6 +173,7 @@ def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, A
     pet = torch.stack([b[1] for b in batch], dim=0)
     metas = [b[2] for b in batch]
     return mri, pet, metas
+
 
 def build_loaders(
     root: str = ROOT_DIR,
@@ -150,6 +193,10 @@ def build_loaders(
     gen = torch.Generator().manual_seed(seed)
     train_set, val_set, test_set = random_split(ds, [n_train, n_val, n_test], generator=gen)
 
+    # === Training-only MRI↔PET mismatch ===
+    if len(train_set) > 1:
+        train_set = _MismatchedPairDataset(train_set, seed=seed)
+
     dl_train = DataLoader(
         train_set, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
@@ -166,3 +213,4 @@ def build_loaders(
         collate_fn=_collate_keep_meta
     )
     return dl_train, dl_val, dl_test, N, n_train, n_val, n_test
+
