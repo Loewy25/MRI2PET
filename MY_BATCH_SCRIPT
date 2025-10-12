@@ -25,6 +25,9 @@ python -c "import nibabel; print(nibabel.__version__)"
 
 . ~/miniconda3/bin/activate
 conda activate pasta
+module load freesurfer
+module load fsl
+
 
 #python ROI_eval.py \
 #  --roi-root /scratch/l.peiwang/kari_brainv11 \
