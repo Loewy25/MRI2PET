@@ -5,11 +5,12 @@
 T807_v1 TAU PET processing, matching your previous pipeline:
 - Copy T1.nii.gz
 - Compute T1001->T1 (FLIRT) and apply to PET -> PET_in_T1.nii.gz
-- Make aseg_brainmask.nii.gz directly from aseg.mgz (NO resampling)
-- Make ROI_* from aparc+aseg (and aseg for hippocampus) with:
-  * DEBUG-ONLY grid/affine checks vs T1
-  * NO resampling even if mismatched (log and continue)
-- If anything is missing/mismatched, print explicit debug lines and skip that step/subject.
+- Make aseg_brainmask.nii.gz from aseg.mgz, but **now**:
+  * check aseg/aparc vs T1 shape+affine and **resample to T1 if mismatched**
+- Make ROI_* from aparc+aseg (and aseg for hippocampus) **in T1 space**:
+  * use resampled labels if a mismatch was detected (nearest-neighbor)
+- If anything is missing/mismatched, print explicit debug lines and skip that subject.
+- No backups; re-runs overwrite.
 """
 
 import os, re, glob, csv, shutil, subprocess, sys, json
@@ -23,16 +24,16 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainv22"   # same as before
+OUT_ROOT  = "/scratch/l.peiwang/kari_brainv22"
 LUT_PATH  = "/scratch/l.peiwang/FreeSurferColorLUT.txt"
 
-CSV_PATH  = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"      # <--- EDIT THIS
+CSV_PATH  = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"  # <--- EDIT THIS
 
 RUN_LIMIT   = None     # None = process all eligible rows; or set a small int for a dry run
 ATOL_AFFINE = 1e-4
 DEBUG       = True
 
-# Labels to keep for a clean parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
+# Labels to keep for a clean brain parenchyma mask (GM+WM, cerebellum, subcortical, brainstem, VentralDC)
 KEEP_LABELS = {
     2, 41, 3, 42, 7, 46, 8, 47, 10, 49, 11, 50, 12, 51,
     13, 52, 17, 53, 18, 54, 26, 58, 28, 60, 16
@@ -130,7 +131,6 @@ def choose_pet_strict(nifti_dir):
 def find_fs_subject_dir_by_mrsession(fs_root, mr_session):
     """
     Find FS subject dir whose name/path contains MR_Session (exact string search).
-    No backup strategies by design.
     """
     if not mr_session:
         return None
@@ -182,7 +182,7 @@ def find_fs_labels_closest(fs_subject_dir, target_dt):
         aparc = _find_label_in_run(best, "aparc+aseg.mgz")
         if aseg and aparc:
             return aseg, aparc, best
-    # Fallback search across subject tree (still no backups; just search)
+    # Fallback search across subject tree
     found_aseg, found_aparc = None, None
     for root, _, files in os.walk(fs_subject_dir):
         if "aseg.mgz" in files and not found_aseg:
@@ -205,6 +205,9 @@ def _ensure_3d_nifti(in_path, out_dir, tag):
     return in_path, False
 
 def make_aseg_mask_nifti(aseg_path, out_path):
+    """
+    Create NIfTI mask from aseg (labels in KEEP_LABELS) preserving the input grid/affine.
+    """
     aseg_img = nib.load(aseg_path)
     lab      = np.asanyarray(aseg_img.dataobj)
     mask     = np.isin(lab, list(KEEP_LABELS)).astype(np.uint8)
@@ -216,6 +219,28 @@ def shapes_affines_match(a_path, b_path, atol=ATOL_AFFINE):
     shape_ok = (ia.shape == ib.shape)
     aff_ok   = np.allclose(ia.affine, ib.affine, atol=atol)
     return shape_ok and aff_ok, shape_ok, aff_ok, ia.shape, ib.shape, ia.affine, ib.affine
+
+def resample_label_to_target(label_path, target_path, out_path):
+    """
+    Use FreeSurfer mri_vol2vol (nearest) to resample label → target grid.
+    """
+    if not shutil.which("mri_vol2vol"):
+        raise RuntimeError("mri_vol2vol not found. Source your FreeSurfer env.")
+    cmd = [
+        "mri_vol2vol",
+        "--mov", label_path,
+        "--targ", target_path,
+        "--regheader",
+        "--interp", "nearest",
+        "--o", out_path
+    ]
+    log("RUN: " + " ".join(cmd))
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        tail = "\n".join(r.stderr.splitlines()[-20:])
+        log("mri_vol2vol stderr (tail):\n" + tail, level="ERROR")
+        raise RuntimeError(f"mri_vol2vol failed: {r.returncode}")
+    return out_path
 
 def read_fs_lut(lut_path=LUT_PATH):
     lut = {}
@@ -275,6 +300,7 @@ def main():
     skip_no_fs = skip_no_aseg = skip_no_aparc = flirt_fail = 0
     roi_done = 0
     space_warn_aseg = space_warn_aparc = 0
+    vol2vol_fail = 0
 
     lut = read_fs_lut(LUT_PATH)
     summary = []
@@ -395,74 +421,87 @@ def main():
                 try: os.remove(pth)
                 except Exception: pass
 
-        # --- Parenchyma mask (NO resampling; same as before) ---
-        out_mask = os.path.join(out_dir, "aseg_brainmask.nii.gz")
-        make_aseg_mask_nifti(aseg_path, out_mask)
+        # --- Ensure labels are in T1 space (resample if shape OR affine mismatch) ---
+        # Compare aseg/aparc vs T1
+        sameA, shapeA, affA, a_shape, t_shapeA, a_aff, t_affA = shapes_affines_match(aseg_path, dst_t1, atol=ATOL_AFFINE)
+        sameP, shapeP, affP, p_shape, t_shapeP, p_aff, t_affP = shapes_affines_match(aparc_path, dst_t1, atol=ATOL_AFFINE)
 
-        # --- ROI masks (DEBUG CHECK ONLY; NO RESAMPLING) ---
-        # Check alignment vs T1 and log any mismatch
-        sameA, shapeA, affA, a_shape, t_shape, a_aff, t_aff = shapes_affines_match(aseg_path, dst_t1, atol=ATOL_AFFINE)
-        if not sameA:
-            space_warn_aseg += 1
-            log(f"[DEBUG:SPACE] aseg vs T1 mismatch (no resample). shape_ok={shapeA}, affine_ok={affA}")
-            log(f"  aseg.shape={a_shape}  T1.shape={t_shape}")
-            log("  aseg.affine:\n" + np.array2string(a_aff, precision=5))
-            log("  T1.affine:\n"   + np.array2string(t_aff, precision=5))
+        # Resample when either shape or affine differs
+        try:
+            if not sameA:
+                space_warn_aseg += 1
+                log(f"[RESAMPLE] aseg -> T1 (shape_ok={shapeA}, affine_ok={affA})")
+                log(f"  aseg.shape={a_shape}  T1.shape={t_shapeA}")
+                log("  aseg.affine:\n" + np.array2string(a_aff, precision=5))
+                log("  T1.affine:\n"   + np.array2string(t_affA, precision=5))
+                aseg_inT1 = os.path.join(out_dir, "aseg_inT1.nii.gz")
+                resample_label_to_target(aseg_path, dst_t1, aseg_inT1)
+            else:
+                aseg_inT1 = aseg_path
 
-        sameP, shapeP, affP, p_shape, t_shape2, p_aff, t_aff2 = shapes_affines_match(aparc_path, dst_t1, atol=ATOL_AFFINE)
-        if not sameP:
-            space_warn_aparc += 1
-            log(f"[DEBUG:SPACE] aparc+aseg vs T1 mismatch (no resample). shape_ok={shapeP}, affine_ok={affP}")
-            log(f"  aparc.shape={p_shape}  T1.shape={t_shape2}")
-            log("  aparc.affine:\n" + np.array2string(p_aff, precision=5))
-            log("  T1.affine:\n"    + np.array2string(t_aff2, precision=5))
+            if not sameP:
+                space_warn_aparc += 1
+                log(f"[RESAMPLE] aparc+aseg -> T1 (shape_ok={shapeP}, affine_ok={affP})")
+                log(f"  aparc.shape={p_shape}  T1.shape={t_shapeP}")
+                log("  aparc.affine:\n" + np.array2string(p_aff, precision=5))
+                log("  T1.affine:\n"    + np.array2string(t_affP, precision=5))
+                aparc_inT1 = os.path.join(out_dir, "aparc_inT1.nii.gz")
+                resample_label_to_target(aparc_path, dst_t1, aparc_inT1)
+            else:
+                aparc_inT1 = aparc_path
+        except RuntimeError as e:
+            log(f"[FAIL:VOL2VOL] {tau_session}  ({e})", level="ERROR")
+            vol2vol_fail += 1
+            # cannot proceed reliably with masks/ROIs if resampling failed
+            continue
 
-        # Use original label paths regardless of (mis)match
-        aseg_for_roi  = aseg_path
-        aparc_for_roi = aparc_path
+        # --- Parenchyma mask (now guaranteed to match T1 if resampled) ---
+        out_mask = os.path.join(out_dir, "aseg_brainmask.nii.gz")  # keep same name
+        make_aseg_mask_nifti(aseg_inT1, out_mask)
 
-        # Build ROI masks
+        # --- ROI masks (use *_inT1 if created) ---
         created = {}
 
-        # 1) Hippocampus (aseg)
         lut_local = read_fs_lut(LUT_PATH)
+
+        # 1) Hippocampus (aseg-based)
         hip_ids = [lut_local.get("Left-Hippocampus", 17), lut_local.get("Right-Hippocampus", 53)]
         hip_path = os.path.join(out_dir, "ROI_Hippocampus.nii.gz")
-        vox_hip  = write_mask_from_labels(aseg_for_roi, hip_ids, hip_path)
+        vox_hip  = write_mask_from_labels(aseg_inT1, hip_ids, hip_path)
         created[Path(hip_path).name] = vox_hip
 
-        # 2) PCC (aparc)
+        # 2) PCC (aparc-based)
         pcc_ids = ids_for_hemi_names(["posteriorcingulate"], lut_local)
         if pcc_ids:
             pcc_path = os.path.join(out_dir, "ROI_PosteriorCingulate.nii.gz")
-            vox_pcc  = write_mask_from_labels(aparc_for_roi, pcc_ids, pcc_path)
+            vox_pcc  = write_mask_from_labels(aparc_inT1, pcc_ids, pcc_path)
             created[Path(pcc_path).name] = vox_pcc
         else:
             log("  ERROR: PCC labels not in LUT; skipping PCC", level="ERROR")
 
-        # 3) Precuneus (aparc)
+        # 3) Precuneus (aparc-based)
         pcun_ids = ids_for_hemi_names(["precuneus"], lut_local)
         if pcun_ids:
             pcun_path = os.path.join(out_dir, "ROI_Precuneus.nii.gz")
-            vox_pcun  = write_mask_from_labels(aparc_for_roi, pcun_ids, pcun_path)
+            vox_pcun  = write_mask_from_labels(aparc_inT1, pcun_ids, pcun_path)
             created[Path(pcun_path).name] = vox_pcun
         else:
             log("  ERROR: Precuneus labels not in LUT; skipping Precuneus", level="ERROR")
 
-        # 4) Temporal Lobe (aparc)
+        # 4) Temporal Lobe (aparc-based)
         temp_ids = ids_for_hemi_names(TEMPORAL_BASE, lut_local)
         if temp_ids:
             temp_path = os.path.join(out_dir, "ROI_TemporalLobe.nii.gz")
-            vox_temp  = write_mask_from_labels(aparc_for_roi, temp_ids, temp_path)
+            vox_temp  = write_mask_from_labels(aparc_inT1, temp_ids, temp_path)
             created[Path(temp_path).name] = vox_temp
         else:
             log("  ERROR: Temporal lobe labels not in LUT; skipping Temporal", level="ERROR")
 
-        # 5) Limbic Cortex (aparc)
+        # 5) Limbic Cortex (aparc-based)
         limb_ids = ids_for_hemi_names(LIMBIC_BASE, lut_local)
         if limb_ids:
             limb_path = os.path.join(out_dir, "ROI_LimbicCortex.nii.gz")
-            vox_limb  = write_mask_from_labels(aparc_for_roi, limb_ids, limb_path)
+            vox_limb  = write_mask_from_labels(aparc_inT1, limb_ids, limb_path)
             created[Path(limb_path).name] = vox_limb
         else:
             log("  ERROR: Limbic labels not in LUT; skipping Limbic", level="ERROR")
@@ -490,9 +529,10 @@ def main():
     print(f"Skipped (no ASEG)                : {skip_no_aseg}")
     print(f"Skipped (no APARC+ASEG)          : {skip_no_aparc}")
     print(f"FLIRT failures                   : {flirt_fail}")
+    print(f"VOL2VOL failures                 : {vol2vol_fail}")
     print(f"ROI sets created                 : {roi_done}")
-    print(f"DEBUG: space mismatches (aseg)   : {space_warn_aseg}")
-    print(f"DEBUG: space mismatches (aparc)  : {space_warn_aparc}")
+    print(f"DEBUG: resample triggers (aseg)  : {space_warn_aseg}")
+    print(f"DEBUG: resample triggers (aparc) : {space_warn_aparc}")
     print(f"Output root                      : {OUT_ROOT}")
 
     try:
@@ -509,3 +549,4 @@ if __name__ == "__main__":
     except Exception as e:
         log(f"Unhandled error: {e}", level="ERROR")
         sys.exit(2)
+
