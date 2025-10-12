@@ -1,49 +1,46 @@
-#!/usr/bin/env python3
 import os
-import sys
 import pandas as pd
 
-# ---- EDIT THESE ----
-CSV_PATH    = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
+# ======= set your paths here =======
+CSV_PATH = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
 FOLDER_PATH = "/scratch/l.peiwang/kari_brainv11"
-# --------------------
+# ===================================
 
-def norm(s: str) -> str:
-    return str(s).strip().lower()
+df = pd.read_csv(CSV_PATH)
 
-# load CSV and locate TAU_PET_Session (case-insensitive)
-if not os.path.isfile(CSV_PATH):
-    print(f"ERROR: CSV not found: {CSV_PATH}"); sys.exit(1)
-if not os.path.isdir(FOLDER_PATH):
-    print(f"ERROR: Folder not found: {FOLDER_PATH}"); sys.exit(1)
+# find the TAU_PET_Session column (case-insensitive)
+col = next((c for c in df.columns if c.strip().lower() == "tau_pet_session"), None)
+if not col:
+    raise SystemExit("❌ No 'TAU_PET_Session' column found.")
 
-df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-df.columns = [c.strip() for c in df.columns]
-tau_col = next(c for c in df.columns if c.lower().strip() == "tau_pet_session")
-
-# CSV side: entries containing "av1451" (case-insensitive)
-s = df[tau_col].astype(str).str.strip().str.lower()
-csv_sessions = {x for x in s if "av1451" in x}
-
-# Folder side: folder names containing "av1451" (case-insensitive)
-folders = {
-    norm(d)
-    for d in os.listdir(FOLDER_PATH)
-    if os.path.isdir(os.path.join(FOLDER_PATH, d)) and "av1451" in d.lower()
+csv_sessions = {
+    str(v).strip().lower()
+    for v in df[col].astype(str)
+    if "av1451" in str(v).lower()
 }
 
-# Compare
-common   = csv_sessions & folders
-only_csv = csv_sessions - folders
-only_dir = folders - csv_sessions
+dir_sessions = {
+    d.name.strip().lower()
+    for d in os.scandir(FOLDER_PATH)
+    if d.is_dir() and "av1451" in d.name.lower()
+}
 
-# Report
-print(f"CSV (av1451) count     : {len(csv_sessions)}")
-print(f"Folders (av1451) count : {len(folders)}")
-print(f"Common                 : {len(common)}")
-print(f"Only in CSV            : {len(only_csv)}")
-print(f"Only in folder path    : {len(only_dir)}")
+common = csv_sessions & dir_sessions
+only_csv = csv_sessions - dir_sessions
+only_dir = dir_sessions - csv_sessions
 
+print(f"CSV (av1451) count : {len(csv_sessions)}")
+print(f"Folders (av1451) count : {len(dir_sessions)}")
+print(f"Common : {len(common)}")
+print(f"Only in CSV : {len(only_csv)}")
+print(f"Only in folder path : {len(only_dir)}")
+
+if only_csv:
+    print("\n-- Only in CSV (up to 20) --")
+    print("\n".join(list(only_csv)[:20]))
+if only_dir:
+    print("\n-- Only in Folder (up to 20) --")
+    print("\n".join(list(only_dir)[:20]))
 
 
 
