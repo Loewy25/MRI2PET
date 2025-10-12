@@ -26,12 +26,12 @@ python -c "import nibabel; print(nibabel.__version__)"
 . ~/miniconda3/bin/activate
 conda activate pasta
 
-python ROI_eval.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
-  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_mismat/volumes \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_mismat/roi_metrics \
-  --data-range 3.5 \
-  --mmd-voxels 2048
+#python ROI_eval.py \
+#  --roi-root /scratch/l.peiwang/kari_brainv11 \
+#  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_mismat/volumes \
+#  --out /home/l.peiwang/MRI2PET/MGDA_UB_mismat/roi_metrics \
+#  --data-range 3.5 \
+#  --mmd-voxels 2048
 
 #python MI_ROI.py \
 #  --root-dir /scratch/l.peiwang/kari_brainv11 \
@@ -39,3 +39,4 @@ python ROI_eval.py \
 #  --bins 64 \
 #  --verbose
 
+python Data_T807.py
