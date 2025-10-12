@@ -42,4 +42,4 @@ module load fsl
 #  --bins 64 \
 #  --verbose
 
-python summary.py
+python compare.py
