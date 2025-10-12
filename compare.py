@@ -5,7 +5,7 @@ import pandas as pd
 
 # ==== EDIT THESE ====
 CSV_PATH    = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
-FOLDER_PATH = "/scratch/l.peiwang/kari_brainv11"
+FOLDER_PATH = "/ceph/chpc/mapped/benz04_kari/pup"
 # ====================
 
 def norm(s: str) -> str:
