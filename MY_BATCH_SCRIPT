@@ -42,4 +42,4 @@ module load fsl
 #  --bins 64 \
 #  --verbose
 
-python Data_T807.py
+python summary.py
