@@ -62,4 +62,4 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
 
 # Actual job
-python mask_correct.py
+python shit.py
