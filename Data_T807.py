@@ -9,11 +9,16 @@ T807_v1 TAU PET processing, matching your previous pipeline:
   * check aseg/aparc vs T1 shape+affine and **resample to T1 if mismatched**
 - Make ROI_* from aparc+aseg (and aseg for hippocampus) **in T1 space**:
   * use resampled labels if a mismatch was detected (nearest-neighbor)
+- Additionally (new):
+  * Make mask_basalganglia.nii.gz and mask_parenchyma_noBG.nii.gz in T1 space
 - If anything is missing/mismatched, print explicit debug lines and skip that subject.
 - No backups; re-runs overwrite.
+
+New CLI:
+  --part {1,2,3,4}  # split CSV-driven workload into 4 equal chunks
 """
 
-import os, re, glob, csv, shutil, subprocess, sys, json
+import os, re, glob, csv, shutil, subprocess, sys, json, argparse
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -38,6 +43,11 @@ KEEP_LABELS = {
     2, 41, 3, 42, 7, 46, 8, 47, 10, 49, 11, 50, 12, 51,
     13, 52, 17, 53, 18, 54, 26, 58, 28, 60, 16
 }
+
+# NEW: basal ganglia (strict) — Caudate, Putamen, Pallidum, Accumbens (L/R)
+BG_IDS_STRICT = {11, 50, 12, 51, 13, 52, 26, 58}
+INCLUDE_VENTRAL_DC = False
+BG_IDS = (BG_IDS_STRICT | {28, 60}) if INCLUDE_VENTRAL_DC else BG_IDS_STRICT
 
 # ROI definitions (Desikan–Killiany names)
 TEMPORAL_BASE = [
@@ -273,9 +283,18 @@ def write_mask_from_labels(label_path, id_list, out_path, dtype=np.uint8):
     nib.save(nib.Nifti1Image(mask, img.affine), out_path)
     return int(mask.sum())
 
+# =================== CLI (NEW) ===================
+def parse_args():
+    ap = argparse.ArgumentParser(description="T807_v1 pipeline with no-BG mask output and 4-way splitter.")
+    ap.add_argument("--part", type=int, choices=[1,2,3,4], default=None,
+                    help="Process only 1/4th of subjects: choose 1,2,3, or 4. Omit to process all.")
+    return ap.parse_args()
+
 # =================== MAIN ===================
 
 def main():
+    args = parse_args()
+
     # Path sanity
     for p, isdir in [(OUT_ROOT, True), (PUP_ROOT, True), (FS_ROOT, True)]:
         if isdir and not os.path.isdir(p):
@@ -293,7 +312,17 @@ def main():
                "_v1" in r.get("TAU_PET_Session","").lower()]
     if RUN_LIMIT:
         rows = rows[:RUN_LIMIT]
-    log(f"Eligible TAU rows (T807_v1): {len(rows)}")
+
+    # Partition into 4 equal parts if requested
+    total = len(rows)
+    if args.part:
+        part = args.part
+        start = (part - 1) * total // 4
+        end   = part * total // 4
+        rows = rows[start:end]
+        log(f"Eligible TAU rows (T807_v1): {total}  | Processing part {part}/4 → rows[{start}:{end}] = {len(rows)}")
+    else:
+        log(f"Eligible TAU rows (T807_v1): {total}")
 
     # Counters
     ok = skip_no_pupsubj = skip_no_nifti = skip_no_t1 = skip_no_t1001 = skip_no_pet = 0
@@ -422,7 +451,6 @@ def main():
                 except Exception: pass
 
         # --- Ensure labels are in T1 space (resample if shape OR affine mismatch) ---
-        # Compare aseg/aparc vs T1
         sameA, shapeA, affA, a_shape, t_shapeA, a_aff, t_affA = shapes_affines_match(aseg_path, dst_t1, atol=ATOL_AFFINE)
         sameP, shapeP, affP, p_shape, t_shapeP, p_aff, t_affP = shapes_affines_match(aparc_path, dst_t1, atol=ATOL_AFFINE)
 
@@ -452,12 +480,33 @@ def main():
         except RuntimeError as e:
             log(f"[FAIL:VOL2VOL] {tau_session}  ({e})", level="ERROR")
             vol2vol_fail += 1
-            # cannot proceed reliably with masks/ROIs if resampling failed
             continue
 
         # --- Parenchyma mask (now guaranteed to match T1 if resampled) ---
-        out_mask = os.path.join(out_dir, "aseg_brainmask.nii.gz")  # keep same name
-        make_aseg_mask_nifti(aseg_inT1, out_mask)
+        paren_path = os.path.join(out_dir, "aseg_brainmask.nii.gz")  # keep same name
+        make_aseg_mask_nifti(aseg_inT1, paren_path)
+
+        # === NEW: Basal ganglia & no-BG composite (all in T1 space) ===
+        bg_path = os.path.join(out_dir, "mask_basalganglia.nii.gz")
+        vox_bg  = write_mask_from_labels(aseg_inT1, BG_IDS, bg_path)
+        log(f"  BG mask written: {bg_path} (voxels={vox_bg})")
+
+        # Load both to validate grid before subtraction
+        paren_img = nib.load(paren_path)
+        bg_img    = nib.load(bg_path)
+        paren_np  = np.asanyarray(paren_img.dataobj).astype(bool)
+        bg_np     = np.asanyarray(bg_img.dataobj).astype(bool)
+
+        if paren_np.shape != bg_np.shape or not np.allclose(paren_img.affine, bg_img.affine, atol=ATOL_AFFINE):
+            log("  ERROR: Parenchyma vs BG mask grid mismatch; cannot form noBG mask.", level="ERROR")
+            log(f"    parenchyma.shape={paren_np.shape}  BG.shape={bg_np.shape}")
+            log("    parenchyma.affine:\n" + np.array2string(paren_img.affine, precision=5))
+            log("    BG.affine:\n"         + np.array2string(bg_img.affine, precision=5))
+        else:
+            nobg_np   = (paren_np & ~bg_np).astype(np.uint8)
+            nobg_path = os.path.join(out_dir, "mask_parenchyma_noBG.nii.gz")
+            nib.save(nib.Nifti1Image(nobg_np, paren_img.affine), nobg_path)
+            log(f"  no-BG mask written: {nobg_path} (voxels={int(nobg_np.sum())})")
 
         # --- ROI masks (use *_inT1 if created) ---
         created = {}
@@ -511,11 +560,20 @@ def main():
         print(f"[OK] {subj_folder}")
         print(f"     T1        -> {dst_t1}")
         print(f"     PET(new)  -> {dst_pet}")
-        print(f"     MASK(new) -> {out_mask}")
+        print(f"     MASK(new) -> {paren_path}")
 
         ok += 1
         roi_done += 1
-        summary.append({"subject": subj_folder, "MR_Session": mr_session, "TAU_PET_Session": tau_session, "created": created})
+        # add noBG voxels to summary if created
+        nobg_exists = os.path.exists(os.path.join(out_dir, "mask_parenchyma_noBG.nii.gz"))
+        summary.append({
+            "subject": subj_folder,
+            "MR_Session": mr_session,
+            "TAU_PET_Session": tau_session,
+            "created": created,
+            "bg_voxels": int(vox_bg),
+            "noBG_exists": bool(nobg_exists)
+        })
 
     # =================== SUMMARY ===================
     print("\n=== SUMMARY ===")
