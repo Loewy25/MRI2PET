@@ -1,45 +1,21 @@
 #!/bin/bash
-
-#SBATCH --job-name=CGAN_grc
-#SBATCH --mem=10G
-#SBATCH -t 23:50:00
-##SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --job-name=test_fs
+#SBATCH --mem=2G
+#SBATCH -t 00:05:00
 #SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --exclude=gpua409
-#SBATCH --output=slurm-%A_haha.out
-#SBATCH --error=slurm-%A_haha.err
+#SBATCH --output=test_fs.out
+#SBATCH --error=test_fs.err
 
-module load cuda/12.9
-module load cudnn/9.11.0.98-cuda12
+# minimal sanity test
+module purge
 module load freesurfer
+source $FREESURFER_HOME/SetUpFreeSurfer.sh
 
-. ~/miniconda3/bin/activate
-conda activate pasta
-pip install nibabel
+echo "FREESURFER_HOME=$FREESURFER_HOME"
+which mri_vol2vol || echo "❌ mri_vol2vol not found"
+mri_vol2vol --version || echo "❌ cannot run mri_vol2vol"
+which recon-all || echo "❌ recon-all not found"
+recon-all --version || echo "❌ cannot run recon-all"
 
-python -c "import nibabel; print(nibabel.__version__)"
-
-
-
-
-. ~/miniconda3/bin/activate
-conda activate pasta
-module load freesurfer
-module load fsl
-
-
-#python ROI_eval.py \
-#  --roi-root /scratch/l.peiwang/kari_brainv11 \
-#  --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_mismat/volumes \
-#  --out /home/l.peiwang/MRI2PET/MGDA_UB_mismat/roi_metrics \
-#  --data-range 3.5 \
-#  --mmd-voxels 2048
-
-#python MI_ROI.py \
-#  --root-dir /scratch/l.peiwang/kari_brainv11 \
-#  --out /scratch/l.peiwang/kari_brainv11/mi_results_norm_vs_raw \
-#  --bins 64 \
-#  --verbose
-
-python roi_bg.py
+echo "✅ FreeSurfer basic test done."
