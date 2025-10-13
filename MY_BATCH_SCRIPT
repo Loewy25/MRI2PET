@@ -62,4 +62,4 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
 
 # Actual job
-#python roi_bg.py
+python roi_bg.py
