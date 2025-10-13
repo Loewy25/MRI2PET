@@ -49,7 +49,7 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
  python ROI_eval.py \
    --roi-root /scratch/l.peiwang/kari_brainv11 \
-   --vols-root /home/l.peiwang/MRI2PET/MGDA_UBvolumes \
+   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB/volumes \
    --out /home/l.peiwang/MRI2PET/MGDA_UB/roi_metrics \
    --data-range 3.5 \
    --mmd-voxels 2048
