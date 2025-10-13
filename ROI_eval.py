@@ -261,6 +261,38 @@ def compute_subject_roi_metrics(subj: str,
     else:
         print(f"[WARN] No whole-brain mask available for {subj}; skipping WholeBrain row.")
 
+    # ---- Whole-brain-noBG metrics (new) ----
+    nbg_path = os.path.join(subj_roi, "mask_parenchyma_noBG.nii.gz")
+    if os.path.exists(nbg_path):
+        nbg_img, nbg_np = load_nii(nbg_path)
+        if nbg_np.shape != fake_np.shape:
+            raise TypeError("NoBG Mask Wrong Shape")
+        elif strict_affine and not affines_close(nbg_img, fake_img):
+            raise TypeError("NoBG Mask Wrong Affine")
+        else:
+            nbg_mask_np = (nbg_np > 0).astype(np.float32)
+            nbg_vox = int(np.count_nonzero(nbg_mask_np))
+            if nbg_vox > 0:
+                nbg_t = to_tensor_5d(nbg_mask_np, device)
+                ssim_nbg = float(ssim3d_masked(x_fake, x_gt, nbg_t, data_range=data_range).item())
+                mse_nbg  = float(masked_mse(x_fake, x_gt, nbg_t).item())
+                psnr_nbg = float(masked_psnr(x_fake, x_gt, nbg_t, data_range=data_range).item())
+                mmd_nbg  = float(mmd_gaussian(x_gt, x_fake, num_voxels=mmd_voxels, mask=nbg_t))
+
+                rows.append({
+                    "subject": subj,
+                    "roi": "WholeBrain_noBG",
+                    "voxels": str(nbg_vox),
+                    "SSIM": f"{ssim_nbg:.6f}",
+                    "PSNR": f"{psnr_nbg:.6f}" if math.isfinite(psnr_nbg) else "inf",
+                    "MSE":  f"{mse_nbg:.8f}",
+                    "MMD":  f"{mmd_nbg:.8f}",
+                })
+            else:
+                print(f"[WARN] WholeBrain_noBG mask empty for {subj}; skipping row.")
+    else:
+        print(f"[WARN] No WholeBrain_noBG mask for {subj}; skipping WholeBrain_noBG row.")
+
     return rows
 
 # ---------- Aggregation ----------
