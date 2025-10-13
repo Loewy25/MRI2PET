@@ -1,21 +1,65 @@
 #!/bin/bash
-#SBATCH --job-name=test_fs
-#SBATCH --mem=2G
-#SBATCH -t 00:05:00
+#SBATCH --job-name=CGAN_grc
+#SBATCH --mem=10G
+#SBATCH -t 23:50:00
+##SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --output=test_fs.out
-#SBATCH --error=test_fs.err
+#SBATCH --exclude=gpua409
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.err
 
-# minimal sanity test
+# ------------------------------------------------------------
+# Environment setup
+# ------------------------------------------------------------
 module purge
 module load freesurfer
-source $FREESURFER_HOME/SetUpFreeSurfer.sh
+module load fsl
+module load cuda/12.9
+module load cudnn/9.11.0.98-cuda12
 
+# Properly source FreeSurfer so mri_vol2vol etc. are in PATH
+if [ -n "$FREESURFER_HOME" ] && [ -f "$FREESURFER_HOME/SetUpFreeSurfer.sh" ]; then
+  # shellcheck disable=SC1090
+  source "$FREESURFER_HOME/SetUpFreeSurfer.sh"
+fi
+
+# Conda environment
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+# Ensure FSL writes NIfTI_GZ
+export FSLOUTPUTTYPE=NIFTI_GZ
+
+# ------------------------------------------------------------
+# Sanity check
+# ------------------------------------------------------------
 echo "FREESURFER_HOME=$FREESURFER_HOME"
-which mri_vol2vol || echo "❌ mri_vol2vol not found"
-mri_vol2vol --version || echo "❌ cannot run mri_vol2vol"
-which recon-all || echo "❌ recon-all not found"
-recon-all --version || echo "❌ cannot run recon-all"
+which mri_vol2vol || { echo "❌ mri_vol2vol not found"; exit 2; }
+mri_vol2vol --version | head -1
+which flirt || { echo "❌ flirt not found"; exit 2; }
+flirt -version | head -1
+python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
-echo "✅ FreeSurfer basic test done."
+# ------------------------------------------------------------
+# Main execution
+# ------------------------------------------------------------
+
+# Example optional commands (commented)
+# ------------------------------------------------------------
+# python ROI_eval.py \
+#   --roi-root /scratch/l.peiwang/kari_brainv11 \
+#   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_mismat/volumes \
+#   --out /home/l.peiwang/MRI2PET/MGDA_UB_mismat/roi_metrics \
+#   --data-range 3.5 \
+#   --mmd-voxels 2048
+
+# python MI_ROI.py \
+#   --root-dir /scratch/l.peiwang/kari_brainv11 \
+#   --out /scratch/l.peiwang/kari_brainv11/mi_results_norm_vs_raw \
+#   --bins 64 \
+#   --verbose
+# ------------------------------------------------------------
+
+# Actual job
+#python roi_bg.py
