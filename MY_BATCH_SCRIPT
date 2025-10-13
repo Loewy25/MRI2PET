@@ -42,4 +42,4 @@ module load fsl
 #  --bins 64 \
 #  --verbose
 
-python compare.py
+python roi_bg.py
