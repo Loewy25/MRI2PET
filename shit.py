@@ -5,8 +5,8 @@ import numpy as np
 BASE_DIR = "/scratch/l.peiwang/kari_brainv11"
 
 target_files = [
-    "T1_masked.nii.gz",
-    "PET_in_T1_masked.nii.gz",
+    "T1.nii.gz",
+    "PET_in_T1.nii.gz",
     "aseg_brainmask.nii.gz",
     "mask_parenchyma_noBG.nii.gz",
     "ROI_Hippocampus.nii.gz",
@@ -24,7 +24,7 @@ for sub in sorted(os.listdir(BASE_DIR)):
         continue
 
     path = os.path.join(BASE_DIR, sub)
-    ref_path = os.path.join(path, "T1_masked.nii.gz")
+    ref_path = os.path.join(path, "T1.nii.gz")
     if not os.path.exists(ref_path):
         print(f"[WARN] {sub}: Missing reference T1_masked.nii.gz ❌")
         continue
