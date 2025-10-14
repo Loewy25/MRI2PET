@@ -71,6 +71,13 @@ def summarize_folder(df, folder_path):
     df["__key__"] = df[tau_c].map(norm_key)
     subject_keys = {norm_key(s) for s in subjects}
     matched = df[df["__key__"].isin(subject_keys)]
+    # How many CSV rows per folder key?
+    dup_counts = matched["__key__"].value_counts()
+    dups = dup_counts[dup_counts > 1]
+    print(f"\nDuplicate CSV rows per session key (>1): {int((dup_counts>1).sum())}")
+    if not dups.empty:
+        print(dups.head(20))  # peek first 20
+
 
     # unmatched folder names for QC
     matched_keys = set(matched["__key__"])
