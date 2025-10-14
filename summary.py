@@ -6,7 +6,7 @@ from collections import Counter
 
 # ========= EDIT THESE PATHS =========
 CSV_PATH   = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"
-TRAIN_DIR  = "/scratch/l.peiwang/kari_brainv11"        # your dataset folder
+TRAIN_DIR  = "/scratch/l.peiwang/kari_brainv22"        # your dataset folder
 TEST_DIR   = "/home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes"   # your testing dataset folder (or None)
 # ========= HYPERPARAMETERS =========
 TAU_COL       = "TAU_PET_Session"  # column used to match folder names
