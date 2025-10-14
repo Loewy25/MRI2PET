@@ -62,6 +62,6 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
 
 # Actual job
-#python summary.py
+python shit.py
 
 python3 Data_T807.py --part 4
