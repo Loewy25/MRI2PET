@@ -2,8 +2,8 @@
 import os, glob, nibabel as nib
 import numpy as np
 
-ROOT = "/scratch/l.peiwang/kari_brainv11"  # adjust as needed
-PATTERN = "1092_*_AV1451_*"
+ROOT = "/scratch/l.peiwang/kari_brainv22"  # adjust as needed
+PATTERN = "*807*"
 
 def apply_mask(img_path, mask, out_path):
     img = nib.load(img_path)
