@@ -6,9 +6,12 @@ T807_v1 TAU PET processing, matching your previous pipeline:
 - Copy T1.nii.gz
 - Compute T1001->T1 (FLIRT) and apply to PET -> PET_in_T1.nii.gz
 - Make aseg_brainmask.nii.gz from aseg.mgz, but **now**:
-  * check aseg/aparc vs T1 shape+affine and **resample to T1 if mismatched**
+  * check aseg/aparc vs T1 shape+affine and:
+      - if both match: use as-is (no resample)
+      - if mismatch: compute explicit FS->T1 rigid transform (mri_robust_register) and
+        apply it to labels with nearest-neighbor (mri_vol2vol --lta)
 - Make ROI_* from aparc+aseg (and aseg for hippocampus) **in T1 space**:
-  * use resampled labels if a mismatch was detected (nearest-neighbor)
+  * use resampled labels if a mismatch was detected
 - Additionally (new):
   * Make mask_basalganglia.nii.gz and mask_parenchyma_noBG.nii.gz in T1 space
 - If anything is missing/mismatched, print explicit debug lines and skip that subject.
@@ -16,9 +19,18 @@ T807_v1 TAU PET processing, matching your previous pipeline:
 
 New CLI:
   --part {1,2,3,4}  # split CSV-driven workload into 4 equal chunks
+
+NEW CHANGE #1 (registration instead of header-only resample when mismatch):
+  If aseg/aparc geometry != T1 (shape or affine): register FS conformed space to T1 with
+  mri_robust_register to get an LTA (FS->T1), then apply it to labels (nearest).
+
+NEW CHANGE #2 (deduplicate TAU_PET_Session):
+  If CSV has multiple rows with the same TAU_PET_Session, keep only one:
+    - choose higher CDR first; if tie, higher Centiloid/Amyloid numeric; if tie, higher Braak; if tie, deterministic pick.
+  This happens BEFORE 4-way partitioning so concurrent runs won't clash on the same session output.
 """
 
-import os, re, glob, csv, shutil, subprocess, sys, json, argparse
+import os, re, glob, csv, shutil, subprocess, sys, json, argparse, random
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -29,10 +41,10 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainv22"
+OUT_ROOT  = "/scratch/l.peiwang/kari_brainv33"
 LUT_PATH  = "/scratch/l.peiwang/FreeSurferColorLUT.txt"
 
-CSV_PATH  = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"  # <--- EDIT THIS
+CSV_PATH  = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"  # <--- EDIT THIS
 
 RUN_LIMIT   = None     # None = process all eligible rows; or set a small int for a dry run
 ATOL_AFFINE = 1e-4
@@ -60,16 +72,22 @@ LIMBIC_BASE = [
     "parahippocampal","entorhinal"
 ]
 
+# deterministic tiebreaks in deduplication across --part runs
+random.seed(42)
+
+
 # =================== LOGGING ===================
 def log(msg, level="INFO"):
     if DEBUG or level in ("WARN", "ERROR"):
         print(f"[{level}] {msg}", flush=True)
 
+
 # =================== HELPERS ===================
 
 def _parse_cnda_timestamp_from_name(name):
     m = re.search(r"(\d{14})$", name) or re.search(r"(\d{14})", name)
-    if not m: return None
+    if not m:
+        return None
     try:
         return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
     except Exception:
@@ -86,6 +104,15 @@ def sniff_csv_rows(csv_path):
         reader = csv.DictReader(f, dialect=dialect)
         return list(reader)
 
+def ci_get(row, key, default=""):
+    """Case-insensitive dict get for CSV rows."""
+    kl = key.lower()
+    for k in row.keys():
+        if k.lower() == kl:
+            v = row.get(k)
+            return v if v is not None else default
+    return default
+
 # ---------- PUP discovery (T807_v1) ----------
 def find_pup_subject_dir_from_tau_session(pup_root, tau_session):
     """
@@ -96,7 +123,7 @@ def find_pup_subject_dir_from_tau_session(pup_root, tau_session):
     cands = []
     ts_l = tau_session.lower()
     for d in glob.glob(os.path.join(pup_root, "*")):
-        if not os.path.isdir(d): 
+        if not os.path.isdir(d):
             continue
         b = os.path.basename(d).lower()
         if ts_l in b:
@@ -119,7 +146,8 @@ def find_pup_subject_dir_from_pupid(pup_root, pup_id):
 
 def find_pup_nifti_dir(pup_dir):
     hits = glob.glob(os.path.join(pup_dir, "*", "NIFTI_GZ")) if pup_dir else []
-    if not hits: return None
+    if not hits:
+        return None
     hits.sort()
     return hits[-1]
 
@@ -133,7 +161,8 @@ def choose_t1001_strict(nifti_dir):
 
 def choose_pet_strict(nifti_dir):
     matches = glob.glob(os.path.join(nifti_dir, "*_msum_SUVR.nii.gz"))
-    if not matches: return None
+    if not matches:
+        return None
     matches.sort()
     return matches[0]
 
@@ -232,7 +261,8 @@ def shapes_affines_match(a_path, b_path, atol=ATOL_AFFINE):
 
 def resample_label_to_target(label_path, target_path, out_path):
     """
-    Use FreeSurfer mri_vol2vol (nearest) to resample label → target grid.
+    Use FreeSurfer mri_vol2vol (nearest) with --regheader to map label → target grid.
+    (Kept for fallback only; primary path now uses LTA when mismatch.)
     """
     if not shutil.which("mri_vol2vol"):
         raise RuntimeError("mri_vol2vol not found. Source your FreeSurfer env.")
@@ -257,7 +287,7 @@ def read_fs_lut(lut_path=LUT_PATH):
     with open(lut_path, "r", encoding="utf-8", errors="ignore") as f:
         for ln in f:
             ln = ln.strip()
-            if not ln or ln.startswith("#"): 
+            if not ln or ln.startswith("#"):
                 continue
             parts = ln.split()
             if len(parts) >= 2 and parts[0].isdigit():
@@ -283,12 +313,209 @@ def write_mask_from_labels(label_path, id_list, out_path, dtype=np.uint8):
     nib.save(nib.Nifti1Image(mask, img.affine), out_path)
     return int(mask.sum())
 
+
+# ---------------- NEW HELPERS (REGISTRATION PATH) ----------------
+
+def pick_fs_brain(fs_subject_dir, used_run):
+    """
+    Prefer brain.mgz from the chosen FS run; fallback to subject's mri/.
+    """
+    cand_patterns = []
+    if used_run:
+        cand_patterns += [
+            os.path.join(used_run, "DATA", "*", "mri", "brain.mgz"),
+            os.path.join(used_run, "DATA", "*", "mri", "T1.mgz"),
+            os.path.join(used_run, "DATA", "*", "mri", "orig.mgz"),
+        ]
+    cand_patterns += [
+        os.path.join(fs_subject_dir, "mri", "brain.mgz"),
+        os.path.join(fs_subject_dir, "mri", "T1.mgz"),
+        os.path.join(fs_subject_dir, "mri", "orig.mgz"),
+    ]
+    for pat in cand_patterns:
+        hits = glob.glob(pat)
+        if hits:
+            hits.sort()
+            return hits[-1]
+    return None
+
+def compute_fs2t1_lta(fs_ref, t1_path, out_lta):
+    """
+    Compute a rigid FS(conformed)->T1 transform.
+    Uses mri_robust_register (structural-to-structural, robust to intensity diffs).
+    """
+    if not shutil.which("mri_robust_register"):
+        raise RuntimeError("mri_robust_register not found in PATH.")
+    cmd = [
+        "mri_robust_register",
+        "--mov", fs_ref,
+        "--dst", t1_path,
+        "--lta", out_lta,
+        "--satit",
+        "--iscale",
+        "--maxit", "200"
+    ]
+    log("RUN: " + " ".join(cmd))
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        tail = "\n".join(r.stderr.splitlines()[-30:])
+        log("mri_robust_register stderr (tail):\n" + tail, level="ERROR")
+        raise RuntimeError(f"mri_robust_register failed ({r.returncode})")
+    return out_lta
+
+def resample_label_with_lta(label_path, target_path, lta_path, out_path):
+    """
+    Apply FS->T1 LTA to a discrete label map (aseg/aparc) using nearest neighbor.
+    """
+    if not shutil.which("mri_vol2vol"):
+        raise RuntimeError("mri_vol2vol not found in PATH.")
+    cmd = [
+        "mri_vol2vol",
+        "--mov", label_path,
+        "--targ", target_path,
+        "--lta", lta_path,
+        "--o", out_path,
+        "--interp", "nearest"
+    ]
+    log("RUN: " + " ".join(cmd))
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        tail = "\n".join(r.stderr.splitlines()[-30:])
+        log("mri_vol2vol stderr (tail):\n" + tail, level="ERROR")
+        raise RuntimeError(f"mri_vol2vol failed ({r.returncode})")
+    return out_path
+
+
+# ---------------- DEDUP HELPERS (TAU_PET_Session uniqueness) ----------------
+
+_ROMAN = {"i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6}
+def _parse_braak(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    sl = s.lower()
+    # try numeric
+    try:
+        return float(s)
+    except Exception:
+        pass
+    # try roman (I..VI)
+    if sl in _ROMAN:
+        return float(_ROMAN[sl])
+    # patterns like "Stage V/VI"
+    m = re.search(r"(i{1,3}|iv|v|vi)", sl)
+    if m and m.group(1) in _ROMAN:
+        return float(_ROMAN[m.group(1)])
+    return None
+
+def _parse_float(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except Exception:
+        # handle "12,3" European comma
+        try:
+            return float(s.replace(",", ""))
+        except Exception:
+            return None
+
+def _get_cdr(row):
+    # prefer global CDR, avoid CDR-SB if both exist
+    keys_exact = ["cdr", "cdr_global", "cdr global", "cdrglobal", "cdr (global)"]
+    # fallbacks: any key containing "cdr" but not "sb"
+    for k in row.keys():
+        kl = k.lower()
+        if kl in [ke.lower() for ke in keys_exact]:
+            v = ci_get(row, k)
+            val = _parse_float(v)
+            if val is not None:
+                return val
+    cand = None
+    for k in row.keys():
+        kl = k.lower()
+        if "cdr" in kl and "sb" not in kl:
+            val = _parse_float(row[k])
+            if val is not None:
+                cand = val
+                break
+    return cand
+
+def _get_centiloid(row):
+    # centiloid/centloid/amyloid numeric
+    best = None
+    for k in row.keys():
+        kl = k.lower()
+        if ("centiloid" in kl) or ("centloid" in kl) or (kl.startswith("amyloid") and "status" not in kl):
+            val = _parse_float(row[k])
+            if val is not None:
+                # choose the largest numeric among candidates
+                best = val if (best is None or val > best) else best
+    return best
+
+# --- REPLACE the old _get_braak and _severity_tuple with the versions below ---
+
+def _get_braak_tuple(row):
+    """Return a tuple representing Braak severity, prioritizing later stages.
+       Higher is worse: (Braak5_6, Braak3_4, Braak1_2). Missing -> -inf."""
+    def nz(x): return x if x is not None else float("-inf")
+    b12 = _parse_float(ci_get(row, "Braak1_2", None))
+    b34 = _parse_float(ci_get(row, "Braak3_4", None))
+    b56 = _parse_float(ci_get(row, "Braak5_6", None))
+    return (nz(b56), nz(b34), nz(b12))
+
+def _severity_tuple(row):
+    """Priority: CDR > Centiloid (amyloid burden) > Braak (5_6, 3_4, 1_2)."""
+    def nz(x): return x if x is not None else float("-inf")
+    cdr   = _get_cdr(row)          # reads 'cdr'
+    amy   = _get_centiloid(row)    # reads 'Centiloid'
+    b56,b34,b12 = _get_braak_tuple(row)
+    return (nz(cdr), nz(amy), b56, b34, b12)
+
+
+
+def dedup_by_tau_session(rows):
+    """Keep exactly one row per TAU_PET_Session following severity priority."""
+    groups = {}
+    for r in rows:
+        ts = ci_get(r, "TAU_PET_Session", "").strip()
+        if ts == "":
+            continue
+        groups.setdefault(ts, []).append(r)
+
+    deduped = []
+    dropped = 0
+    for ts, lst in groups.items():
+        if len(lst) == 1:
+            deduped.append(lst[0])
+            continue
+        # choose by (cdr, centiloid, braak), then deterministic tie-break by MR_Session+TAU_PUP_ID
+        scored = [( _severity_tuple(r),
+                    f"{ci_get(r,'MR_Session','')}_{ci_get(r,'TAU_PUP_ID','')}",
+                    r)
+                  for r in lst]
+        scored.sort(key=lambda t: (t[0][0], t[0][1], t[0][2], t[1]), reverse=True)
+        keep = scored[0][2]
+        deduped.append(keep)
+        dropped += (len(lst) - 1)
+        log(f"[DEDUP] {ts}: kept 1 of {len(lst)} (priority CDR>Centiloid>Braak).", level="INFO")
+
+    log(f"Deduplicated TAU_PET_Session: kept {len(deduped)} of {sum(len(v) for v in groups.values())} (dropped {dropped}).")
+    return deduped
+
+
 # =================== CLI (NEW) ===================
 def parse_args():
-    ap = argparse.ArgumentParser(description="T807_v1 pipeline with no-BG mask output and 4-way splitter.")
+    ap = argparse.ArgumentParser(description="T807_v1 pipeline with FS->T1 label registration and TAU session dedup (4-way splitter).")
     ap.add_argument("--part", type=int, choices=[1,2,3,4], default=None,
                     help="Process only 1/4th of subjects: choose 1,2,3, or 4. Omit to process all.")
     return ap.parse_args()
+
 
 # =================== MAIN ===================
 
@@ -307,22 +534,28 @@ def main():
     # Load & filter rows: TAU_PET_Session contains 't807' AND '_v1'
     rows = sniff_csv_rows(CSV_PATH)
     rows = [r for r in rows
-            if "tau_pet_session" in {k.lower() for k in r.keys()} and
-               "t807" in r.get("TAU_PET_Session","").lower() and
-               "_v1" in r.get("TAU_PET_Session","").lower()]
+            if any(k.lower() == "tau_pet_session" for k in r.keys())
+            and "t807" in ci_get(r, "TAU_PET_Session", "").lower()
+            and "_v1"  in ci_get(r, "TAU_PET_Session", "").lower()]
     if RUN_LIMIT:
         rows = rows[:RUN_LIMIT]
 
-    # Partition into 4 equal parts if requested
+    # NEW CHANGE #2: Deduplicate by TAU_PET_Session using CDR > Centiloid > Braak priority
+    before = len(rows)
+    rows = dedup_by_tau_session(rows)
+    after = len(rows)
+    log(f"Eligible TAU rows (T807_v1): {before} -> {after} after deduplication")
+
+    # Partition into 4 equal parts if requested (unchanged)
     total = len(rows)
     if args.part:
         part = args.part
         start = (part - 1) * total // 4
         end   = part * total // 4
         rows = rows[start:end]
-        log(f"Eligible TAU rows (T807_v1): {total}  | Processing part {part}/4 → rows[{start}:{end}] = {len(rows)}")
+        log(f"Processing part {part}/4 → rows[{start}:{end}] = {len(rows)} (of {total})")
     else:
-        log(f"Eligible TAU rows (T807_v1): {total}")
+        log(f"Processing all rows: {total}")
 
     # Counters
     ok = skip_no_pupsubj = skip_no_nifti = skip_no_t1 = skip_no_t1001 = skip_no_pet = 0
@@ -335,9 +568,9 @@ def main():
     summary = []
 
     for i, row in enumerate(rows, 1):
-        tau_session = row.get("TAU_PET_Session","").strip()
-        mr_session  = row.get("MR_Session","").strip()
-        tau_pupid   = row.get("TAU_PUP_ID","").strip()
+        tau_session = ci_get(row, "TAU_PET_Session","").strip()
+        mr_session  = ci_get(row, "MR_Session","").strip()
+        tau_pupid   = ci_get(row, "TAU_PUP_ID","").strip()
 
         log(f"\n[{i}/{len(rows)}] MR_Session={mr_session}  TAU_PET_Session={tau_session}")
 
@@ -450,18 +683,56 @@ def main():
                 try: os.remove(pth)
                 except Exception: pass
 
-        # --- Ensure labels are in T1 space (resample if shape OR affine mismatch) ---
+        # --- Ensure labels are in T1 space ---
+        # if shape OR affine mismatch: do explicit FS->T1 registration (NEW)
         sameA, shapeA, affA, a_shape, t_shapeA, a_aff, t_affA = shapes_affines_match(aseg_path, dst_t1, atol=ATOL_AFFINE)
         sameP, shapeP, affP, p_shape, t_shapeP, p_aff, t_affP = shapes_affines_match(aparc_path, dst_t1, atol=ATOL_AFFINE)
 
-        # Resample when either shape or affine differs
+        aseg_inT1  = None
+        aparc_inT1 = None
+
         try:
+            if not sameA or not sameP:
+                if not sameA:
+                    space_warn_aseg += 1
+                    log(f"[MISMATCH] aseg vs T1 (shape_ok={shapeA}, affine_ok={affA})")
+                    log(f"  aseg.shape={a_shape}  T1.shape={t_shapeA}")
+                    log("  aseg.affine:\n" + np.array2string(a_aff, precision=5))
+                    log("  T1.affine:\n"   + np.array2string(t_affA, precision=5))
+                if not sameP:
+                    space_warn_aparc += 1
+                    log(f"[MISMATCH] aparc vs T1 (shape_ok={shapeP}, affine_ok={affP})")
+                    log(f"  aparc.shape={p_shape}  T1.shape={t_shapeP}")
+                    log("  aparc.affine:\n" + np.array2string(p_aff, precision=5))
+                    log("  T1.affine:\n"    + np.array2string(t_affP, precision=5))
+
+                # NEW: compute FS->T1 transform and apply (nearest) to labels
+                fs_ref = pick_fs_brain(fs_dir, used_run)
+                if not fs_ref:
+                    log("FS reference (brain/T1/orig) not found; falling back to --regheader.", level="WARN")
+                    raise RuntimeError("no_fs_ref")
+
+                lta_path = os.path.join(out_dir, "fs_to_T1.lta")
+                compute_fs2t1_lta(fs_ref, dst_t1, lta_path)
+
+                aseg_inT1  = os.path.join(out_dir, "aseg_inT1.nii.gz")
+                aparc_inT1 = os.path.join(out_dir, "aparc_inT1.nii.gz")
+                resample_label_with_lta(aseg_path,  dst_t1, lta_path, aseg_inT1)
+                resample_label_with_lta(aparc_path, dst_t1, lta_path, aparc_inT1)
+
+                log(f"[REGISTER] FS->T1 LTA computed: {lta_path}")
+                log(f"  aseg_inT1:  {aseg_inT1}")
+                log(f"  aparc_inT1: {aparc_inT1}")
+            else:
+                # Perfect geometry match: nothing to do
+                aseg_inT1  = aseg_path
+                aparc_inT1 = aparc_path
+
+        except RuntimeError as e:
+            # Fallback: header-based mapping only (nearest) if registration unavailable/fails
+            log(f"[FALLBACK --regheader] {e}", level="WARN")
             if not sameA:
                 space_warn_aseg += 1
-                log(f"[RESAMPLE] aseg -> T1 (shape_ok={shapeA}, affine_ok={affA})")
-                log(f"  aseg.shape={a_shape}  T1.shape={t_shapeA}")
-                log("  aseg.affine:\n" + np.array2string(a_aff, precision=5))
-                log("  T1.affine:\n"   + np.array2string(t_affA, precision=5))
                 aseg_inT1 = os.path.join(out_dir, "aseg_inT1.nii.gz")
                 resample_label_to_target(aseg_path, dst_t1, aseg_inT1)
             else:
@@ -469,24 +740,16 @@ def main():
 
             if not sameP:
                 space_warn_aparc += 1
-                log(f"[RESAMPLE] aparc+aseg -> T1 (shape_ok={shapeP}, affine_ok={affP})")
-                log(f"  aparc.shape={p_shape}  T1.shape={t_shapeP}")
-                log("  aparc.affine:\n" + np.array2string(p_aff, precision=5))
-                log("  T1.affine:\n"    + np.array2string(t_affP, precision=5))
                 aparc_inT1 = os.path.join(out_dir, "aparc_inT1.nii.gz")
                 resample_label_to_target(aparc_path, dst_t1, aparc_inT1)
             else:
                 aparc_inT1 = aparc_path
-        except RuntimeError as e:
-            log(f"[FAIL:VOL2VOL] {tau_session}  ({e})", level="ERROR")
-            vol2vol_fail += 1
-            continue
 
-        # --- Parenchyma mask (now guaranteed to match T1 if resampled) ---
+        # --- Parenchyma mask (now guaranteed to match T1 if resampled/registered) ---
         paren_path = os.path.join(out_dir, "aseg_brainmask.nii.gz")  # keep same name
         make_aseg_mask_nifti(aseg_inT1, paren_path)
 
-        # === NEW: Basal ganglia & no-BG composite (all in T1 space) ===
+        # === Basal ganglia & no-BG composite (all in T1 space) ===
         bg_path = os.path.join(out_dir, "mask_basalganglia.nii.gz")
         vox_bg  = write_mask_from_labels(aseg_inT1, BG_IDS, bg_path)
         log(f"  BG mask written: {bg_path} (voxels={vox_bg})")
@@ -601,10 +864,10 @@ def main():
     except Exception as e:
         log(f"Could not write summary JSON: {e}", level="WARN")
 
+
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         log(f"Unhandled error: {e}", level="ERROR")
         sys.exit(2)
-
