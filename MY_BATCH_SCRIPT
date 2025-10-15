@@ -64,4 +64,4 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # Actual job
 
 #python apply_mask.py
-python Data_T807.py --part 4
+python Data_T807.py --part 3
