@@ -8,7 +8,7 @@ import re
 from typing import List, Dict, Tuple
 
 # ========= EDIT THESE =========
-CSV_PATH          = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
+CSV_PATH          = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"
 SOURCE_DIR        = "/scratch/l.peiwang/kari_brainv33"            # ~400 T807 subjects (folders)
 DEST_DIR          = "/scratch/l.peiwang/kari_brainv33_top300"     # output with 300 selected
 TARGET_N          = 300
