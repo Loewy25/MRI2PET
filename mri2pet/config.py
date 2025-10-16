@@ -36,6 +36,6 @@ DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 # === Cross‑validation (CSV-driven) ===
 # Where the fold CSVs live (from your generator script)
-SPLITS_DIR = os.path.join(ROOT_DIR, "cv_folds")  # e.g. /scratch/.../cv_folds
+SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")  # e.g. /scratch/.../cv_folds
 FOLD_INDEX = 0                                   # 0..4 (fold1..fold5)
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
