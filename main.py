@@ -7,6 +7,8 @@ from mri2pet.config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE
 )
 from mri2pet.data import build_loaders
+from mri2pet.config import FOLD_CSV
+from mri2pet.data import build_loaders_from_fold_csv
 from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
@@ -20,7 +22,12 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # Build loaders
-    train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
+    if os.path.isfile(FOLD_CSV):
+        print(f"Using fold CSV: {FOLD_CSV}")
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(FOLD_CSV)
+    else:
+        print("No fold CSV found; falling back to random split.")
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
         sample = next(iter(train_loader))
