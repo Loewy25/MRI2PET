@@ -166,3 +166,93 @@ def build_loaders(
         collate_fn=_collate_keep_meta
     )
     return dl_train, dl_val, dl_test, N, n_train, n_val, n_test
+
+# === NEW: CSV-driven fold readers ===
+import csv
+
+def _read_fold_csv_lists(path: str):
+    """
+    Read a foldX.csv with columns train,validation,test (one subject per cell).
+    Returns three lists of subject IDs (folder names).
+    """
+    train, val, test = [], [], []
+    with open(path, "r", newline="") as f:
+        r = csv.DictReader(f)
+        # tolerant column matching
+        cols = {c.strip().lower(): c for c in r.fieldnames}
+        tcol = cols.get("train"); vcol = cols.get("validation"); ccol = cols.get("test")
+        if not (tcol and vcol and ccol):
+            raise ValueError(f"fold CSV missing required columns train/validation/test: {path}")
+        for row in r:
+            t = (row.get(tcol) or "").strip()
+            v = (row.get(vcol) or "").strip()
+            c = (row.get(ccol) or "").strip()
+            if t: train.append(t)
+            if v: val.append(v)
+            if c: test.append(c)
+    return train, val, test
+
+def _sid_for_item(item_tuple):
+    """Extract subject folder name from KariAV1451Dataset.items entry."""
+    t1_path, _, _ = item_tuple
+    return os.path.basename(os.path.dirname(t1_path))
+
+def build_loaders_from_fold_csv(
+    fold_csv_path: str,
+    root: str = ROOT_DIR,
+    resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
+    batch_size: int = BATCH_SIZE,
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY,
+):
+    """
+    Build train/val/test DataLoaders using explicit subject lists from a fold CSV.
+    """
+    # 1) Full dataset (no random split)
+    ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to)
+    N = len(ds)
+
+    # 2) Map subject IDs to dataset indices
+    sid_list = [_sid_for_item(x) for x in ds.items]
+    sid_to_index = {sid: i for i, sid in enumerate(sid_list)}
+
+    train_sids, val_sids, test_sids = _read_fold_csv_lists(fold_csv_path)
+
+    def _to_indices(sids):
+        idxs = []
+        missing = []
+        for s in sids:
+            if s in sid_to_index:
+                idxs.append(sid_to_index[s])
+            else:
+                missing.append(s)
+        if missing:
+            print(f"[WARN] {len(missing)} subjects from CSV not found on disk. Examples: {missing[:8]}")
+        return sorted(idxs)
+
+    idx_train = _to_indices(train_sids)
+    idx_val   = _to_indices(val_sids)
+    idx_test  = _to_indices(test_sids)
+
+    from torch.utils.data import Subset
+    train_set = Subset(ds, idx_train)
+    val_set   = Subset(ds, idx_val)
+    test_set  = Subset(ds, idx_test)
+
+    dl_train = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
+    dl_val = DataLoader(
+        val_set, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
+    dl_test = DataLoader(
+        test_set, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        collate_fn=_collate_keep_meta
+    )
+
+    return dl_train, dl_val, dl_test, N, len(idx_train), len(idx_val), len(idx_test)
