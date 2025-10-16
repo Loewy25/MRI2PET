@@ -5,7 +5,7 @@ import shutil
 import pandas as pd
 import numpy as np
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 
 # ========= EDIT THESE =========
 CSV_PATH          = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
@@ -14,7 +14,7 @@ DEST_DIR          = "/scratch/l.peiwang/kari_brainv33_top300"     # output with 
 TARGET_N          = 300
 CN_CENTILOID_THR  = 20.0
 BRAAK_THR         = 1.2       # band is "positive" if value >= 1.2
-COPY_MODE         = "copy" # "symlink" (fast) or "copy" (full copy)
+COPY_MODE         = "copy"    # "symlink" (fast) or "copy" (full copy)
 RANDOM_SEED       = 42
 # ==============================
 
@@ -23,7 +23,37 @@ def die(msg: str):
     sys.exit(1)
 
 def norm_colname(s: str) -> str:
+    # Lower, strip, remove non-alphanumerics to neutralize weird whitespace/Unicode
     return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
+def read_csv_robust(path: str) -> pd.DataFrame:
+    """
+    Try several parsing strategies to handle comma/tab/mixed delimiters.
+    """
+    # 1) Sniff delimiter
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", engine="python", sep=None)
+        if len(df.columns) >= 10:  # sanity: got more than a handful of columns
+            return df
+    except Exception:
+        pass
+    # 2) Explicit tab
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", sep="\t", engine="python")
+        if len(df.columns) >= 10:
+            return df
+    except Exception:
+        pass
+    # 3) Regex: tab OR comma
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", sep=r"[\t,]", engine="python")
+        if len(df.columns) >= 10:
+            return df
+    except Exception:
+        pass
+    # 4) Last resort: comma
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    return df
 
 def find_col_any(df: pd.DataFrame, aliases: List[str]) -> str:
     cmap = {norm_colname(c): c for c in df.columns}
@@ -40,7 +70,7 @@ def find_col_any(df: pd.DataFrame, aliases: List[str]) -> str:
                 return orig
     raise KeyError(f"Missing expected column. Tried {aliases}. Available: {list(df.columns)}")
 
-def parse_numeric_col(s: pd.Series, default: float = np.nan) -> pd.Series:
+def parse_numeric_col(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").astype(float)
 
 def list_subdirs(path: str) -> List[str]:
@@ -55,57 +85,39 @@ def make_dir_map(dirnames: List[str]) -> Dict[str, str]:
 
 # ---- Braak 12/34/56 band detection & stage derivation ----
 
-def _score_braak_band_name(nc: str, tag: str) -> int:
-    """
-    Heuristic scoring: prefer names that clearly look like braak bands.
-    Higher score = better.
-    """
-    score = 0
-    if "braak" in nc: score += 3
-    if tag in nc:     score += 2
-    # roman variants
-    if tag == "12" and ("i_ii" in nc or "iiii" in nc or "iii" in nc): score += 1
-    if tag == "34" and ("iii_iv" in nc or "iiiiv" in nc):             score += 1
-    if tag == "56" and ("v_vi" in nc or "vvi" in nc):                 score += 1
-    return score
-
 def find_braak_band_cols(df: pd.DataFrame) -> Tuple[str, str, str]:
     """
-    Try to locate the three Braak band columns (12, 34, 56).
-    We search for columns that include 'braak' and '12'/'34'/'56' (normalized),
-    but fall back to plain '12'/'34'/'56' if needed.
+    Prefer exactly the band columns you showed: Braak1_2, Braak3_4, Braak5_6.
+    Fall back to normalized contains if needed.
     """
-    norm_map = {norm_colname(c): c for c in df.columns}
-    best = {"12": (None, -1), "34": (None, -1), "56": (None, -1)}  # (colname, score)
+    # Try exact names first
+    exact = {"Braak1_2": None, "Braak3_4": None, "Braak5_6": None}
+    for c in df.columns:
+        if c.strip() in exact:
+            exact[c.strip()] = c
+    if all(exact.values()):
+        return exact["Braak1_2"], exact["Braak3_4"], exact["Braak5_6"]
 
+    # Fallback by normalized contains
+    want = {"12": None, "34": None, "56": None}
     for c in df.columns:
         nc = norm_colname(c)
-        for tag in ["12", "34", "56"]:
-            if tag in nc or ("i_ii" in nc and tag=="12") or ("iii_iv" in nc and tag=="34") or ("v_vi" in nc and tag=="56"):
-                s = _score_braak_band_name(nc, tag)
-                if s > best[tag][1]:
-                    best[tag] = (c, s)
-
-    col12, _ = best["12"]
-    col34, _ = best["34"]
-    col56, _ = best["56"]
-
-    # last-resort fallback: exact simple names '12','34','56'
-    if col12 is None and "12" in norm_map: col12 = norm_map["12"]
-    if col34 is None and "34" in norm_map: col34 = norm_map["34"]
-    if col56 is None and "56" in norm_map: col56 = norm_map["56"]
-
-    missing = [k for k, v in {"12": col12, "34": col34, "56": col56}.items() if v is None]
+        if "braak" in nc and "12" in nc and want["12"] is None:
+            want["12"] = c
+        if "braak" in nc and "34" in nc and want["34"] is None:
+            want["34"] = c
+        if "braak" in nc and "56" in nc and want["56"] is None:
+            want["56"] = c
+    missing = [k for k, v in want.items() if v is None]
     if missing:
-        raise KeyError(f"Could not find Braak band columns {missing}. "
-                       f"Looked for names containing 'braak' and one of 12/34/56. Columns: {list(df.columns)}")
-    return col12, col34, col56
+        raise KeyError(f"Could not find Braak band columns {missing}. Columns: {list(df.columns)}")
+    return want["12"], want["34"], want["56"]
 
 def derive_braak_stage_from_bands(df: pd.DataFrame, col12: str, col34: str, col56: str, thr: float) -> pd.DataFrame:
     """
-    Create two columns:
+    Create:
       - __braak_stage__ in {0,2,4,6}
-      - __braak_band_value__ = the value from the winning band (np.nan if stage==0)
+      - __braak_band_value__ = value from the winning band (np.nan if stage==0)
     Rule: choose the highest band among {56, 34, 12} whose value >= thr.
     """
     v12 = parse_numeric_col(df[col12])
@@ -120,7 +132,6 @@ def derive_braak_stage_from_bands(df: pd.DataFrame, col12: str, col34: str, col5
              np.where(pos34, 4,
              np.where(pos12, 2, 0)))
 
-    # band value from the winning level (for auditing)
     band_val = np.where(stage == 6, v56,
                 np.where(stage == 4, v34,
                 np.where(stage == 2, v12, np.nan)))
@@ -151,15 +162,15 @@ def materialize_selection(rows: pd.DataFrame, session_col: str, dir_map: Dict[st
             die(f"Unknown COPY_MODE: {mode}")
 
 def main():
-    # 1) Read CSV
+    # 1) Read CSV robustly
     if not os.path.isfile(CSV_PATH):
         die(f"CSV not found: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig", engine="python", sep=None)
+    df = read_csv_robust(CSV_PATH)
 
-    # 2) Resolve required columns
-    session_col = find_col_any(df, ["TAU_PET_Session", "tau pet session", "session", "folder"])
-    cdr_col     = find_col_any(df, ["CDR", "CDR_Global", "cdr", "cdr global"])
-    cent_col    = find_col_any(df, ["Centiloid", "Amyloid Centiloid", "CL", "centiloid"])
+    # 2) Resolve required columns (use the exact names you showed)
+    session_col = find_col_any(df, ["TAU_PET_Session", "tau pet session"])
+    cdr_col     = find_col_any(df, ["cdr", "CDR", "CDR_Global"])
+    cent_col    = find_col_any(df, ["Centiloid", "centiloid", "CL"])
 
     # 3) Resolve Braak band columns (12/34/56)
     braak12_col, braak34_col, braak56_col = find_braak_band_cols(df)
@@ -194,13 +205,13 @@ def main():
     impaired = df_in_src.loc[impaired_mask].copy()
     normal   = df_in_src.loc[cn_mask].copy()
 
-    # 9) Rank impaired by severity: CDR ↓, Centiloid ↓, Braak stage ↓, session name ↑ (deterministic tiebreak)
+    # 9) Rank impaired by severity: CDR ↓, Centiloid ↓, Braak stage ↓, session name ↑
     impaired = impaired.sort_values(
         by=["__cdr__", "__cent__", "__braak_stage__", "__sess_norm__"],
         ascending=[False,    False,           False,            True]
     )
 
-    # 10) Select top TARGET_N; top up from clinical normals if needed (random, seeded)
+    # 10) Select up to TARGET_N from impaired; top-up from normal if needed
     selected = impaired.head(TARGET_N).copy()
     need = TARGET_N - len(selected)
     if need > 0:
@@ -209,7 +220,6 @@ def main():
             chosen_idx = rng.choice(normal.index.to_numpy(), size=need, replace=False)
             selected = pd.concat([selected, normal.loc[chosen_idx]], ignore_index=True)
         else:
-            # take all normals; if still short, fill from remaining impaired tail (unlikely)
             selected = pd.concat([selected, normal], ignore_index=True)
             still = TARGET_N - len(selected)
             if still > 0:
@@ -220,7 +230,7 @@ def main():
     selected = selected.drop_duplicates(subset=[session_col], keep="first")
     assert len(selected) == TARGET_N, f"Expected {TARGET_N}, got {len(selected)}"
 
-    # 11) Materialize into DEST_DIR
+    # 11) Materialize into DEST_DIR (COPY_MODE = 'copy')
     materialize_selection(
         rows=selected[[session_col]],
         session_col=session_col,
@@ -232,15 +242,22 @@ def main():
 
     # 12) Write manifest & small QC summary
     manifest_path = "/scratch/l.peiwang/kari_brainv33_top300_manifest.csv"
-    selected_out = selected[[session_col, cdr_col, cent_col, braak12_col, braak34_col, braak56_col, "__braak_stage__", "__braak_band_value__"]].copy()
-    selected_out.rename(columns={"__braak_stage__": "BraakStageDerived", "__braak_band_value__": "BraakBandValue"}, inplace=True)
+    selected_out = selected[[session_col,
+                             cdr_col, cent_col,
+                             braak12_col, braak34_col, braak56_col,
+                             "__braak_stage__", "__braak_band_value__"]].copy()
+    selected_out = selected_out.rename(columns={
+        "__braak_stage__": "BraakStageDerived",
+        "__braak_band_value__": "BraakBandValue"
+    })
     selected_out.to_csv(manifest_path, index=False, encoding="utf-8")
 
     print(f"Source folders: {len(subdirs)} | Overlap with CSV: {len(df_in_src)}")
     print(f"Impaired pool: {len(impaired)} | Normal pool: {len(normal)}")
-    print(f"Selected {TARGET_N} -> {DEST_DIR}")
+    print(f"Selected {TARGET_N} -> {DEST_DIR} (mode={COPY_MODE})")
     print(f"Manifest -> {manifest_path}")
-    print(f"Braak bands used: 12='{braak12_col}', 34='{braak34_col}', 56='{braak56_col}'; threshold = {BRAAK_THR}")
+    print(f"Braak bands: 12='{braak12_col}', 34='{braak34_col}', 56='{braak56_col}'; threshold = {BRAAK_THR}")
 
 if __name__ == "__main__":
     main()
+
