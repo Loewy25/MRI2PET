@@ -47,12 +47,13 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 # Example optional commands (commented)
 # ------------------------------------------------------------
- python ROI_eval.py \
-   --roi-root /scratch/l.peiwang/kari_brainv11 \
-   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_new/volumes \
-   --out /home/l.peiwang/MRI2PET/MGDA_UB_new/roi_metrics \
-   --data-range 3.5 \
-   --mmd-voxels 2048
+
+#python ROI_eval.py \
+#   --roi-root /scratch/l.peiwang/kari_brainv11 \
+#   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_new/volumes \
+#   --out /home/l.peiwang/MRI2PET/MGDA_UB_new/roi_metrics \
+#   --data-range 3.5 \
+#   --mmd-voxels 2048
 
 # python MI_ROI.py \
 #   --root-dir /scratch/l.peiwang/kari_brainv11 \
@@ -63,5 +64,5 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 # Actual job
 
-#python compare.py
+python apply_mask.py
 #python Data_T807.py --part 1
