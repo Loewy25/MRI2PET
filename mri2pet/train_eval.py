@@ -339,6 +339,7 @@ def save_test_volumes(
 
         print(f"  saved {sid}: MRI/PET_gt/PET_fake/PET_abs_error")
 
+
 @torch.no_grad()
 def evaluate_and_save(
     G: nn.Module,
@@ -349,30 +350,49 @@ def evaluate_and_save(
     mmd_voxels: int = 2048,
     resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
 ):
+    """
+    Evaluates on test_loader, saves volumes, and returns a dict of aggregate metrics.
+    Also writes per-subject metrics CSV (sid, SSIM, PSNR, MSE, MMD) for later aggregation,
+    and includes 95% confidence intervals in the returned dict.
+    """
+    import csv, json
+    import numpy as np
+    try:
+        from scipy.stats import t as _t_dist
+        def _tcrit(df): return float(_t_dist.ppf(0.975, df)) if df > 0 else float('nan')
+    except Exception:
+        def _tcrit(df): return 1.96 if df > 0 else float('nan')  # normal approx fallback
+
     os.makedirs(out_dir, exist_ok=True)
     G.to(device)
     G.eval()
 
-    ssim_sum = 0.0
-    psnr_sum = 0.0
-    mse_sum  = 0.0
-    mmd_sum  = 0.0
-    n = 0
+    # Per-subject collections
+    sids, ssim_list, psnr_list, mse_list, mmd_list = [], [], [], [], []
+
+    run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
 
     for i, batch in enumerate(test_loader):
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
             mri, pet, meta = batch
         else:
             mri, pet = batch
-            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
+            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4),
+                    "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
         meta = _meta_unbatch(meta)
+
+        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
+        sids.append(sid)
+        subdir = os.path.join(out_dir, sid)
+        os.makedirs(subdir, exist_ok=True)
 
         mri_t = mri.to(device, non_blocking=True)
         pet_t = pet.to(device, non_blocking=True)
         fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
 
-        pet_for_metric  = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
+        pet_for_metric = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
 
+        # mask (prefer brain mask from meta; else pet>0)
         brain_mask_np = meta.get("brain_mask", None)
         if brain_mask_np is not None:
             brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
@@ -382,16 +402,18 @@ def evaluate_and_save(
         fake_m = fake_t * brain
         pet_m  = pet_for_metric * brain
 
-        ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
-        psnr_sum += psnr(fake_m,  pet_m, data_range=data_range)
-        mse_sum  += F.mse_loss(fake_m, pet_m).item()
-        mmd_sum  += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
-        n += 1
+        # per-subject metrics
+        ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
+        psnr_val = psnr(fake_m,  pet_m, data_range=data_range)
+        mse_val  = F.mse_loss(fake_m, pet_m).item()
+        mmd_val  = mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
 
-        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
-        subdir = os.path.join(out_dir, sid)
-        os.makedirs(subdir, exist_ok=True)
+        ssim_list.append(ssim_val)
+        psnr_list.append(psnr_val)
+        mse_list.append(mse_val)
+        mmd_list.append(mmd_val)
 
+        # Save volumes (same as before)
         mri_np  = (mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
         pet_np  = (pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
         fake_np =  fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
@@ -411,19 +433,59 @@ def evaluate_and_save(
             affine_to_use = meta.get("t1_affine", np.eye(4))
         else:
             resized_to = meta.get("resized_to", None)
-            if resized_to is None:
-                affine_to_use = meta.get("t1_affine", np.eye(4))
-            else:
-                affine_to_use = np.eye(4)
+            affine_to_use = meta.get("t1_affine", np.eye(4)) if resized_to is None else np.eye(4)
 
         _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
         _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
         _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
         _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
 
-    return {
-        "SSIM": ssim_sum / max(1, n),
-        "PSNR": psnr_sum / max(1, n),
-        "MSE":  mse_sum  / max(1, n),
-        "MMD":  mmd_sum  / max(1, n),
+    # ---- Aggregate + CI (keep old keys as means) ----
+    def _mean_std_ci(vals):
+        a = np.asarray(vals, dtype=np.float64)
+        n = a.size
+        mean = float(a.mean()) if n > 0 else float("nan")
+        std  = float(a.std(ddof=1)) if n > 1 else float("nan")
+        se   = (std / np.sqrt(n)) if n > 1 else float("nan")
+        tcrit = _tcrit(n - 1)
+        lo = mean - tcrit * se if n > 1 else float("nan")
+        hi = mean + tcrit * se if n > 1 else float("nan")
+        return mean, std, n, lo, hi
+
+    m_ssim, sd_ssim, n_ssim, lo_ssim, hi_ssim = _mean_std_ci(ssim_list)
+    m_psnr, sd_psnr, n_psnr, lo_psnr, hi_psnr = _mean_std_ci(psnr_list)
+    m_mse,  sd_mse,  n_mse,  lo_mse,  hi_mse  = _mean_std_ci(mse_list)
+    m_mmd,  sd_mmd,  n_mmd,  lo_mmd,  hi_mmd  = _mean_std_ci(mmd_list)
+
+    # Per-subject CSV in run directory (sits next to 'volumes/')
+    per_subj_csv = os.path.join(run_dir, "per_subject_metrics.csv")
+    with open(per_subj_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["sid", "SSIM", "PSNR", "MSE", "MMD"])
+        for sid, ssim_v, psnr_v, mse_v, mmd_v in zip(sids, ssim_list, psnr_list, mse_list, mmd_list):
+            w.writerow([sid, ssim_v, psnr_v, mse_v, mmd_v])
+
+    # Also write a machine-readable summary JSON (optional, handy later)
+    summary_json = os.path.join(run_dir, "test_metrics_summary.json")
+    summary = {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE":  m_mse,  "MSE_std":  sd_mse,  "MSE_lo95":  lo_mse,  "MSE_hi95":  hi_mse,
+        "MMD":  m_mmd,  "MMD_std":  sd_mmd,  "MMD_lo95":  lo_mmd,  "MMD_hi95":  hi_mmd,
+        "per_subject_csv": per_subj_csv,
     }
+    with open(summary_json, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    # Keep backward-compatible keys as means for your main() writer
+    return {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE":  m_mse,  "MSE_std":  sd_mse,  "MSE_lo95":  lo_mse,  "MSE_hi95":  hi_mse,
+        "MMD":  m_mmd,  "MMD_std":  sd_mmd,  "MMD_lo95":  lo_mmd,  "MMD_hi95":  hi_mmd,
+        "per_subject_csv": per_subj_csv,
+        "summary_json": summary_json,
+    }
+
