@@ -54,8 +54,8 @@ class KariAV1451Dataset(Dataset):
         self.resize_to = resize_to
 
         patterns = [
-            os.path.join(root_dir, "*_av1451_*"),
-            os.path.join(root_dir, "*_AV1451_*"),
+            os.path.join(root_dir, "*T807*"),
+            os.path.join(root_dir, "*t807*"),
         ]
         subjects: List[str] = []
         for p in patterns:
