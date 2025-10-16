@@ -63,6 +63,6 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
 
 # Actual job
-python cv_creator.py --root /scratch/l.peiwang/kari_brainv33_top300 --outdir /scratch/l.peiwang/kari_brain_top300/cv_folds
+python cv_creator.py --root /scratch/l.peiwang/kari_brainv33_top300 --outdir /scratch/l.peiwang/kari_brainv33_top300/cv_folds
 #python summary.py
 #python Data_T807.py --part 1
