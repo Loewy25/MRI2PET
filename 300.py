@@ -154,7 +154,7 @@ def main():
     # 1) Read CSV
     if not os.path.isfile(CSV_PATH):
         die(f"CSV not found: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig", engine="python", sep=None)
 
     # 2) Resolve required columns
     session_col = find_col_any(df, ["TAU_PET_Session", "tau pet session", "session", "folder"])
