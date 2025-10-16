@@ -63,9 +63,9 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # ------------------------------------------------------------
 
 # Actual job
-python cv_creator.py \
-  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --root /scratch/l.peiwang/kari_brainv33_top300 \
-  --outdir /scratch/l.peiwang/kari_brainv33_top300/CV5_braak_strat
-#python summary.py
+#python cv_creator.py \
+#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --root /scratch/l.peiwang/kari_brainv33_top300 \
+#  --outdir /scratch/l.peiwang/kari_brainv33_top300/CV5_braak_strat
+python summary.py
 #python Data_T807.py --part 1
