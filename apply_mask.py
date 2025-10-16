@@ -2,7 +2,7 @@
 import os, glob, nibabel as nib
 import numpy as np
 
-ROOT = "/scratch/l.peiwang/kari_brainv22"  # adjust as needed
+ROOT = "/scratch/l.peiwang/kari_brainv33"  # adjust as needed
 PATTERN = "*807*"
 
 def apply_mask(img_path, mask, out_path):
