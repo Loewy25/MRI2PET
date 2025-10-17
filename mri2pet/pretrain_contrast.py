@@ -5,6 +5,16 @@ import torch.nn.functional as F
 from .contrastive import embed_global, cosine_sim, info_nce_ce
 from .encoders import build_encoders_and_heads, set_finetune_pct, save_teachers
 
+
+# --- Fix A: guard for singleton batches --------------------------------------
+def _ensure_5d(x: torch.Tensor) -> torch.Tensor:
+    """
+    Make sure input is [B, C, D, H, W]. If a single sample arrives as [C, D, H, W],
+    add a batch dimension (B=1). Leaves already-batched tensors unchanged.
+    """
+    return x if x.dim() == 5 else x.unsqueeze(0)
+
+
 def pretrain_encoders(
     train_loader, val_loader, device,
     proj_dim: int, tau: float, finetune_pct: float,
@@ -32,7 +42,8 @@ def pretrain_encoders(
     for ep in range(1, epochs+1):
         tot = 0.0; n = 0
         for mri, pet, _ in train_loader:
-            mri = mri.to(device); pet = pet.to(device)
+            mri = _ensure_5d(mri.to(device))
+            pet = _ensure_5d(pet.to(device))
             zM, zP = embed_global(mods, mri, pet)   # no-grad inside embed_global, but we want grads here
             # Recompute without @torch.no_grad(): inline to allow grad
             zM = F.normalize(mods["proj_M"](mods["enc_M"](mri)), dim=1)
