@@ -48,12 +48,12 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 # Example optional commands (commented)
 # ------------------------------------------------------------
 
-python ROI_eval.py \
-   --roi-root /scratch/l.peiwang/kari_brainv33 \
-   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_v33/volumes \
-   --out /home/l.peiwang/MRI2PET/MGDA_UB_v33/roi_metrics \
-   --data-range 3.5 \
-   --mmd-voxels 2048
+#python ROI_eval.py \
+#   --roi-root /scratch/l.peiwang/kari_brainv33 \
+#   --vols-root /home/l.peiwang/MRI2PET/MGDA_UB_v33/volumes \
+#   --out /home/l.peiwang/MRI2PET/MGDA_UB_v33/roi_metrics \
+#   --data-range 3.5 \
+#   --mmd-voxels 2048
 
 # python MI_ROI.py \
 #   --root-dir /scratch/l.peiwang/kari_brainv11 \
@@ -69,3 +69,14 @@ python ROI_eval.py \
 #  --outdir /scratch/l.peiwang/kari_brainv33_top300/CV5_braak_strat
 #python summary.py
 #python Data_T807.py --part 1
+
+
+python eval_roi_multifold.py \
+  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+  --runs /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_1 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_2 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_3 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_4 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_5 \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_1/roi_metrics \
+  --strict-affine
