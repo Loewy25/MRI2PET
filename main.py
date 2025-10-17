@@ -10,6 +10,8 @@ from mri2pet.data import build_loaders
 from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
+from mri2pet.config import FOLD_CSV
+from mri2pet.data import build_loaders_from_fold_csv
 
 # One import to read all toggles/hparams
 import mri2pet.config as cfg
