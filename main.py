@@ -10,14 +10,21 @@ from mri2pet.data import build_loaders
 from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
-from mri2pet.config import FOLD_CSV
-from mri2pet.data import build_loaders_from_fold_csv
 
 # One import to read all toggles/hparams
 import mri2pet.config as cfg
 
 from mri2pet.pretrain_contrast import pretrain_encoders
 from mri2pet.encoders import build_encoders_and_heads, load_teachers, freeze_teachers
+
+# === NEW: prefer CSV-driven split if available ===
+try:
+    from mri2pet.config import FOLD_CSV
+    from mri2pet.data import build_loaders_from_fold_csv
+    _HAS_FOLD = True
+except Exception:
+    FOLD_CSV = None
+    _HAS_FOLD = False
 
 
 if __name__ == "__main__":
@@ -28,8 +35,17 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Build loaders
-    train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
+    # Build loaders (prefer CSV fold, fallback to random)
+    if _HAS_FOLD and FOLD_CSV and os.path.isfile(FOLD_CSV):
+        print(f"Using fold CSV: {FOLD_CSV}")
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(FOLD_CSV)
+    else:
+        if _HAS_FOLD and FOLD_CSV:
+            print(f"[WARN] FOLD_CSV was set but not found on disk: {FOLD_CSV}. Falling back to random split.")
+        else:
+            print("No fold CSV configured; using random split.")
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
+
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
         sample = next(iter(train_loader))
@@ -48,8 +64,13 @@ if __name__ == "__main__":
 
         if cfg.PREALIGNMENT:
             print("[Contrast] Pretraining encoders (global InfoNCE)...")
-            # Build a small-batch loader for pretraining
-            pretrain_train_loader, _, _, _, _, _, _ = build_loaders(batch_size=4)
+
+            # Use the SAME training subjects as the GAN stage:
+            if _HAS_FOLD and FOLD_CSV and os.path.isfile(FOLD_CSV):
+                pretrain_train_loader, _, _, _, _, _, _ = build_loaders_from_fold_csv(FOLD_CSV, batch_size=4)
+            else:
+                pretrain_train_loader, _, _, _, _, _, _ = build_loaders(batch_size=4)
+
             pretrain_encoders(
                 pretrain_train_loader, val_loader, device,
                 proj_dim=cfg.CONTRAST_DIM, tau=cfg.CONTRAST_TAU, finetune_pct=cfg.FINETUNE_PCT,
@@ -113,7 +134,7 @@ if __name__ == "__main__":
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
-    # Evaluate + Save (single pass)
+    # Evaluate + Save (single pass; writes per-subject CSV + summary JSON with CI)
     metrics = evaluate_and_save(
         G, test_loader, device=device,
         out_dir=VOL_DIR, data_range=DATA_RANGE,
