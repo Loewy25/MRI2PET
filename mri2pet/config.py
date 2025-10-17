@@ -106,3 +106,8 @@ ROI_AGG_WEIGHTS = {
 # optional per-ROI memory queue (safe with B=1); OFF by default
 ROI_MEMORY_ENABLE: bool = False
 ROI_MEMORY_LEN: int = 512   # entries per ROI per direction (embeddings only)
+# === Cross‑validation (CSV‑driven) ===
+# Put your 5 CSVs here; keep naming fold1.csv .. fold5.csv (one-based, just like your other project).
+SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")   # e.g., /scratch/.../CV5_braak_strat
+FOLD_INDEX = 0                                           # 0..4  -> fold1..fold5
+FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
