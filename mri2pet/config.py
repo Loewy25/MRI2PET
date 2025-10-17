@@ -3,10 +3,10 @@ from typing import Optional, Tuple
 import torch
 
 
-ROOT_DIR   = "/scratch/l.peiwang/kari_brainv11"
+ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_stable_contra_1632_batch1_hierachy_ROI_NOMEMORY_nomultiview"
+RUN_NAME   = "MGDA_UB_c_contrast_3216_1"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
