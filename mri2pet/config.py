@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_contrast_Mem_6424_2"
+RUN_NAME   = "MGDA_UB_c_contrast_644_1"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -92,7 +92,7 @@ ROI_CONTRAST_ENABLE: bool = True          # master switch for ROI-only contrast
 
 # same # patches for every ROI, one size for all
 ROI_PATCHES_PER_ROI: int = 64
-ROI_PATCH_SIZE: Tuple[int,int,int] = (24,24,24)
+ROI_PATCH_SIZE: Tuple[int,int,int] = (4,4,4)
 
 # weights to combine per-ROI losses into the two final contrast terms (sum ≈ 1)
 ROI_AGG_WEIGHTS = {
@@ -104,10 +104,10 @@ ROI_AGG_WEIGHTS = {
 }
 
 # optional per-ROI memory queue (safe with B=1); OFF by default
-ROI_MEMORY_ENABLE: bool = True
+ROI_MEMORY_ENABLE: bool = False
 ROI_MEMORY_LEN: int = 512   # entries per ROI per direction (embeddings only)
 # === Cross‑validation (CSV‑driven) ===
 # Put your 5 CSVs here; keep naming fold1.csv .. fold5.csv (one-based, just like your other project).
 SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")   # e.g., /scratch/.../CV5_braak_strat
-FOLD_INDEX = 1                                         # 0..4  -> fold1..fold5
+FOLD_INDEX = 0                                         # 0..4  -> fold1..fold5
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
