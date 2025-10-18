@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_contrast_488_5"
+RUN_NAME   = "MGDA_UB_c_contrast_328_5"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -91,7 +91,7 @@ PRINT_GROUP_COSINES: bool = True
 ROI_CONTRAST_ENABLE: bool = True          # master switch for ROI-only contrast
 
 # same # patches for every ROI, one size for all
-ROI_PATCHES_PER_ROI: int = 48
+ROI_PATCHES_PER_ROI: int = 32
 ROI_PATCH_SIZE: Tuple[int,int,int] = (8 ,8, 8)
 
 # weights to combine per-ROI losses into the two final contrast terms (sum ≈ 1)
