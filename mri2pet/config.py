@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_c_contrast_6416_4"
+RUN_NAME   = "MGDA_UB_c_contrast_6416_3"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -109,5 +109,5 @@ ROI_MEMORY_LEN: int = 512   # entries per ROI per direction (embeddings only)
 # === Cross‑validation (CSV‑driven) ===
 # Put your 5 CSVs here; keep naming fold1.csv .. fold5.csv (one-based, just like your other project).
 SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")   # e.g., /scratch/.../CV5_braak_strat
-FOLD_INDEX = 3                                         # 0..4  -> fold1..fold5
+FOLD_INDEX = 2                                         # 0..4  -> fold1..fold5
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
