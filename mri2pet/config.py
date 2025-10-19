@@ -104,7 +104,7 @@ ROI_AGG_WEIGHTS = {
 }
 
 # optional per-ROI memory queue (safe with B=1); OFF by default
-ROI_MEMORY_ENABLE: bool = False
+ROI_MEMORY_ENABLE: bool = True
 ROI_MEMORY_LEN: int = 512   # entries per ROI per direction (embeddings only)
 # === Cross‑validation (CSV‑driven) ===
 # Put your 5 CSVs here; keep naming fold1.csv .. fold5.csv (one-based, just like your other project).
