@@ -226,8 +226,10 @@ def find_fs_labels_closest(fs_subject_dir, target_dt):
     for root, _, files in os.walk(fs_subject_dir):
         if "aseg.mgz" in files and not found_aseg:
             found_aseg = os.path.join(root, "aseg.mgz")
+            print("shit")
         if "aparc+aseg.mgz" in files and not found_aparc:
             found_aparc = os.path.join(root, "aparc+aseg.mgz")
+            print("shit")
     return found_aseg, found_aparc, None
 
 # ---------- Utils ----------
