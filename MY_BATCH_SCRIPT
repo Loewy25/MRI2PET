@@ -73,10 +73,10 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 python ROI_eval_cv.py \
   --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-  --runs /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_1 \
-         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_2 \
-         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_3 \
-         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_4 \
-         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_5 \
-  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_3224_1/roi_metrics \
+  --runs /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_1 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_2 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_3 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_4 \
+         /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_5 \
+  --out /home/l.peiwang/MRI2PET/MGDA_UB_c_contrast_MEM_6416_1/roi_metrics \
   --strict-affine
