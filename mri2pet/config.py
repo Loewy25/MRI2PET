@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "MGDA_UB_v33_500_5"
+RUN_NAME   = "ab_MGDA_UB_v33_500_5"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
@@ -36,6 +36,6 @@ DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 # === Cross‑validation (CSV-driven) ===
 # Where the fold CSVs live (from your generator script)
-SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")  # e.g. /scratch/.../cv_folds
+SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_ab_strat")  # e.g. /scratch/.../cv_folds
 FOLD_INDEX = 4                                   # 0..4 (fold1..fold5)
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
