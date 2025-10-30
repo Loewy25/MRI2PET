@@ -218,7 +218,7 @@ def main():
         val_list  = sorted(list(val_set))
         test_list = sorted(list(test_set))
 
-        out_csv = os.path.join(outdir, f"fold{f+1}.csv")  # 1-based file names
+        out_csv = os.path.join(outdir, f"ab_fold{f+1}.csv")  # 1-based file names
         write_fold_csv(out_csv, train_set, val_list, test_list)
 
         # sanity print: distribution per split
