@@ -3,15 +3,16 @@
 Create five CSVs (fold1..fold5) with columns: train,validation,test.
 Discovery matches your KariAV1451Dataset (T807/t807 dirs, requires T1/PET and mask unless overridden).
 
-This version stratifies by **amyloid status** using Centiloid:
-  - Aβ–  if Centiloid < 18.4
-  - Aβ+  if Centiloid >= 18.4
-(Bucket names are 'negative' and 'positive' for readability.)
+*** Stratification for THIS VERSION ***
+Stratify by AMYLOID status using Centiloid (MR-free CLs):
+    negative: Centiloid < centiloid_thr  (default 18.4)
+    positive: Centiloid >= centiloid_thr
 
-For fold f (1..5):
-    test = subjects assigned to fold f
-    val  = subjects assigned to (f+1) mod 5
-    train = remaining subjects
+Fold logic (unchanged):
+    For fold f (1..5):
+        test = subjects assigned to fold f
+        val  = subjects assigned to (f+1) mod 5
+        train = remaining subjects
 
 Result files:
   <root>/cv_folds/fold1.csv ... fold5.csv
@@ -19,7 +20,7 @@ Each CSV: columns [train, validation, test], one subject per cell, rows padded w
 """
 
 import os, glob, csv, argparse, random
-from typing import List, Tuple, Dict
+from typing import List, Dict
 import pandas as pd
 import numpy as np
 from collections import defaultdict, Counter
@@ -33,11 +34,13 @@ DEFAULT_ROOTS = [
     "/scratch/l.peiwang/kari_brainv33",
 ]
 
-# Column names / thresholds kept compatible with your original CLI.
-# TAU_COL still provides the key used to match subject folders <-> CSV rows.
-TAU_COL     = "TAU_PET_Session"
-BRAAK_COLS  = [("Braak1_2","I/II"), ("Braak3_4","III/IV"), ("Braak5_6","V/VI")]  # unused in amyloid split, kept for compatibility
-BRAAK_THR   = 18.4  # Centiloid threshold for Aβ+: <18.4 = negative, >=18.4 = positive
+# Column names / thresholds for AMYLOID mode
+SESSION_COL_DEFAULT    = "TAU_PET_Session"   # join key to subject folders (unchanged logic)
+CENTILOID_COL_DEFAULT  = "Centiloid"         # MR-free CLs column
+CENTILOID_THR_DEFAULT  = 18.4                # A– < 18.4, A+ >= 18.4
+
+# Amyloid label names (simple and readable)
+CLASS_LABELS = ["positive", "negative"]
 # ====================================================
 
 def norm_key(x: str) -> str:
@@ -49,23 +52,6 @@ def get_col(df: pd.DataFrame, name: str) -> str:
     if key not in mapping:
         raise KeyError(f"Column '{name}' not found. Available: {list(df.columns)}")
     return mapping[key]
-
-def to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
-
-# Kept from original for compatibility (not used in amyloid split)
-def braak_stage_from_row(row: pd.Series,
-                         braak_cols: List[Tuple[str, str]],
-                         thr: float) -> str:
-    # Unchanged legacy helper; unused here.
-    vals = {label: to_float(row[col]) for col, label in braak_cols}
-    if vals["V/VI"]   >= thr: return "V/VI"
-    if vals["III/IV"] >= thr: return "III/IV"
-    if vals["I/II"]   >= thr: return "I/II"
-    return "0"
 
 def find_dataset_root() -> str:
     for p in DEFAULT_ROOTS:
@@ -92,69 +78,61 @@ def list_subject_dirs(root: str,
                 sids.append(os.path.basename(d))
     return sids
 
-def load_stage_labels(meta_csv: str,
-                      subjects: List[str],
-                      tau_col: str,
-                      braak_cols: List[Tuple[str, str]],
-                      braak_thr: float) -> Dict[str, str]:
+def load_amyloid_labels(meta_csv: str,
+                        subjects: List[str],
+                        session_col: str,
+                        centiloid_col: str,
+                        centiloid_thr: float) -> Dict[str, str]:
     """
-    Return mapping: norm_key(sid) -> one of {"positive","negative"} based on Centiloid.
-      - Aβ+ (Centiloid >= braak_thr)  -> "positive"
-      - Aβ– (Centiloid <  braak_thr)  -> "negative"
-
-    We keep the signature and downstream usage unchanged; 'braak_cols' is ignored here.
-    The subject-row join key remains tau_col (TAU_PET_Session), consistent with your folders.
+    Return mapping: norm_key(sid) -> amyloid label in {"positive","negative"} based on Centiloid.
+      - positive: Centiloid >= centiloid_thr   (default 18.4)
+      - negative: Centiloid <  centiloid_thr
+    The subject-row join key remains 'session_col' (defaults to TAU_PET_Session), consistent with your folders.
     """
     df = pd.read_csv(meta_csv, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
 
-    # Keying column unchanged (matches your T807 folder names)
-    tau_c = get_col(df, tau_col)
-
-    # Centiloid column (MR-free CLs recommended)
-    cl_c = get_col(df, "Centiloid")
+    sess_c = get_col(df, session_col)
+    cl_c   = get_col(df, centiloid_col)
     df[cl_c] = pd.to_numeric(df[cl_c], errors="coerce")
 
-    df["__key__"] = df[tau_c].map(norm_key)
+    df["__key__"] = df[sess_c].map(norm_key)
     subject_keys = {norm_key(s) for s in subjects}
 
     matched = df[df["__key__"].isin(subject_keys)].copy()
     if matched.empty:
         return {}
 
-    # Amyloid labels; NaN CLs fall into "negative" (same behavior as old code treated NaN → "0")
-    matched["__stage__"] = np.where(matched[cl_c] >= braak_thr, "positive", "negative")
+    # NOTE: NaN Centiloid will evaluate as False in (>= thr) and thus become "negative",
+    # which mirrors your original behavior where unlabeled Braak rows fell into the lowest bucket.
+    matched["__label__"] = np.where(matched[cl_c] >= centiloid_thr, "positive", "negative")
 
-    # Resolve duplicates per key by taking the "higher" class (positive > negative)
+    # Resolve duplicates per session key by taking the "higher" class (positive > negative)
     order = {"negative": 0, "positive": 1}
-    by_key = matched.groupby("__key__")["__stage__"].apply(
+    by_key = matched.groupby("__key__")["__label__"].apply(
         lambda s: max(s, key=lambda x: order.get(x, -1))
     )
 
     return dict(by_key)
 
-def stratified_assign(sids_by_stage: Dict[str, List[str]],
+def stratified_assign(sids_by_label: Dict[str, List[str]],
                       k: int,
                       seed: int) -> Dict[int, List[str]]:
     """
-    Per-stage round-robin into k folds after deterministic shuffle.
+    Per-class round-robin into k folds after deterministic shuffle.
     Returns: fold_idx -> list of sids (test set for that fold).
-
-    Uses stage order ["positive","negative"] if present; otherwise falls back to sorted keys.
     """
     rng = random.Random(seed)
     folds = {i: [] for i in range(k)}
 
-    pref_order = ["positive", "negative"]
-    extras = [s for s in sorted(sids_by_stage.keys()) if s not in pref_order]
-    stage_order = [s for s in pref_order if s in sids_by_stage] + extras
-
-    for stage in stage_order:
-        group = list(sids_by_stage.get(stage, []))
+    # Deterministic but balanced per class
+    for label in CLASS_LABELS:
+        group = list(sids_by_label.get(label, []))
         rng.shuffle(group)
         for i, sid in enumerate(group):
             folds[i % k].append(sid)
 
+    # sort each fold for readability
     for i in range(k):
         folds[i] = sorted(folds[i])
     return folds
@@ -173,7 +151,7 @@ def write_fold_csv(out_csv: str, train: List[str], val: List[str], test: List[st
             ])
 
 def main():
-    parser = argparse.ArgumentParser("Make 5 CSVs for 5-fold CV with amyloid-stratified splits (Centiloid).")
+    parser = argparse.ArgumentParser("Make 5 CSVs for 5-fold CV with AMYLOID-stratified splits (Centiloid).")
     parser.add_argument("--root", default=find_dataset_root(), help="Dataset root with subject folders.")
     parser.add_argument("--meta_csv", default=DEFAULT_META_CSV, help="Metadata CSV path.")
     parser.add_argument("--k", type=int, default=5, help="Number of folds.")
@@ -182,49 +160,55 @@ def main():
     parser.add_argument("--allow-missing-mask", action="store_true",
                         help="Include subjects without aseg_brainmask.nii.gz.")
     parser.add_argument("--outdir", default=None, help="Output dir for CSVs (default: <root>/cv_folds).")
-    parser.add_argument("--tau_col", default=TAU_COL)
-    parser.add_argument("--braak_thr", type=float, default=BRAAK_THR,
-                        help="Centiloid threshold for Aβ positivity (default: 18.4).")
+
+    # Clear, amyloid-focused knobs (names reflect what they are)
+    parser.add_argument("--session_col", default=SESSION_COL_DEFAULT,
+                        help="CSV column used to match subject folder names (default: TAU_PET_Session).")
+    parser.add_argument("--centiloid_col", default=CENTILOID_COL_DEFAULT,
+                        help="CSV column containing MR-free Centiloid values (default: Centiloid).")
+    parser.add_argument("--centiloid_thr", type=float, default=CENTILOID_THR_DEFAULT,
+                        help="Centiloid threshold: negative < thr, positive >= thr (default: 18.4).")
+
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
     outdir = args.outdir or os.path.join(root, "cv_folds")
 
-    # 1) discover subjects as before
+    # 1) discover subjects (unchanged)
     subjects = list_subject_dirs(root, require_mask=(not args.allow_missing_mask))
     if len(subjects) == 0:
         raise SystemExit(f"No valid subjects found under {root}")
 
-    # 2) compute amyloid labels from metadata CSV using Centiloid only
-    label_map = load_stage_labels(
-        args.meta_csv, subjects, tau_col=args.tau_col,
-        braak_cols=BRAAK_COLS, braak_thr=args.braak_thr
+    # 2) compute AMYLOID labels from metadata CSV using Centiloid threshold
+    label_map = load_amyloid_labels(
+        args.meta_csv, subjects,
+        session_col=args.session_col,
+        centiloid_col=args.centiloid_col,
+        centiloid_thr=args.centiloid_thr
     )
 
-    # Keep only labeled subjects (we can't stratify unlabeled); warn if any dropped
+    # Keep only labeled subjects (can't stratify unlabeled); warn if any dropped
     labeled = [sid for sid in subjects if norm_key(sid) in label_map]
     dropped = [sid for sid in subjects if norm_key(sid) not in label_map]
     if len(labeled) == 0:
-        raise SystemExit("No subjects matched between folder names and TAU_PET_Session in the CSV.")
+        raise SystemExit("No subjects matched between folder names and session_col in the CSV.")
     if dropped:
-        print(f"[WARN] {len(dropped)} subjects have no amyloid label in CSV and will be excluded from CV.")
+        print(f"[WARN] {len(dropped)} subjects lack an amyloid label and will be excluded from CV.")
         print("       Examples:", dropped[:10])
 
-    # 3) bucket by amyloid status
-    sids_by_stage: Dict[str, List[str]] = defaultdict(list)
+    # 3) bucket by amyloid label
+    sids_by_label: Dict[str, List[str]] = defaultdict(list)
     for sid in labeled:
-        stage = label_map[norm_key(sid)]  # "positive" or "negative"
-        sids_by_stage[stage].append(sid)
+        label = label_map[norm_key(sid)]  # "positive" or "negative"
+        sids_by_label[label].append(sid)
 
-    # quick summary of stage counts
-    stage_names = ["positive", "negative"]
-    # ensure both appear for reporting; zeros if absent
-    total_counts = {stage: len(sids_by_stage.get(stage, [])) for stage in stage_names}
+    # quick summary of label counts
+    total_counts = {label: len(sids_by_label.get(label, [])) for label in CLASS_LABELS}
     print("Amyloid counts among included subjects:", total_counts)
 
-    # 4) stratified per-stage round-robin → test folds
+    # 4) stratified per-class round-robin → test folds
     k = args.k
-    test_folds = stratified_assign(sids_by_stage, k=k, seed=args.seed)
+    test_folds = stratified_assign(sids_by_label, k=k, seed=args.seed)
 
     # 5) write per-fold CSVs; val = next fold; train = everything else
     for f in range(k):
@@ -240,7 +224,7 @@ def main():
         # sanity print: distribution per split
         def dist(lst):
             c = Counter(label_map[norm_key(s)] for s in lst)
-            return {k: c.get(k, 0) for k in stage_names}
+            return {k: c.get(k, 0) for k in CLASS_LABELS}
         print(f"fold{f+1}: Ntrain={len(train_set)} Nval={len(val_list)} Ntest={len(test_list)}")
         print(f"         amyloid dist train={dist(train_set)} val={dist(val_list)} test={dist(test_list)}")
 
@@ -248,3 +232,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
