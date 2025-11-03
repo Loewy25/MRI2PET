@@ -81,7 +81,7 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --out /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_1/roi_metrics \
 #  --strict-affine
 
-python classification.py \
+python Classification.py \
   --root /home/l.peiwang/MRI2PET \
   --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session_col TAU_PET_Session \
