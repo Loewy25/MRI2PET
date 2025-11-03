@@ -6,7 +6,7 @@ MRI→PET amyloid classification (Centiloid labels) with SVM (precomputed linear
 - Aggregates all subjects in their 'volumes/<SUBJECT>/' folders
 - Loads Centiloid labels from CSV (>= thr → positive)
 - Nested CV (outer=eval, inner=hyperparameter tuning) with precomputed linear kernel
-- Resamples mismatched 3D/4D or affine images to a per-fold reference using nilearn
+- NO resampling/harmonization; instead we assert identical shape & affine and print them.
 - Outputs predictions_<mod>.csv and metrics_summary.csv
 """
 
@@ -88,7 +88,7 @@ def load_amyloid_labels(meta_csv, subject_ids, session_col, centiloid_col, thr):
     labels = (per_key_max >= thr).astype(int)
     return dict(labels)
 
-# ---------- FOV harmonization ----------
+# ---------- alignment check (no resampling) ----------
 
 def _load_squeezed(img_path):
     img = nimg.load_img(img_path)
@@ -96,29 +96,43 @@ def _load_squeezed(img_path):
         img = nimg.index_img(img, 0)
     return img
 
-def _harmonize_to_ref(paths, ref_img, interpolation="continuous"):
-    out = []
-    for p in paths:
-        img = _load_squeezed(p)
-        if (img.shape != ref_img.shape) or not np.allclose(img.affine, ref_img.affine):
-            img = nimg.resample_to_img(
-                img, ref_img, interpolation=interpolation,
-                force_resample=True, copy_header=True
-            )
-            print("harmoni")
-        out.append(img)
-    return out
+def _affine_equal(a, b, atol=1e-5):
+    return np.allclose(a, b, atol=atol)
 
-def build_masker_from_training(train_img_paths):
-    ref_img = _load_squeezed(train_img_paths[0])
-    train_imgs = _harmonize_to_ref(train_img_paths, ref_img)
+def _affine_str(a):
+    return np.array2string(a, formatter={'float_kind': lambda x: f"{x: .5f}"})
+
+def _assert_all_aligned(imgs, tol=1e-5, label=""):
+    """Assert every image has the same shape and affine as imgs[0]."""
+    ref = imgs[0]
+    mismatches = []
+    for i, im in enumerate(imgs[1:], start=1):
+        shape_ok = (im.shape == ref.shape)
+        affine_ok = _affine_equal(im.affine, ref.affine, atol=tol)
+        if not (shape_ok and affine_ok):
+            mismatches.append((i, im.shape, shape_ok, affine_ok))
+    if mismatches:
+        msg = [f"[ALIGN-ERROR] {label}: {len(mismatches)} mismatch(es) vs reference:"]
+        for (i, shp, shape_ok, affine_ok) in mismatches[:10]:
+            msg.append(f"  - img#{i}: shape={shp} (ok={shape_ok}), affine_ok={affine_ok}")
+        raise ValueError("\n".join(msg))
+    return ref
+
+def build_masker_from_training(train_img_paths, verbose_tag=""):
+    # load training images (no resample), assert alignment, print reference
+    train_imgs = [_load_squeezed(p) for p in train_img_paths]
+    ref_img = _assert_all_aligned(train_imgs, label=f"{verbose_tag}/train")
+    print(f"[ALIGN] {verbose_tag} TRAIN reference shape: {ref_img.shape}")
+    print(f"[AFFINE] {verbose_tag} TRAIN reference affine:\n{_affine_str(ref_img.affine)}")
     mask_img = compute_brain_mask(ref_img)
     masker = NiftiMasker(mask_img=mask_img, standardize=False, smoothing_fwhm=None)
-    masker.fit(train_imgs)
+    masker.fit(train_imgs)  # learn mask voxels from TRAIN only
     return masker, ref_img
 
-def extract_features(masker, img_paths, ref_img):
-    imgs = _harmonize_to_ref(img_paths, ref_img)
+def extract_features(masker, img_paths, ref_img, verbose_tag=""):
+    # load images (no resample), assert alignment to ref, then transform
+    imgs = [_load_squeezed(p) for p in img_paths]
+    _assert_all_aligned([ref_img] + imgs, label=f"{verbose_tag}/all")
     X = masker.transform(imgs)
     return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -134,17 +148,29 @@ def fit_minmax_on_controls(X_train, y_train):
 
 # ---------- main CV loop ----------
 
-def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_splits, C_grid, seed=10):
+def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_splits, C_grid, seed=10, mod_tag=""):
     skf_outer = StratifiedKFold(n_splits=outer_splits, shuffle=True, random_state=seed)
     yT, yP, yH, subjT = [], [], [], []
     for k,(tr,te) in enumerate(skf_outer.split(img_paths,y),1):
         trp,tep = [img_paths[i] for i in tr],[img_paths[i] for i in te]
         ytr,yte = y[tr],y[te]
-        masker, ref = build_masker_from_training(trp)
-        Xtr, Xte = extract_features(masker,trp,ref), extract_features(masker,tep,ref)
+
+        # Build masker on TRAIN (no resampling), check alignment and print shape/affine once
+        fold_tag = f"{mod_tag}/fold{k}"
+        masker, ref = build_masker_from_training(trp, verbose_tag=fold_tag)
+
+        # Transform features (with strict alignment check for both train and test)
+        Xtr = extract_features(masker, trp, ref_img=ref, verbose_tag=f"{fold_tag}/train")
+        Xte = extract_features(masker, tep, ref_img=ref, verbose_tag=f"{fold_tag}/test")
+
+        # Control-only min-max scaling
         apply = fit_minmax_on_controls(Xtr,ytr)
         Xtr,Xte = apply(Xtr),apply(Xte)
+
+        # Precomputed linear kernels
         Ktr,Kte = Xtr@Xtr.T, Xte@Xtr.T
+
+        # Inner CV grid search
         gs = GridSearchCV(
             SVC(kernel="precomputed", class_weight="balanced", probability=True),
             {"C": list(C_grid)}, scoring="roc_auc",
@@ -153,9 +179,17 @@ def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_spl
         )
         gs.fit(Ktr,ytr)
         best = gs.best_estimator_
-        prob = best.predict_proba(Kte)[:,1]; pred=(prob>=0.5).astype(int)
-        print(f"[fold {k}] C={gs.best_params_['C']} AUC={roc_auc_score(yte,prob):.4f} n_train={len(tr)} n_test={len(te)}")
-        yT+=yte.tolist(); yP+=prob.tolist(); yH+=pred.tolist(); subjT+=[subjects[i] for i in te]
+
+        prob = best.predict_proba(Kte)[:,1]
+        pred = (prob>=0.5).astype(int)
+        print(f"[{fold_tag}] C={gs.best_params_['C']} AUC={roc_auc_score(yte,prob):.4f} "
+              f"n_train={len(tr)} n_test={len(te)}")
+
+        yT += yte.tolist()
+        yP += prob.tolist()
+        yH += pred.tolist()
+        subjT += [subjects[i] for i in te]
+
     yT,yP,yH=np.array(yT),np.array(yP),np.array(yH)
     tn,fp,fn,tp = confusion_matrix(yT,yH).ravel()
     metrics=dict(
@@ -169,8 +203,6 @@ def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_spl
     )
     preds=pd.DataFrame({"subject":subjT,"y_true":yT,"y_prob":yP,"y_pred":yH})
     return metrics,preds
-
-# ---------- main ----------
 
 # ---------- main ----------
 
@@ -232,7 +264,6 @@ def main():
         print("\n=== Running SVM for", mod, "===", flush=True)
         paths = [subj[s][mod] for s in keep]
 
-        # *** THIS was broken before — use the correct function name ***
         metrics, preds = nested_cv_precomputed_kernel(
             img_paths=paths,
             y=y,
@@ -241,6 +272,7 @@ def main():
             inner_splits=args.inner,
             C_grid=tuple(args.c_grid),
             seed=10,
+            mod_tag=mod,
         )
 
         ppath = os.path.join(args.outdir, f"predictions_{mod}.csv")
@@ -263,4 +295,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
