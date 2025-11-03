@@ -103,9 +103,9 @@ def _harmonize_to_ref(paths, ref_img, interpolation="continuous"):
         if (img.shape != ref_img.shape) or not np.allclose(img.affine, ref_img.affine):
             img = nimg.resample_to_img(
                 img, ref_img, interpolation=interpolation,
-                force_resample=True, copy_header=True,
-                print("harmonize")
+                force_resample=True, copy_header=True
             )
+            print("harmoni")
         out.append(img)
     return out
 
