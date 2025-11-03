@@ -6,7 +6,7 @@ MRI→PET amyloid classification (Centiloid labels) with SVM (precomputed linear
 - Aggregates all subjects in their 'volumes/<SUBJECT>/' folders
 - Loads Centiloid labels from CSV (>= thr → positive)
 - Nested CV (outer=eval, inner=hyperparameter tuning) with precomputed linear kernel
-- NO resampling/harmonization; instead we assert identical shape & affine and print them.
+- NO harmonization/resampling; only checks shapes match.
 - Outputs predictions_<mod>.csv and metrics_summary.csv
 """
 
@@ -14,11 +14,12 @@ import os, glob, argparse, warnings
 from collections import Counter
 import numpy as np
 import pandas as pd
-import nibabel as nib
 
+import nibabel as nib
 from nilearn import image as nimg
-from nilearn.input_data import NiftiMasker
+from nilearn.maskers import NiftiMasker        # updated import (no deprecation)
 from nilearn.masking import compute_brain_mask
+
 from sklearn.svm import SVC
 from sklearn.model_selection import StratifiedKFold, GridSearchCV
 from sklearn.metrics import (
@@ -88,7 +89,7 @@ def load_amyloid_labels(meta_csv, subject_ids, session_col, centiloid_col, thr):
     labels = (per_key_max >= thr).astype(int)
     return dict(labels)
 
-# ---------- alignment check (no resampling) ----------
+# ---------- no-harmonization loaders ----------
 
 def _load_squeezed(img_path):
     img = nimg.load_img(img_path)
@@ -96,43 +97,26 @@ def _load_squeezed(img_path):
         img = nimg.index_img(img, 0)
     return img
 
-def _affine_equal(a, b, atol=1e-5):
-    return np.allclose(a, b, atol=atol)
-
-def _affine_str(a):
-    return np.array2string(a, formatter={'float_kind': lambda x: f"{x: .5f}"})
-
-def _assert_all_aligned(imgs, tol=1e-5, label=""):
-    """Assert every image has the same shape and affine as imgs[0]."""
-    ref = imgs[0]
-    mismatches = []
+def _assert_same_shape(imgs, label=""):
+    ref_shape = imgs[0].shape
     for i, im in enumerate(imgs[1:], start=1):
-        shape_ok = (im.shape == ref.shape)
-        affine_ok = _affine_equal(im.affine, ref.affine, atol=tol)
-        if not (shape_ok and affine_ok):
-            mismatches.append((i, im.shape, shape_ok, affine_ok))
-    if mismatches:
-        msg = [f"[ALIGN-ERROR] {label}: {len(mismatches)} mismatch(es) vs reference:"]
-        for (i, shp, shape_ok, affine_ok) in mismatches[:10]:
-            msg.append(f"  - img#{i}: shape={shp} (ok={shape_ok}), affine_ok={affine_ok}")
-        raise ValueError("\n".join(msg))
-    return ref
+        if im.shape != ref_shape:
+            raise ValueError(f"[ALIGN-ERROR] {label}: shape mismatch img#{i} {im.shape} vs {ref_shape}")
+    print(f"[ALIGN] {label}: all shapes identical {ref_shape}")
+    return ref_shape
 
 def build_masker_from_training(train_img_paths, verbose_tag=""):
-    # load training images (no resample), assert alignment, print reference
     train_imgs = [_load_squeezed(p) for p in train_img_paths]
-    ref_img = _assert_all_aligned(train_imgs, label=f"{verbose_tag}/train")
-    print(f"[ALIGN] {verbose_tag} TRAIN reference shape: {ref_img.shape}")
-    print(f"[AFFINE] {verbose_tag} TRAIN reference affine:\n{_affine_str(ref_img.affine)}")
-    mask_img = compute_brain_mask(ref_img)
+    ref_shape = _assert_same_shape(train_imgs, label=f"{verbose_tag}/train")
+    # brain mask from first training image (voxel-index space)
+    mask_img = compute_brain_mask(train_imgs[0])
     masker = NiftiMasker(mask_img=mask_img, standardize=False, smoothing_fwhm=None)
     masker.fit(train_imgs)  # learn mask voxels from TRAIN only
-    return masker, ref_img
+    return masker, ref_shape
 
-def extract_features(masker, img_paths, ref_img, verbose_tag=""):
-    # load images (no resample), assert alignment to ref, then transform
+def extract_features(masker, img_paths, ref_shape, verbose_tag=""):
     imgs = [_load_squeezed(p) for p in img_paths]
-    _assert_all_aligned([ref_img] + imgs, label=f"{verbose_tag}/all")
+    _ = _assert_same_shape(imgs, label=f"{verbose_tag}/all")
     X = masker.transform(imgs)
     return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -155,22 +139,16 @@ def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_spl
         trp,tep = [img_paths[i] for i in tr],[img_paths[i] for i in te]
         ytr,yte = y[tr],y[te]
 
-        # Build masker on TRAIN (no resampling), check alignment and print shape/affine once
         fold_tag = f"{mod_tag}/fold{k}"
-        masker, ref = build_masker_from_training(trp, verbose_tag=fold_tag)
+        masker, ref_shape = build_masker_from_training(trp, verbose_tag=fold_tag)
+        Xtr = extract_features(masker, trp, ref_shape=ref_shape, verbose_tag=f"{fold_tag}/train")
+        Xte = extract_features(masker, tep, ref_shape=ref_shape, verbose_tag=f"{fold_tag}/test")
 
-        # Transform features (with strict alignment check for both train and test)
-        Xtr = extract_features(masker, trp, ref_img=ref, verbose_tag=f"{fold_tag}/train")
-        Xte = extract_features(masker, tep, ref_img=ref, verbose_tag=f"{fold_tag}/test")
-
-        # Control-only min-max scaling
         apply = fit_minmax_on_controls(Xtr,ytr)
         Xtr,Xte = apply(Xtr),apply(Xte)
 
-        # Precomputed linear kernels
         Ktr,Kte = Xtr@Xtr.T, Xte@Xtr.T
 
-        # Inner CV grid search
         gs = GridSearchCV(
             SVC(kernel="precomputed", class_weight="balanced", probability=True),
             {"C": list(C_grid)}, scoring="roc_auc",
@@ -208,7 +186,6 @@ def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_spl
 
 def main():
     import sys
-    # make prints show up even under Slurm
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
@@ -230,13 +207,11 @@ def main():
     print("[ARGS]", vars(args), flush=True)
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Folds & subjects
     folds = strict_fold_dirs(args.root, "ab_MGDA_UB_v33_500_", [1, 2, 3, 4, 5])
     for f in folds:
         print("FOLD:", f, flush=True)
     subj = collect_subjects_from_folds(folds)
 
-    # Labels
     sids = sorted(subj.keys())
     labels = load_amyloid_labels(
         args.meta_csv, sids, args.session_col, args.centiloid_col, args.centiloid_thr
@@ -250,7 +225,6 @@ def main():
     y = np.array([labels[norm_key(s)] for s in keep], dtype=int)
     print("[LABELS] 0/1:", dict(Counter(y)), flush=True)
 
-    # Manifest
     manifest = pd.DataFrame(
         [{"subject": s, "label": int(labels[norm_key(s)]), **subj[s]} for s in keep]
     ).sort_values("subject")
@@ -258,7 +232,6 @@ def main():
     manifest.to_csv(mpath, index=False)
     print("[WRITE]", mpath, flush=True)
 
-    # Per-modality CV
     rows = []
     for mod in args.modalities:
         print("\n=== Running SVM for", mod, "===", flush=True)
@@ -291,7 +264,6 @@ def main():
     summary.to_csv(spath)
     print("\n[WRITE]", spath, flush=True)
     print(summary.to_string(), flush=True)
-
 
 if __name__ == "__main__":
     main()
