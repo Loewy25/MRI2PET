@@ -89,7 +89,16 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --centiloid_thr 18.4 \
 #  --modalities mri \
 #  --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid
-python new_class.py \
-  --manifest /scratch/l.peiwang/MRI2PET_svm_out_amyloid/dataset_manifest.csv \
-  --modality mri \
-  --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid_from_manifest
+
+
+python Classification.py \
+  --root /home/l.peiwang/MRI2PET \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --session_col TAU_PET_Session \
+  --cdr_col cdr \
+  --outdir /scratch/l.peiwang/MRI2PET_svm_out_cdr
+
+#python new_class.py \
+#  --manifest /scratch/l.peiwang/MRI2PET_svm_out_amyloid/dataset_manifest.csv \
+#  --modality mri \
+#  --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid_from_manifest
