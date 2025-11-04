@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MRI→PET amyloid classification (Centiloid labels) with SVM (precomputed linear kernel).
+Build dataset_manifest.csv with CDR labels (0, 0.5, 1), no classification.
 
-- Expects five fold dirs under --root named: ab_MGDA_UB_v33_500_1..5
-- Each subject in volumes/<SUBJECT>/ has: MRI.nii.gz, PET_gt.nii.gz, PET_fake.nii.gz
-- Labels: (Centiloid >= --centiloid_thr) → 1 else 0
-- NO harmonization, NO masking: uses ALL voxels (flattened).
-- Nested CV (outer evaluation, inner grid over C) with precomputed linear kernel
-- Outputs:
-    - svm_results/dataset_manifest.csv
-    - svm_results/predictions_<modality>.csv
-    - svm_results/metrics_summary.csv
+- Expects five fold dirs under --root:
+    ab_MGDA_UB_v33_500_1 .. ab_MGDA_UB_v33_500_5
+- Each subject folder: volumes/<SUBJECT>/{MRI.nii.gz, PET_gt.nii.gz, PET_fake.nii.gz}
+- Labels are pulled from --meta_csv using --session_col to match SUBJECT and --cdr_col for CDR.
+  If multiple rows per subject, we take the MAX CDR (0 < 0.5 < 1).
+- Writes:  <outdir>/dataset_manifest.csv  with columns:
+    subject,label,mri,pet_gt,pet_fake
 """
 
-import os
-import glob
-import argparse
-import warnings
-from collections import Counter
-
+import os, glob, argparse, warnings
 import numpy as np
 import pandas as pd
-import nibabel as nib
-
-from sklearn.svm import SVC
-from sklearn.model_selection import StratifiedKFold, GridSearchCV
-from sklearn.metrics import (
-    roc_auc_score, confusion_matrix, accuracy_score, precision_score,
-    recall_score, f1_score, balanced_accuracy_score, precision_recall_curve,
-    auc as sk_auc
-)
+from collections import Counter
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -38,10 +23,6 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 def norm_key(x: str) -> str:
     return str(x).strip().lower()
-
-def compute_auprc(y_true, y_prob):
-    p, r, _ = precision_recall_curve(y_true, y_prob)
-    return sk_auc(r, p)
 
 def strict_fold_dirs(root: str, base_name: str, fold_ids):
     dirs = []
@@ -53,6 +34,7 @@ def strict_fold_dirs(root: str, base_name: str, fold_ids):
     return dirs
 
 def collect_subjects_from_folds(fold_dirs):
+    """Return {subject_id: {'mri':..., 'pet_gt':..., 'pet_fake':...}}"""
     subjects = {}
     dups = []
     for fd in fold_dirs:
@@ -76,215 +58,94 @@ def collect_subjects_from_folds(fold_dirs):
     print(f"[DISCOVER] total unique subjects: {len(subjects)}")
     return subjects
 
-def load_amyloid_labels(meta_csv, subject_ids, session_col, centiloid_col, thr):
+def load_cdr_labels(meta_csv, subject_ids, session_col, cdr_col):
+    """
+    Build {subject_key -> CDR} using MAX CDR per subject key.
+    - session_col must match the folder SUBJECT names (case/space-insensitive).
+    - cdr_col expected values in {0, 0.5, 1} (coerced to numeric).
+    - Drop NaN CDR rows. Subjects without valid CDR are excluded by caller.
+    """
     df = pd.read_csv(meta_csv, encoding="utf-8-sig")
     cols = {c.strip().lower(): c for c in df.columns}
-    if session_col.strip().lower() not in cols or centiloid_col.strip().lower() not in cols:
-        raise KeyError(f"Missing columns: {session_col}, {centiloid_col}")
-    sess, cl = cols[session_col.strip().lower()], cols[centiloid_col.strip().lower()]
-    df[cl] = pd.to_numeric(df[cl], errors="coerce")
+    if session_col.strip().lower() not in cols or cdr_col.strip().lower() not in cols:
+        raise KeyError(f"Missing columns in meta CSV: {session_col}, {cdr_col}")
+    sess, cdr = cols[session_col.strip().lower()], cols[cdr_col.strip().lower()]
+
+    df[cdr] = pd.to_numeric(df[cdr], errors="coerce")
     df["__key__"] = df[sess].astype(str).map(norm_key)
+
     keys = {norm_key(s) for s in subject_ids}
-    matched = df[df["__key__"].isin(keys)]
+    matched = df[df["__key__"].isin(keys)].copy()
     if matched.empty:
         raise ValueError("No subjects matched folder names vs SESSION_COL.")
-    per_key_max = matched.groupby("__key__")[cl].max()
-    labels = (per_key_max >= thr).astype(int)
+
+    n_nan = matched[cdr].isna().sum()
+    if n_nan > 0:
+        print(f"[WARN] dropping {n_nan}/{len(matched)} matched rows with NaN {cdr_col}")
+        matched = matched.dropna(subset=[cdr])
+
+    if matched.empty:
+        raise ValueError("No matched rows with valid CDR after dropping NaNs.")
+
+    # Take MAX CDR per subject key (0 < 0.5 < 1)
+    per_key_max = matched.groupby("__key__")[cdr].max()
+
+    # Sanity: restrict to {0, 0.5, 1} if values are slightly off due to float
+    def snap(v):
+        if np.isclose(v, 0.0): return 0.0
+        if np.isclose(v, 0.5): return 0.5
+        if np.isclose(v, 1.0): return 1.0
+        return float(v)  # keep as-is if other valid values exist
+    labels = per_key_max.map(snap)
     return dict(labels)
-
-# ---------- I/O (no masking, no harmonization) ----------
-
-def _load_squeezed_arr(path):
-    """Load as array; if 4D with last dim==1, squeeze to 3D. Return (arr, shape3d)."""
-    img = nib.load(path)
-    arr = np.asarray(img.dataobj)
-    if arr.ndim == 4 and arr.shape[-1] == 1:
-        arr = arr[..., 0]
-    if arr.ndim != 3:
-        raise ValueError(f"Expected 3D or 4D(last=1). Got {arr.shape} for {path}")
-    return arr, arr.shape
-
-def _assert_same_shape(paths, label=""):
-    ref_shape = None
-    for p in paths:
-        _, shp = _load_squeezed_arr(p)
-        if ref_shape is None:
-            ref_shape = shp
-        elif shp != ref_shape:
-            raise ValueError(f"[ALIGN-ERROR] {label}: {p} shape {shp} vs {ref_shape}")
-    print(f"[ALIGN] {label}: all shapes identical {ref_shape}")
-    return ref_shape
-
-def extract_features_flat(paths, ref_shape, label=""):
-    X = []
-    for p in paths:
-        arr, shp = _load_squeezed_arr(p)
-        if shp != ref_shape:
-            raise ValueError(f"[ALIGN-ERROR] {label}: {p} shape {shp} vs {ref_shape}")
-        vec = arr.reshape(-1).astype(np.float32)
-        X.append(vec)
-    X = np.vstack(X)
-    return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-
-def fit_minmax_on_controls(X_train, y_train):
-    ctrl = X_train[y_train == 0]
-    if ctrl.shape[0] == 0:
-        raise ValueError("No controls in this training split.")
-    mins, maxs = ctrl.min(0), ctrl.max(0)
-    scale = maxs - mins
-    scale[scale == 0] = 1.0
-    def apply(X): return np.nan_to_num((X - mins)/scale, nan=0.0)
-    return apply
-
-# ---------- main CV loop ----------
-
-def nested_cv_precomputed_kernel(img_paths, y, subjects, outer_splits, inner_splits, C_grid, seed=10, mod_tag=""):
-    skf_outer = StratifiedKFold(n_splits=outer_splits, shuffle=True, random_state=seed)
-    yT, yP, yH, subjT = [], [], [], []
-    for k, (tr, te) in enumerate(skf_outer.split(img_paths, y), 1):
-        trp, tep = [img_paths[i] for i in tr], [img_paths[i] for i in te]
-        ytr, yte = y[tr], y[te]
-        fold_tag = f"{mod_tag}/fold{k}"
-
-        # same-shape enforcement
-        ref_shape = _assert_same_shape(trp, label=f"{fold_tag}/train")
-
-        # Features = flatten full volume
-        Xtr = extract_features_flat(trp, ref_shape=ref_shape, label=f"{fold_tag}/train")
-        Xte = extract_features_flat(tep, ref_shape=ref_shape, label=f"{fold_tag}/test")
-
-        # Control-only scaling
-        apply = fit_minmax_on_controls(Xtr, ytr)
-        Xtr, Xte = apply(Xtr), apply(Xte)
-
-        # Precomputed linear kernels
-        Ktr, Kte = Xtr @ Xtr.T, Xte @ Xtr.T
-
-        # Inner CV grid search
-        gs = GridSearchCV(
-            SVC(kernel="precomputed", class_weight="balanced", probability=True),
-            {"C": list(C_grid)}, scoring="roc_auc",
-            cv=StratifiedKFold(n_splits=inner_splits, shuffle=True, random_state=1),
-            refit=True, n_jobs=-1
-        )
-        gs.fit(Ktr, ytr)
-        best = gs.best_estimator_
-
-        prob = best.predict_proba(Kte)[:, 1]
-        pred = (prob >= 0.5).astype(int)
-        print(f"[{fold_tag}] C={gs.best_params_['C']} AUC={roc_auc_score(yte, prob):.4f} "
-              f"n_train={len(tr)} n_test={len(te)}")
-
-        yT.extend(yte.tolist())
-        yP.extend(prob.tolist())
-        yH.extend(pred.tolist())
-        subjT.extend([subjects[i] for i in te])
-
-    yT = np.array(yT); yP = np.array(yP); yH = np.array(yH)
-    tn, fp, fn, tp = confusion_matrix(yT, yH).ravel()
-    metrics = dict(
-        AUC=roc_auc_score(yT, yP),
-        AUPRC=compute_auprc(yT, yP),
-        Accuracy=accuracy_score(yT, yH),
-        BalancedAccuracy=balanced_accuracy_score(yT, yH),
-        F1=f1_score(yT, yH),
-        Sensitivity=recall_score(yT, yH),
-        Specificity=tn/(tn+fp) if (tn+fp)>0 else np.nan,
-        PPV=precision_score(yT, yH, zero_division=1),
-        NPV=tn/(tn+fn) if (tn+fn)>0 else np.nan
-    )
-    preds = pd.DataFrame({"subject": subjT, "y_true": yT, "y_prob": yP, "y_pred": yH})
-    return metrics, preds
 
 # ---------- main ----------
 
 def main():
-    import sys
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
-
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True)
-    ap.add_argument("--meta_csv", required=True)
-    ap.add_argument("--session_col", default="TAU_PET_Session")
-    ap.add_argument("--centiloid_col", default="Centiloid")
-    ap.add_argument("--centiloid_thr", type=float, default=18.4)
-    ap.add_argument("--modalities", nargs="+", default=["pet_gt", "pet_fake", "mri"])
-    ap.add_argument("--outer", type=int, default=5)
-    ap.add_argument("--inner", type=int, default=3)
-    ap.add_argument("--c_grid", nargs="+", type=float, default=[1, 10, 100, 0.1, 0.01, 0.001])
-    ap.add_argument("--outdir", default="./svm_results")
+    ap.add_argument("--root", required=True, help="Root containing ab_MGDA_UB_v33_500_1..5")
+    ap.add_argument("--meta_csv", required=True, help="CSV with session + CDR columns")
+    ap.add_argument("--session_col", default="TAU_PET_Session", help="Column matching SUBJECT folder names")
+    ap.add_argument("--cdr_col", default="cdr", help="CDR column (values 0/0.5/1)")
+    ap.add_argument("--outdir", default="./svm_results", help="Where to write dataset_manifest.csv")
     args = ap.parse_args()
 
     print("[ARGS]", vars(args), flush=True)
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Folds & subjects
+    # 1) discover subjects
     folds = strict_fold_dirs(args.root, "ab_MGDA_UB_v33_500_", [1, 2, 3, 4, 5])
     for f in folds:
         print("FOLD:", f, flush=True)
     subj = collect_subjects_from_folds(folds)
 
-    # Labels
+    # 2) build labels from CDR
     sids = sorted(subj.keys())
-    labels = load_amyloid_labels(
-        args.meta_csv, sids, args.session_col, args.centiloid_col, args.centiloid_thr
-    )
+    labels = load_cdr_labels(args.meta_csv, sids, args.session_col, args.cdr_col)
+
     keep = [s for s in sids if norm_key(s) in labels]
     drop = [s for s in sids if norm_key(s) not in labels]
     if drop:
-        print(f"[WARN] unlabeled excluded: {len(drop)} e.g. {drop[:6]}", flush=True)
+        print(f"[WARN] subjects excluded (missing CDR): {len(drop)} e.g. {drop[:6]}", flush=True)
     if not keep:
         raise RuntimeError("No labeled subjects after join.")
-    y = np.array([labels[norm_key(s)] for s in keep], dtype=int)
-    print("[LABELS] 0/1:", dict(Counter(y)), flush=True)
 
-    # Manifest for reproducibility
+    y_vals = [labels[norm_key(s)] for s in keep]
+    counts = Counter(y_vals)
+    print("[LABELS] CDR counts:", dict(counts), flush=True)
+
+    # 3) write manifest (NO classification)
     manifest = pd.DataFrame(
-        [{"subject": s, "label": int(labels[norm_key(s)]), **subj[s]} for s in keep]
+        [{"subject": s, "label": labels[norm_key(s)], **subj[s]} for s in keep]
     ).sort_values("subject")
     mpath = os.path.join(args.outdir, "dataset_manifest.csv")
     manifest.to_csv(mpath, index=False)
     print("[WRITE]", mpath, flush=True)
-
-    # Per-modality CV
-    rows = []
-    for mod in args.modalities:
-        print("\n=== Running SVM for", mod, "===", flush=True)
-        paths = [subj[s][mod] for s in keep]
-
-        metrics, preds = nested_cv_precomputed_kernel(
-            img_paths=paths,
-            y=y,
-            subjects=keep,
-            outer_splits=args.outer,
-            inner_splits=args.inner,
-            C_grid=tuple(args.c_grid),
-            seed=10,
-            mod_tag=mod,
-        )
-
-        ppath = os.path.join(args.outdir, f"predictions_{mod}.csv")
-        preds.to_csv(ppath, index=False)
-        print("[WRITE]", ppath, flush=True)
-
-        print(
-            f"[{mod}] AUC={metrics['AUC']:.4f}  AUPRC={metrics['AUPRC']:.4f}  "
-            f"Acc={metrics['Accuracy']:.4f}  BalAcc={metrics['BalancedAccuracy']:.4f}",
-            flush=True,
-        )
-        rows.append({"modality": mod, **{k: float(v) for k, v in metrics.items()}})
-
-    summary = pd.DataFrame(rows).set_index("modality")
-    spath = os.path.join(args.outdir, "metrics_summary.csv")
-    summary.to_csv(spath)
-    print("\n[WRITE]", spath, flush=True)
-    print(summary.to_string(), flush=True)
+    print(manifest.head(5).to_string(index=False))
 
 if __name__ == "__main__":
     main()
+
 
 
 
