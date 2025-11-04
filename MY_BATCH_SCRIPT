@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=CGAN_grc_mri
+#SBATCH --job-name=CGAN_grc_fake
 #SBATCH --mem=50G
 #SBATCH -t 23:50:00
 ##SBATCH --gres=gpu:tesla_a100:1
@@ -87,5 +87,5 @@ python Classification.py \
   --session_col TAU_PET_Session \
   --centiloid_col Centiloid \
   --centiloid_thr 18.4 \
-  --modalities mri \
+  --modalities pet_fake \
   --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid
