@@ -169,7 +169,7 @@ def main():
     ap.add_argument("--outdir", default="./svm_results_manifest")
     ap.add_argument("--outer", type=int, default=5)
     ap.add_argument("--inner", type=int, default=3)
-    ap.add_argument("--c_grid", nargs="+", type=float, default=[1, 10, 100, 0.1, 0.01, 0.001])
+    ap.add_argument("--c_grid", nargs="+", type=float, default=[1, 10, 0.1, 0.01])
     ap.add_argument("--seed", type=int, default=10)
     args = ap.parse_args()
 
