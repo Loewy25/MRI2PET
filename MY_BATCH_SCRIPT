@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=CGAN_grc_fake
-#SBATCH --mem=50G
+#SBATCH --mem=80G
 #SBATCH -t 23:50:00
 ##SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_cpu
