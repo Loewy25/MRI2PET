@@ -91,13 +91,28 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid
 
 
-python Classification_csv.py \
-  --fake_base /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500 \
-  --folds 1 2 3 4 5 \
-  --orig_root /scratch/l.peiwang/kari_brainv33_top300 \
-  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session_col TAU_PET_Session \
-  --out_csv /scratch/l.peiwang/MRI2PET_classification_out_cdr/amy_dataset_manifest.csv
+#python Classification_csv.py \
+#  --fake_base /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500 \
+#  --folds 1 2 3 4 5 \
+#  --orig_root /scratch/l.peiwang/kari_brainv33_top300 \
+#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --session_col TAU_PET_Session \
+#  --out_csv /scratch/l.peiwang/MRI2PET_classification_out_cdr/amy_dataset_manifest.csv
+
+
+python eval_subjects_split_pooled.py \
+  --roi-root /scratch/l.peiwang/kari_brainv11 \
+  --vols-roots \
+    /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_1/volumes \
+    /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_2/volumes \
+    /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_3/volumes \
+    /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_4/volumes \
+    /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_5/volumes \
+  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --session-col TAU_PET_Session \
+  --split-by centiloid \
+  --thr 18.4 \
+  --out /scratch/l.peiwang/ab_MGDA_UB_v33_500_amyloid
 
 
 #python new_class.py \
