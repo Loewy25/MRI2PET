@@ -101,7 +101,7 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 
 python ROI_eval_cv_split.py \
-  --roi-root /scratch/l.peiwang/kari_brainv11 \
+  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
   --vols-roots \
     /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_1/volumes \
     /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500_2/volumes \
