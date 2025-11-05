@@ -110,9 +110,9 @@ python ROI_eval_cv_split.py \
     /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_5/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
-  --split-by mtl \
-  --thr 1.28 \
-  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_mtl
+  --split-by cdr \
+  --thr 0\
+  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_cdr
 
 
 #python ROI_eval_cv_split.py \
