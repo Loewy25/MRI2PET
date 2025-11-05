@@ -19,8 +19,8 @@ ROI_FILES = {
     "Precuneus":          "ROI_Precuneus.nii.gz",
     "TemporalLobe":       "ROI_TemporalLobe.nii.gz",
     "LimbicCortex":       "ROI_LimbicCortex.nii.gz",
-    "WholeBrain"       -> aseg_brainmask.nii.gz
-    "WholeBrain_noBG"  -> mask_parenchyma_noBG.nii.gz
+    "WholeBrain" :        "aseg_brainmask.nii.gz",
+    "WholeBrain_noBG" :   "mask_parenchyma_noBG.nii.gz"
 }
 LABEL_COLS = ["Centiloid","MTL","NEO","Braak1_2","Braak3_4","Braak5_6","cdr"]
 
