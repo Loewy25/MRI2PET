@@ -91,7 +91,7 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --outdir /scratch/l.peiwang/MRI2PET_svm_out_amyloid
 
 
-python Classification.py \
+python Classification_csv.py \
   --fake_base /home/l.peiwang/MRI2PET/ab_MGDA_UB_v33_500 \
   --folds 1 2 3 4 5 \
   --orig_root /scratch/l.peiwang/kari_brainv33_top300 \
