@@ -13,14 +13,13 @@ import torch.nn.functional as F
 ATOL_AFFINE = 1e-4
 PRINT_EVERY = 1
 
+# Only the 5 anatomical ROIs here (same as your old logic).
 ROI_FILES = {
     "Hippocampus":        "ROI_Hippocampus.nii.gz",
     "PosteriorCingulate": "ROI_PosteriorCingulate.nii.gz",
     "Precuneus":          "ROI_Precuneus.nii.gz",
     "TemporalLobe":       "ROI_TemporalLobe.nii.gz",
     "LimbicCortex":       "ROI_LimbicCortex.nii.gz",
-    "WholeBrain" :        "aseg_brainmask.nii.gz",
-    "WholeBrain_noBG" :   "mask_parenchyma_noBG.nii.gz"
 }
 LABEL_COLS = ["Centiloid","MTL","NEO","Braak1_2","Braak3_4","Braak5_6","cdr"]
 
@@ -40,8 +39,8 @@ def ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
     pad = ksize // 2
     k = torch.ones((1, 1, ksize, ksize, ksize), device=x.device, dtype=x.dtype)
     def wavg(z):
-        z_sum = F.conv3d(z * mask, k, padding=pad)
-        m_sum = F.conv3d(mask,    k, padding=pad).clamp_min(eps)
+        z_sum = torch.nn.functional.conv3d(z * mask, k, padding=pad)
+        m_sum = torch.nn.functional.conv3d(mask,    k, padding=pad).clamp_min(eps)
         return z_sum / m_sum
     mu_x = wavg(x); mu_y = wavg(y)
     mu_x2 = mu_x * mu_x; mu_y2 = mu_y * mu_y; mu_xy = mu_x * mu_y
@@ -53,7 +52,7 @@ def ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
     num = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
     den = (mu_x2 + mu_y2 + C1) * (sigma_x + sigma_y + C2)
     ssim_map = num / (den + eps)
-    win_hits = (F.conv3d(mask, k, padding=pad) > 0).to(x.dtype)
+    win_hits = (torch.nn.functional.conv3d(mask, k, padding=pad) > 0).to(x.dtype)
     return (ssim_map * win_hits).sum() / win_hits.sum().clamp_min(eps)
 
 @torch.no_grad()
@@ -155,8 +154,8 @@ def summarize_with_ci_subject_level(long_rows: List[Dict[str, str]]) -> List[Dic
 # ------------------ Subject discovery -----------------
 def gather_subjects_from_vols(vols_roots: List[str]) -> Dict[str, str]:
     """
-    Return {subject -> vols_root_that_contains_it}. First hit wins; de-dups subjects across roots.
-    Expects each vols_root to have: <vols_root>/<SUBJECT>/{PET_fake.nii.gz,PET_gt.nii.gz}
+    Return {subject -> vols_root_that_contains_it}. First hit wins; de-dups across roots.
+    Requires: <vols_root>/<SUBJECT>/{PET_fake.nii.gz,PET_gt.nii.gz}
     """
     mapping = {}
     for vr in vols_roots:
@@ -165,9 +164,11 @@ def gather_subjects_from_vols(vols_roots: List[str]) -> Dict[str, str]:
             print(f"[WARN] missing vols_root: {vr}")
             continue
         for subj_dir in sorted(glob.glob(os.path.join(vr, "*"))):
-            if not os.path.isdir(subj_dir): continue
+            if not os.path.isdir(subj_dir): 
+                continue
             sid = os.path.basename(subj_dir)
-            if sid in mapping: continue
+            if sid in mapping: 
+                continue
             fake_p = os.path.join(subj_dir, "PET_fake.nii.gz")
             gt_p   = os.path.join(subj_dir, "PET_gt.nii.gz")
             if os.path.exists(fake_p) and os.path.exists(gt_p):
@@ -175,10 +176,32 @@ def gather_subjects_from_vols(vols_roots: List[str]) -> Dict[str, str]:
     print(f"[DISCOVER] subjects with both PET_gt/fake: {len(mapping)}")
     return mapping
 
-def intersect_with_roi(subject_map: Dict[str,str], roi_root: str) -> Dict[str,str]:
-    roi_subjects = {d for d in os.listdir(roi_root) if os.path.isdir(os.path.join(roi_root, d))}
-    kept = {s:root for s,root in subject_map.items() if s in roi_subjects}
-    print(f"[FILTER] subjects having ROI masks too: {len(kept)} (dropped {len(subject_map) - len(kept)})")
+def build_roi_index_case_insensitive(roi_root: str) -> Dict[str, str]:
+    """Return {norm_name -> actual_dir_name} for ROI root."""
+    idx = {}
+    for d in os.listdir(roi_root):
+        p = os.path.join(roi_root, d)
+        if os.path.isdir(p):
+            idx[norm_key(d)] = d
+    return idx
+
+def attach_roi_dirs(subject_to_volroot: Dict[str, str], roi_root: str) -> Dict[str, Tuple[str, str]]:
+    """
+    Return {subject_id -> (vols_root, roi_dirname)} using case-insensitive match.
+    """
+    roi_idx = build_roi_index_case_insensitive(roi_root)
+    kept: Dict[str, Tuple[str,str]] = {}
+    missed = []
+    for sid, vr in subject_to_volroot.items():
+        key = norm_key(sid)
+        if key in roi_idx:
+            kept[sid] = (vr, roi_idx[key])
+        else:
+            missed.append(sid)
+    print(f"[FILTER] subjects having ROI masks (case-insensitive): {len(kept)} (dropped {len(missed)})")
+    if missed:
+        print(f"[HINT] Example missing (first 10): {missed[:10]}")
+        print("[HINT] Check ROI root and subject-name casing (e.g., '_V1' vs '_v1').")
     return kept
 
 # ------------- Per-subject ROI evaluation -------------
@@ -193,15 +216,17 @@ def _compute_one_mask(x_fake, x_gt, mask_np, device, data_range, mmd_voxels):
     mmd_v  = float(mmd_gaussian(x_gt, x_fake, num_voxels=mmd_voxels, mask=roi_t))
     return ssim_v, psnr_v, mse_v, mmd_v, int(roi_bin.sum())
 
-def compute_subject_roi_metrics(subj: str,
+def compute_subject_roi_metrics(subj_for_paths: str,  # the directory name under roi_root
+                                emit_subject_id: str, # the ID we write to CSV (original subject)
                                 vols_root: str,
                                 roi_root: str,
                                 device: torch.device,
                                 data_range: float,
                                 mmd_voxels: int,
                                 strict_affine: bool) -> List[Dict[str, str]]:
-    subj_vol = os.path.join(vols_root, subj)
-    subj_roi = os.path.join(roi_root,  subj)
+    subj_vol = os.path.join(vols_root, emit_subject_id)
+    subj_roi = os.path.join(roi_root,  subj_for_paths)
+
     fake_p = os.path.join(subj_vol, "PET_fake.nii.gz")
     gt_p   = os.path.join(subj_vol, "PET_gt.nii.gz")
     if not (os.path.exists(fake_p) and os.path.exists(gt_p)):
@@ -230,11 +255,11 @@ def compute_subject_roi_metrics(subj: str,
         if strict_affine and not affines_close(roi_img, fake_img):
             continue
         out = _compute_one_mask(x_fake, x_gt, roi_np, device, data_range, mmd_voxels)
-        if out is None: 
+        if out is None:
             continue
         ssim_v, psnr_v, mse_v, mmd_v, vox = out
         rows.append({
-            "subject": subj,
+            "subject": emit_subject_id,
             "roi": roi_name,
             "voxels": str(vox),
             "SSIM": f"{ssim_v:.6f}",
@@ -252,14 +277,14 @@ def compute_subject_roi_metrics(subj: str,
             if out is not None:
                 ssim_v, psnr_v, mse_v, mmd_v, vox = out
                 rows.append({
-                    "subject": subj, "roi": "WholeBrain", "voxels": str(vox),
+                    "subject": emit_subject_id, "roi": "WholeBrain", "voxels": str(vox),
                     "SSIM": f"{ssim_v:.6f}",
                     "PSNR": f"{psnr_v:.6f}" if math.isfinite(psnr_v) else "inf",
                     "MSE":  f"{mse_v:.8f}",
                     "MMD":  f"{mmd_v:.8f}",
                 })
 
-    # WholeBrain_noBG if present
+    # WholeBrain_noBG (parenchyma) if present
     nbg_path = os.path.join(subj_roi, "mask_parenchyma_noBG.nii.gz")
     if os.path.exists(nbg_path):
         nbg_img, nbg_np = load_nii(nbg_path)
@@ -268,7 +293,7 @@ def compute_subject_roi_metrics(subj: str,
             if out is not None:
                 ssim_v, psnr_v, mse_v, mmd_v, vox = out
                 rows.append({
-                    "subject": subj, "roi": "WholeBrain_noBG", "voxels": str(vox),
+                    "subject": emit_subject_id, "roi": "WholeBrain_noBG", "voxels": str(vox),
                     "SSIM": f"{ssim_v:.6f}",
                     "PSNR": f"{psnr_v:.6f}" if math.isfinite(psnr_v) else "inf",
                     "MSE":  f"{mse_v:.8f}",
@@ -301,30 +326,32 @@ def build_groups(subjects: List[str],
     groups: Dict[str,set] = {}
     if split_by in ("centiloid","mtl","neo","cdr"):
         if thr is None:
-            thr = 0.0 if split_by == "cdr" else 18.4 if split_by == "centiloid" else 1.2
+            thr = 0.0 if split_by == "cdr" else (18.4 if split_by == "centiloid" else 1.2)
         col = {"centiloid":"Centiloid","mtl":"MTL","neo":"NEO","cdr":"cdr"}[split_by]
         pos, neg = set(), set()
         for s in subjects:
-            lab = meta_map.get(s.strip().lower(), {})
+            lab = meta_map.get(norm_key(s), {})
             v = lab.get(col, np.nan)
-            if np.isnan(v): continue
+            if np.isnan(v): 
+                continue
             (pos if v >= thr else neg).add(s)
         groups[f"{split_by}_pos>= {thr}"] = pos
         groups[f"{split_by}_neg< {thr}"]  = neg
     elif split_by == "braak":
         s0, s1, s2, s3 = set(), set(), set(), set()
         for s in subjects:
-            lab = meta_map.get(s.strip().lower(), {})
+            lab = meta_map.get(norm_key(s), {})
             b12 = lab.get("Braak1_2", np.nan)
             b34 = lab.get("Braak3_4", np.nan)
             b56 = lab.get("Braak5_6", np.nan)
-            if any(np.isnan([b12, b34, b56])): continue
+            if any(np.isnan([b12, b34, b56])): 
+                continue
             stage = 0
             if b12 >= thr_braak: stage = max(stage, 1)
             if b34 >= thr_braak: stage = max(stage, 2)
             if b56 >= thr_braak: stage = max(stage, 3)
             (s0, s1, s2, s3)[stage].add(s)
-        groups[f"braak_stage0<{thr_braak}"] = s0
+        groups[f"braak_stage0<{thr_braak}"]  = s0
         groups[f"braak_stage1>={thr_braak}"] = s1
         groups[f"braak_stage2>={thr_braak}"] = s2
         groups[f"braak_stage3>={thr_braak}"] = s3
@@ -365,23 +392,28 @@ def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    # Discover subjects across vols roots and intersect with ROI root
-    subj_map = gather_subjects_from_vols(args.vols_roots)
-    subj_map = intersect_with_roi(subj_map, args.roi_root)
-    subjects = sorted(subj_map.keys())
-    if args.limit: subjects = subjects[:args.limit]
-    print(f"[INFO] Evaluating {len(subjects)} subjects (pooled across provided volumes roots).")
+    # Discover subjects across volumes roots
+    subj_to_volroot = gather_subjects_from_vols(args.vols_roots)
+
+    # Attach the ROI directory names in a case-insensitive way
+    subj_index = attach_roi_dirs(subj_to_volroot, args.roi_root)
+    subjects = sorted(subj_index.keys())
+    if args.limit:
+        subjects = subjects[:args.limit]
+    print(f"[INFO] Evaluating {len(subjects)} subjects (pooled).")
 
     # Compute per-subject ROI metrics
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Device: {device}")
     long_rows: List[Dict[str,str]] = []
-    for i, s in enumerate(subjects, 1):
+    for i, sid in enumerate(subjects, 1):
+        vols_root, roi_dirname = subj_index[sid]
         if (i % PRINT_EVERY) == 0:
-            print(f"[DBG] {i}/{len(subjects)} {s}")
+            print(f"[DBG] {i}/{len(subjects)} {sid}  roi_dir='{roi_dirname}'")
         rows = compute_subject_roi_metrics(
-            subj=s,
-            vols_root=subj_map[s],
+            subj_for_paths=roi_dirname,
+            emit_subject_id=sid,
+            vols_root=vols_root,
             roi_root=args.roi_root,
             device=device,
             data_range=args.data_range,
@@ -390,7 +422,7 @@ def main():
         )
         long_rows.extend(rows)
 
-    # Write combined long CSV
+    # Write pooled long CSV
     long_all_csv = os.path.join(args.out, "roi_metrics_long_all.csv")
     write_csv(long_all_csv, long_rows, header=["subject","roi","voxels","SSIM","PSNR","MSE","MMD"])
     print(f"[WRITE] {long_all_csv}")
@@ -399,21 +431,19 @@ def main():
         print("[WARN] No rows computed; exiting.")
         return
 
-    # Load meta and build groups
+    # Load meta and split into groups
     meta = load_meta(args.meta_csv, args.session_col)
     groups = build_groups(subjects, meta, args.split_by, args.thr, args.thr_braak)
 
-    # For each group: filter, summarize, write CSVs
+    # Per-group CSVs + subject-level CI summary
     for gname, gset in groups.items():
         rows_g = [r for r in long_rows if r["subject"] in gset]
         if not rows_g:
             print(f"[INFO] Group '{gname}' has 0 rows; skipping.")
             continue
-        # long
         long_g_csv = os.path.join(args.out, f"roi_metrics_long_{gname}.csv")
         write_csv(long_g_csv, rows_g, header=["subject","roi","voxels","SSIM","PSNR","MSE","MMD"])
         print(f"[WRITE] {long_g_csv}")
-        # subject-level CI summary
         summ = summarize_with_ci_subject_level(rows_g)
         summ_csv = os.path.join(args.out, f"roi_metrics_summary_subject_ci_{gname}.csv")
         write_csv(summ_csv, summ,
@@ -426,3 +456,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
