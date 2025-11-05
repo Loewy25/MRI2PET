@@ -100,21 +100,6 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --out_csv /scratch/l.peiwang/MRI2PET_classification_out_cdr/amy_dataset_manifest.csv
 
 
-python ROI_eval_cv_split.py \
-  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-  --vols-roots \
-    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_1_1/volumes \
-    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_2/volumes \
-    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_3/volumes \
-    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_4/volumes \
-    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_5/volumes \
-  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session-col TAU_PET_Session \
-  --split-by centiloid \
-  --thr 18.4\
-  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_amyloid
-
-
 #python ROI_eval_cv_split.py \
 #  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
 #  --vols-roots \
@@ -125,9 +110,24 @@ python ROI_eval_cv_split.py \
 #    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_5/volumes \
 #  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
 #  --session-col TAU_PET_Session \
-#  --split-by braak \
-#  --thr-braak 1.2 \
-#  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_braak
+#  --split-by centiloid \
+#  --thr 18.4\
+#  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_amyloid
+
+
+python ROI_eval_cv_split.py \
+  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+  --vols-roots \
+    /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_1/volumes \
+    /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_2/volumes \
+    /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_3/volumes \
+    /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_4/volumes \
+    /home/l.peiwang/MRI2PET/MGDA_UB_v33_500_5/volumes \
+  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --session-col TAU_PET_Session \
+  --split-by braak \
+  --thr-braak 1.2 \
+  --out /scratch/l.peiwang/braak_MGDA_UB_v33_500_braak
 
 
 #python new_class.py \
