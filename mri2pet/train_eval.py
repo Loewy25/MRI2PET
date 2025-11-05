@@ -279,66 +279,6 @@ def evaluate_paggan(
         "MMD":  mmd_sum  / max(1, n),
     }
 
-@torch.no_grad()
-def save_test_volumes(
-    G: nn.Module,
-    test_loader: Iterable,
-    device: torch.device,
-    out_dir: str,
-    resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
-):
-    import numpy as np
-    print(f"Saving test volumes to: {out_dir}  (resample_back_to_t1={resample_back_to_t1})")
-    os.makedirs(out_dir, exist_ok=True)
-    G.to(device)
-    G.eval()
-
-    for i, batch in enumerate(test_loader):
-        if isinstance(batch, (list, tuple)) and len(batch) == 3:
-            mri, pet, meta = batch
-        else:
-            mri, pet = batch
-            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4), "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
-        meta = _meta_unbatch(meta)
-
-        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
-        subdir = os.path.join(out_dir, sid)
-        os.makedirs(subdir, exist_ok=True)
-
-        mri_t  = mri.to(device, non_blocking=True)
-        fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
-
-        mri_np  = (mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
-        pet_np  = (pet   if pet.dim()==5   else pet.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
-        fake_np = fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
-        err_np  = np.abs(fake_np - pet_np)
-
-        cur_shape  = tuple(mri_np.shape)
-        orig_shape = tuple(meta.get("orig_shape", cur_shape))
-
-        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
-            zf = (float(orig_shape[0]) / float(cur_shape[0]),
-                  float(orig_shape[1]) / float(cur_shape[1]),
-                  float(orig_shape[2]) / float(cur_shape[2]))
-            mri_np  = nd_zoom(mri_np,  zf, order=1)
-            pet_np  = nd_zoom(pet_np,  zf, order=1)
-            fake_np = nd_zoom(fake_np, zf, order=1)
-            err_np  = nd_zoom(err_np,  zf, order=1)
-            affine_to_use = meta.get("t1_affine", np.eye(4))
-        else:
-            resized_to = meta.get("resized_to", None)
-            if resized_to is None:
-                affine_to_use = meta.get("t1_affine", np.eye(4))
-            else:
-                affine_to_use = np.eye(4)
-
-        _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
-        _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
-        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
-        _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
-
-        print(f"  saved {sid}: MRI/PET_gt/PET_fake/PET_abs_error")
-
 
 @torch.no_grad()
 def evaluate_and_save(
