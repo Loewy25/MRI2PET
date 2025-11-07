@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=mri
-#SBATCH --mem=10G
+#SBATCH --mem=40G
 #SBATCH -t 23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
-##SBATCH --partition=tier1_cpu
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua409
 #SBATCH --output=slurm-%A_haha.out
