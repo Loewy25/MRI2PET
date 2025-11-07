@@ -2,7 +2,7 @@
 #SBATCH --job-name=class_cnn
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-#SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua408
