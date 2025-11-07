@@ -13,8 +13,6 @@
 # Environment setup
 # ------------------------------------------------------------
 module purge
-module load freesurfer
-module load fsl
 module load cuda/12.9
 module load cudnn/9.11.0.98-cuda12
 
