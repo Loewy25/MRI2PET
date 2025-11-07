@@ -29,15 +29,6 @@ conda activate pasta
 # Ensure FSL writes NIfTI_GZ
 export FSLOUTPUTTYPE=NIFTI_GZ
 
-# ------------------------------------------------------------
-# Sanity check
-# ------------------------------------------------------------
-echo "FREESURFER_HOME=$FREESURFER_HOME"
-which mri_vol2vol || { echo "❌ mri_vol2vol not found"; exit 2; }
-mri_vol2vol --version | head -1
-which flirt || { echo "❌ flirt not found"; exit 2; }
-flirt -version | head -1
-python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 # ------------------------------------------------------------
 # Main execution
