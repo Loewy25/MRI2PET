@@ -2,8 +2,8 @@
 #SBATCH --job-name=mri
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-##SBATCH --gres=gpu:tesla_a100:1
-#SBATCH --partition=tier1_cpu
+#SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua409
 #SBATCH --output=slurm-%A_haha.out
@@ -47,6 +47,11 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 
 # Example optional commands (commented)
 # ------------------------------------------------------------
+
+python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/any_dataset_manifest.csv --modality pet_gt --epochs 100
+
+
+
 
 #python ROI_eval.py \
 #   --roi-root /scratch/l.peiwang/kari_brainv33 \
@@ -99,7 +104,7 @@ python -c "import nibabel,sys; print('nibabel version:', nibabel.__version__)"
 #  --session_col TAU_PET_Session \
 #  --out_csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv
 
-python dataset_merge.py
+#python dataset_merge.py
 
 #python ROI_eval_cv_split.py \
 #  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
