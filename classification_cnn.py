@@ -91,13 +91,18 @@ def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=1):
 
     best, best_state, bad, patience = np.inf, None, 0, 12
     for epoch in range(1, epochs+1):
+        # --------- train ----------
         model.train()
+        tloss, ntr = 0.0, 0
         for vol, y in dl_tr:
             vol, y = vol.to(device), y.to(device)
             opt.zero_grad()
             loss = crit(model(vol), y)
             loss.backward(); opt.step()
-        # val
+            tloss += loss.item() * y.size(0); ntr += y.size(0)
+        train_loss = tloss / max(1, ntr)
+
+        # --------- val ------------
         model.eval()
         vloss, n = 0.0, 0
         with torch.no_grad():
@@ -105,13 +110,27 @@ def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=1):
                 vol, y = vol.to(device), y.to(device)
                 vloss += crit(model(vol), y).item() * y.size(0); n += y.size(0)
         vloss /= max(1, n)
+
+        # --------- scheduler + logs ----------
+        prev_lr = opt.param_groups[0]['lr']
         sched.step(vloss)
+        new_lr = opt.param_groups[0]['lr']
+        lr_msg = f" | lr↓->{new_lr:.6f}" if new_lr < prev_lr - 1e-12 else ""
+
+        improved = False
         if vloss < best - 1e-4:
             best, bad = vloss, 0
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            improved = True
         else:
             bad += 1
-            if bad >= patience: break
+
+        print(f"Epoch {epoch:03d}: train_loss={train_loss:.4f} val_loss={vloss:.4f} "
+              f"best_val={best:.4f} bad={bad}{lr_msg}")
+
+        if bad >= patience:
+            print(f"[EarlyStopping] Stop at epoch {epoch} (patience={patience}).")
+            break
 
     if best_state is not None: model.load_state_dict(best_state)
 
@@ -167,3 +186,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
