@@ -101,7 +101,7 @@ def macro_auc_safe(y_true, proba, n_classes=4):
 # --- one fold ---
 def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=2):
     y_all = df.apply(braak_label, axis=1).astype(int).values
-    tr_sub, val_sub = train_test_split(tr_idx, test_size=0.1, stratify=y_all[tr_idx], random_state=0)
+    tr_sub, val_sub = train_test_split(tr_idx, test_size=0.2, stratify=y_all[tr_idx], random_state=0)
 
     # Datasets (augment only on training subset)
     ds      = VolDataset(df, modality_col, size=size, augment=False)
@@ -197,7 +197,7 @@ def main():
     ap.add_argument("--modality", choices=["mri","pet_gt","pet_fake"], default="pet_gt")
     ap.add_argument("--size", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=70)
-    ap.add_argument("--folds", type=int, default=3)
+    ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--bs", type=int, default=5)  # larger default batch size
     args = ap.parse_args()
 
