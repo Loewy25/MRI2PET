@@ -131,7 +131,7 @@ def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=2):
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=10)
     crit  = nn.CrossEntropyLoss(weight=w)
 
-    best, best_state, bad, patience = np.inf, None, 0, 12
+    best, best_state, bad, patience = np.inf, None, 0, 50
     for epoch in range(1, epochs+1):
         # --------- train ----------
         model.train()
