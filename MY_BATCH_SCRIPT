@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mri
+#SBATCH --job-name=pet_gt
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
@@ -37,7 +37,7 @@ export FSLOUTPUTTYPE=NIFTI_GZ
 # Example optional commands (commented)
 # ------------------------------------------------------------
 
-python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv --modality mri --epochs 200
+python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv --modality pet_gt --epochs 200
 
 
 
