@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, argparse, numpy as np, pandas as pd, nibabel as nib, torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.sampler import WeightedRandomSampler
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score
 
@@ -15,12 +16,37 @@ def braak_label(row, thr=1.2):
     elif row["Braak1_2"] > thr: return 1
     else: return 0
 
+# --- tiny 3D-safe augmentations for training only ---
+def augment_3d(t):
+    # t: torch.Tensor [1,D,H,W] after resize, values ~ z-scored in-mask
+    if torch.rand(1).item() < 0.9:
+        # multiplicative intensity (0.9..1.1)
+        scale = 0.9 + 0.2 * torch.rand(1, device=t.device)
+        t = t * scale
+        # additive bias (-0.05..0.05)
+        bias = (torch.rand(1, device=t.device) - 0.5) * 0.1
+        t = t + bias
+    if torch.rand(1).item() < 0.5:
+        # Gaussian noise, std 0.01..0.05 of current std (fallback to 1.0)
+        base_std = t.std().clamp_min(1.0)
+        nstd = (0.01 + 0.04 * torch.rand(1, device=t.device)) * base_std
+        t = t + torch.randn_like(t) * nstd
+    if torch.rand(1).item() < 0.5:
+        # very small spatial jitter: roll by -2..2 voxels per axis
+        D, H, W = t.shape[-3:]
+        sh = int(torch.randint(-2, 3, (1,)).item())
+        sw = int(torch.randint(-2, 3, (1,)).item())
+        sd = int(torch.randint(-2, 3, (1,)).item())
+        t = torch.roll(t, shifts=(sd, sh, sw), dims=(-3, -2, -1))
+    return t
+
 # --- dataset ---
 class VolDataset(Dataset):
-    def __init__(self, df, modality_col, size=128):
+    def __init__(self, df, modality_col, size=128, augment=False):
         self.paths = df[modality_col].tolist()
         self.y = df.apply(braak_label, axis=1).astype(int).values
         self.size = size
+        self.augment = augment
     def __len__(self): return len(self.paths)
     def __getitem__(self, i):
         a = nib.load(self.paths[i]).get_fdata().astype(np.float32)
@@ -30,19 +56,22 @@ class VolDataset(Dataset):
             a[~m] = 0.0
         t = torch.from_numpy(a)[None,None,...]                 # [1,1,D,H,W]
         t = F.interpolate(t, size=(self.size,)*3, mode="trilinear", align_corners=False)
-        return t[0], int(self.y[i])                            # [1,D,H,W], label
+        t = t[0]                                              # [1,D,H,W]
+        if self.augment:
+            t = augment_3d(t)
+        return t, int(self.y[i])                              # [1,D,H,W], label
 
-# --- model: 6 conv blocks + GAP head ---
+# --- model: 6 conv blocks + GAP head (InstanceNorm3d) ---
 class CNN6(nn.Module):
     def __init__(self, ncls=4):
         super().__init__()
         def blk(cin, cout):
             return nn.Sequential(
                 nn.Conv3d(cin, cout, 3, padding=1),
-                nn.BatchNorm3d(cout),
+                nn.InstanceNorm3d(cout, affine=True, eps=1e-5),
                 nn.ReLU(inplace=True),
                 nn.Conv3d(cout, cout, 3, padding=1),
-                nn.BatchNorm3d(cout),
+                nn.InstanceNorm3d(cout, affine=True, eps=1e-5),
                 nn.ReLU(inplace=True),
                 nn.MaxPool3d(2)  # /2
             )
@@ -70,22 +99,35 @@ def macro_auc_safe(y_true, proba, n_classes=4):
     return float(np.mean(aucs)) if aucs else float('nan')
 
 # --- one fold ---
-def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=1):
+def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=2):
     y_all = df.apply(braak_label, axis=1).astype(int).values
     tr_sub, val_sub = train_test_split(tr_idx, test_size=0.1, stratify=y_all[tr_idx], random_state=0)
 
-    ds = VolDataset(df, modality_col, size=size)
-    dl_tr  = DataLoader(torch.utils.data.Subset(ds, tr_sub),  batch_size=bs, shuffle=True,  num_workers=2, pin_memory=True)
-    dl_val = DataLoader(torch.utils.data.Subset(ds, val_sub), batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
-    dl_te  = DataLoader(torch.utils.data.Subset(ds, te_idx),  batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
+    # Datasets (augment only on training subset)
+    ds      = VolDataset(df, modality_col, size=size, augment=False)
+    ds_tr   = VolDataset(df.iloc[tr_sub].reset_index(drop=True), modality_col, size=size, augment=True)
+    ds_val  = VolDataset(df.iloc[val_sub].reset_index(drop=True), modality_col, size=size, augment=False)
+    ds_te   = VolDataset(df.iloc[te_idx].reset_index(drop=True),  modality_col, size=size, augment=False)
 
-    # class weights from training subset
-    counts = np.bincount(y_all[tr_sub], minlength=4)
+    # Build sampler for the training subset (oversampling)
+    y_tr = y_all[tr_sub]
+    cls_count = np.bincount(y_tr, minlength=4).astype(np.float32)
+    sample_w = 1.0 / (cls_count[y_tr] + 1e-6)
+    sample_w = torch.tensor(sample_w, dtype=torch.float32)
+    sampler_tr = WeightedRandomSampler(weights=sample_w, num_samples=len(y_tr), replacement=True)
+
+    # Loaders
+    dl_tr  = DataLoader(ds_tr,  batch_size=bs, sampler=sampler_tr, num_workers=2, pin_memory=True)
+    dl_val = DataLoader(ds_val, batch_size=bs, shuffle=False,     num_workers=2, pin_memory=True)
+    dl_te  = DataLoader(ds_te,  batch_size=bs, shuffle=False,     num_workers=2, pin_memory=True)
+
+    # class weights from training subset (keep your original CE weighting)
+    counts = np.bincount(y_tr, minlength=4)
     w = counts.sum() / (counts + 1e-6); w = (w / w.mean()).astype(np.float32)
     w = torch.tensor(w, device=device)
 
     model = CNN6().to(device)
-    opt   = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt   = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=10)
     crit  = nn.CrossEntropyLoss(weight=w)
 
@@ -117,11 +159,9 @@ def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=1):
         new_lr = opt.param_groups[0]['lr']
         lr_msg = f" | lr↓->{new_lr:.6f}" if new_lr < prev_lr - 1e-12 else ""
 
-        improved = False
         if vloss < best - 1e-4:
             best, bad = vloss, 0
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            improved = True
         else:
             bad += 1
 
@@ -158,7 +198,7 @@ def main():
     ap.add_argument("--size", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=70)
     ap.add_argument("--folds", type=int, default=3)
-    ap.add_argument("--bs", type=int, default=1)
+    ap.add_argument("--bs", type=int, default=5)  # larger default batch size
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv)
