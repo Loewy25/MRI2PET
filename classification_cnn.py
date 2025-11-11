@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, argparse, glob, numpy as np, pandas as pd, nibabel as nib
+import os, argparse, glob, time, numpy as np, pandas as pd, nibabel as nib
 import torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -67,52 +67,66 @@ class CNN6(nn.Module):
         z = z.mean(dim=(2,3,4))           # GAP -> [B,128]
         return self.head(z)               # logits
 
-# --- robust macro AUC (works even if a class is missing in test) ---
+# --- robust macro AUC ---
 def macro_auc_safe(y_true, proba, n_classes=4):
     aucs = []
     for c in range(n_classes):
         yb = (y_true == c).astype(int)
-        if yb.min() == 0 and yb.max() == 1:  # need pos & neg
+        if yb.min() == 0 and yb.max() == 1:
             aucs.append(roc_auc_score(yb, proba[:, c]))
     return float(np.mean(aucs)) if aucs else float('nan')
 
-# --- helper: resolve pet_gt to PUP SUVR path ---
-import os, glob
-
+# --- simple: wake up /ceph and resolve to PUP SUVR ---
 def resolve_pet_gt_to_pup_suvr(pet_gt_path, base_root="/ceph/chpc/mapped/benz04_kari/pup", verbose=True):
     """
     From CSV pet_gt path like:
       /scratch/.../20520060F_T807_v1/PET_in_T1_masked.nii.gz
-    -> subject_id = 20520060F_T807_v1
-    -> search: /ceph/chpc/mapped/benz04_kari/pup/20520060F_T807_v1/**/*msum_SUVR.nii.gz
-    Print exactly what we’re trying and why it fails.
+    -> subject_id = 20520060F_T807_v1 (parent folder name)
+    -> search: <base_root>/<subject_id>/**/*msum_SUVR.nii.gz
+    Prints exactly what it's checking. Warms up automounts before checking.
     """
     if not isinstance(pet_gt_path, str) or not pet_gt_path:
         if verbose: print("[miss] pet_gt_path is empty/None")
         return None
 
-    subj_id = os.path.basename(os.path.dirname(pet_gt_path))
+    subj_id = os.path.basename(os.path.dirname(pet_gt_path)).strip()
     base = os.path.join(base_root, subj_id)
 
     if verbose:
-        print(f"[try] subj_id={subj_id}")
-        print(f"[try] base={base}")
+        print(f"[try] subj_id={repr(subj_id)}")
+        print(f"[try] base={repr(base)}")
 
+    # wake up automount: list parent once, then retry a couple times
+    parent = os.path.dirname(base)
+    for _ in range(2):
+        try:
+            _ = os.listdir(parent)
+            break
+        except Exception:
+            time.sleep(0.2)
+
+    # re-check after warm-up (retry once if needed)
     if not os.path.isdir(base):
-        if verbose: print(f"[miss] base folder not found: {base}")
+        time.sleep(0.3)
+    exists1 = os.path.exists(base)
+    isdir1  = os.path.isdir(base)
+    if verbose:
+        print(f"[check] exists(base)={exists1} isdir(base)={isdir1}")
+
+    if not (exists1 or isdir1):
+        if verbose: print(f"[miss] base folder not found: {repr(base)}")
         return None
 
     pattern = os.path.join(base, "**", "*msum_SUVR.nii.gz")
-    if verbose: print(f"[try] pattern={pattern}")
-
+    if verbose: print(f"[try] pattern={repr(pattern)}")
     hits = glob.glob(pattern, recursive=True)
     if verbose: print(f"[try] hits={len(hits)}")
 
     if not hits:
-        # Also show a quick peek at any NIfTIs under base to help adjust pattern
+        # show a few NIfTIs found so you can tweak the pattern
         peek = glob.glob(os.path.join(base, "**", "*nii*"), recursive=True)
         if verbose:
-            print(f"[miss] no '*msum_SUVR.nii.gz' under: {base}")
+            print(f"[miss] no '*msum_SUVR.nii.gz' under: {repr(base)}")
             for q in sorted(peek)[:10]:
                 print("       found:", os.path.relpath(q, base))
             if len(peek) > 10:
@@ -123,23 +137,19 @@ def resolve_pet_gt_to_pup_suvr(pet_gt_path, base_root="/ceph/chpc/mapped/benz04_
     if verbose: print(f"[hit] {subj_id} -> {chosen}")
     return chosen
 
-
 # --- one fold ---
 def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
     y_all = df.apply(braak_label, axis=1).astype(int).values
     tr_sub, val_sub = train_test_split(tr_idx, test_size=0.2, stratify=y_all[tr_idx], random_state=0)
 
-    # Datasets (no augmentation)
     ds_tr  = VolDataset(df.iloc[tr_sub].reset_index(drop=True), path_col, size=size)
     ds_val = VolDataset(df.iloc[val_sub].reset_index(drop=True), path_col, size=size)
     ds_te  = VolDataset(df.iloc[te_idx].reset_index(drop=True),  path_col, size=size)
 
-    # Loaders (no weighted sampler; simple shuffle on train)
     dl_tr  = DataLoader(ds_tr,  batch_size=bs, shuffle=True,  num_workers=2, pin_memory=True)
     dl_val = DataLoader(ds_val, batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
     dl_te  = DataLoader(ds_te,  batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
 
-    # class weights for CE (kept)
     y_tr = y_all[tr_sub]
     counts = np.bincount(y_tr, minlength=4)
     w = counts.sum() / (counts + 1e-6); w = (w / w.mean()).astype(np.float32)
@@ -152,7 +162,6 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
 
     best, best_state, bad, patience = np.inf, None, 0, 50
     for epoch in range(1, epochs+1):
-        # --------- train ----------
         model.train()
         tloss, ntr = 0.0, 0
         for vol, y in dl_tr:
@@ -163,7 +172,6 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
             tloss += loss.item() * y.size(0); ntr += y.size(0)
         train_loss = tloss / max(1, ntr)
 
-        # --------- val ------------
         model.eval()
         vloss, n = 0.0, 0
         with torch.no_grad():
@@ -172,7 +180,6 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
                 vloss += crit(model(vol), y).item() * y.size(0); n += y.size(0)
         vloss /= max(1, n)
 
-        # --------- scheduler + logs ----------
         prev_lr = opt.param_groups[0]['lr']
         sched.step(vloss)
         new_lr = opt.param_groups[0]['lr']
@@ -184,9 +191,7 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
         else:
             bad += 1
 
-        print(f"Epoch {epoch:03d}: train_loss={train_loss:.4f} val_loss={vloss:.4f} "
-              f"best_val={best:.4f} bad={bad}{lr_msg}")
-
+        print(f"Epoch {epoch:03d}: train_loss={train_loss:.4f} val_loss={vloss:.4f} best_val={best:.4f} bad={bad}{lr_msg}")
         if bad >= patience:
             print(f"[EarlyStopping] Stop at epoch {epoch} (patience={patience}).")
             break
@@ -194,7 +199,6 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # --------- test ----------
     model.eval(); logits_, y_ = [], []
     with torch.no_grad():
         for vol, y in dl_te:
@@ -222,26 +226,31 @@ def main():
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv)
-    # columns check (same as before)
     for c in ["subject","mri","pet_gt","pet_fake","Braak1_2","Braak3_4","Braak5_6"]:
         if c not in df.columns: 
             raise ValueError(f"missing column: {c}")
 
-    # resolve the path column we will actually use for this modality
+    df = df.copy()
     if args.modality == "pet_gt":
-        # build new path from subject id extracted from pet_gt column
-        df = df.copy()
-        df["resolved_path"] = df["pet_gt"].apply(resolve_pet_gt_to_pup_suvr)
+        df["resolved_path"] = df["pet_gt"].apply(lambda p: resolve_pet_gt_to_pup_suvr(p, verbose=True))
     else:
-        df = df.copy()
         df["resolved_path"] = df[args.modality]
 
-    # drop rows with missing/unreadable files (print already done in resolver for pet_gt)
     before = len(df)
+
+    # show a few failures so you see exactly what it tried
+    bad = df[df["resolved_path"].isna() | ~df["resolved_path"].apply(lambda p: isinstance(p, str) and os.path.exists(p))]
+    if len(bad) > 0:
+        print(f"[diag] unresolved/missing rows: {len(bad)} (showing up to 5)")
+        for _, r in bad.head(5).iterrows():
+            print("  CSV pet_gt :", repr(r["pet_gt"]))
+            print("  resolved   :", repr(r["resolved_path"]))
+
     df = df[df["resolved_path"].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
     after = len(df)
     if after == 0:
-        raise RuntimeError("No valid volumes found for the selected modality after path resolution.")
+        print("[fatal] No valid volumes found after resolution.")
+        return
     print(f"[info] using {after}/{before} rows after path resolution & existence check.")
 
     y_all = df.apply(braak_label, axis=1).astype(int).values
