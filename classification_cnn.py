@@ -77,26 +77,52 @@ def macro_auc_safe(y_true, proba, n_classes=4):
     return float(np.mean(aucs)) if aucs else float('nan')
 
 # --- helper: resolve pet_gt to PUP SUVR path ---
-def resolve_pet_gt_to_pup_suvr(pet_gt_path):
+import os, glob
+
+def resolve_pet_gt_to_pup_suvr(pet_gt_path, base_root="/ceph/chpc/mapped/benz04_kari/pup", verbose=True):
     """
-    Example input path in CSV:
-      /scratch/l.peiwang/kari_brainv33_top300/20520060F_T807_v1/PET_in_T1_masked.nii.gz
-    We extract '20520060F_T807_v1' and search under:
-      /ceph/chpc/mapped/benz04_kari/pup/20520060F_T807_v1/**/*msum_SUVR.nii.gz
-    If not found -> print 'we don't have it' and return None.
+    From CSV pet_gt path like:
+      /scratch/.../20520060F_T807_v1/PET_in_T1_masked.nii.gz
+    -> subject_id = 20520060F_T807_v1
+    -> search: /ceph/chpc/mapped/benz04_kari/pup/20520060F_T807_v1/**/*msum_SUVR.nii.gz
+    Print exactly what we’re trying and why it fails.
     """
     if not isinstance(pet_gt_path, str) or not pet_gt_path:
-        print("we don't have it")
+        if verbose: print("[miss] pet_gt_path is empty/None")
         return None
+
     subj_id = os.path.basename(os.path.dirname(pet_gt_path))
-    base = os.path.join("/ceph/chpc/mapped/benz04_kari/pup", subj_id)
-    pattern = os.path.join(base, "**", "*msum_SUVR.nii.gz")
-    hits = glob.glob(pattern, recursive=True)
-    if not hits:
-        print(f"we don't have it: {subj_id}")
+    base = os.path.join(base_root, subj_id)
+
+    if verbose:
+        print(f"[try] subj_id={subj_id}")
+        print(f"[try] base={base}")
+
+    if not os.path.isdir(base):
+        if verbose: print(f"[miss] base folder not found: {base}")
         return None
-    # take the first match
-    return hits[0]
+
+    pattern = os.path.join(base, "**", "*msum_SUVR.nii.gz")
+    if verbose: print(f"[try] pattern={pattern}")
+
+    hits = glob.glob(pattern, recursive=True)
+    if verbose: print(f"[try] hits={len(hits)}")
+
+    if not hits:
+        # Also show a quick peek at any NIfTIs under base to help adjust pattern
+        peek = glob.glob(os.path.join(base, "**", "*nii*"), recursive=True)
+        if verbose:
+            print(f"[miss] no '*msum_SUVR.nii.gz' under: {base}")
+            for q in sorted(peek)[:10]:
+                print("       found:", os.path.relpath(q, base))
+            if len(peek) > 10:
+                print(f"       ...and {len(peek)-10} more")
+        return None
+
+    chosen = hits[0]
+    if verbose: print(f"[hit] {subj_id} -> {chosen}")
+    return chosen
+
 
 # --- one fold ---
 def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
