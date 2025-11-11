@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import os, argparse, numpy as np, pandas as pd, nibabel as nib, torch, torch.nn as nn, torch.nn.functional as F
+import os, argparse, glob, numpy as np, pandas as pd, nibabel as nib
+import torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.sampler import WeightedRandomSampler
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score
 
@@ -16,50 +16,27 @@ def braak_label(row, thr=1.2):
     elif row["Braak1_2"] > thr: return 1
     else: return 0
 
-# --- tiny 3D-safe augmentations for training only ---
-def augment_3d(t):
-    # t: torch.Tensor [1,D,H,W] after resize, values ~ z-scored in-mask
-    if torch.rand(1).item() < 0.9:
-        # multiplicative intensity (0.9..1.1)
-        scale = 0.9 + 0.2 * torch.rand(1, device=t.device)
-        t = t * scale
-        # additive bias (-0.05..0.05)
-        bias = (torch.rand(1, device=t.device) - 0.5) * 0.1
-        t = t + bias
-    if torch.rand(1).item() < 0.5:
-        # Gaussian noise, std 0.01..0.05 of current std (fallback to 1.0)
-        base_std = t.std().clamp_min(1.0)
-        nstd = (0.01 + 0.04 * torch.rand(1, device=t.device)) * base_std
-        t = t + torch.randn_like(t) * nstd
-    if torch.rand(1).item() < 0.5:
-        # very small spatial jitter: roll by -2..2 voxels per axis
-        D, H, W = t.shape[-3:]
-        sh = int(torch.randint(-2, 3, (1,)).item())
-        sw = int(torch.randint(-2, 3, (1,)).item())
-        sd = int(torch.randint(-2, 3, (1,)).item())
-        t = torch.roll(t, shifts=(sd, sh, sw), dims=(-3, -2, -1))
-    return t
-
-# --- dataset ---
+# --- dataset (no augmentation) ---
 class VolDataset(Dataset):
-    def __init__(self, df, modality_col, size=128, augment=False):
-        self.paths = df[modality_col].tolist()
+    def __init__(self, df, path_col, size=128):
+        self.paths = df[path_col].tolist()
         self.y = df.apply(braak_label, axis=1).astype(int).values
         self.size = size
-        self.augment = augment
-    def __len__(self): return len(self.paths)
+
+    def __len__(self): 
+        return len(self.paths)
+
     def __getitem__(self, i):
         a = nib.load(self.paths[i]).get_fdata().astype(np.float32)
         m = a != 0
         if m.any():
-            x = a[m]; a[m] = (x - x.mean()) / (x.std() + 1e-6)
+            x = a[m]
+            a[m] = (x - x.mean()) / (x.std() + 1e-6)
             a[~m] = 0.0
-        t = torch.from_numpy(a)[None,None,...]                 # [1,1,D,H,W]
+        t = torch.from_numpy(a)[None, None, ...]  # [1,1,D,H,W]
         t = F.interpolate(t, size=(self.size,)*3, mode="trilinear", align_corners=False)
-        t = t[0]                                              # [1,D,H,W]
-        if self.augment:
-            t = augment_3d(t)
-        return t, int(self.y[i])                              # [1,D,H,W], label
+        t = t[0]  # -> [1,D,H,W]
+        return t, int(self.y[i])
 
 # --- model: 6 conv blocks + GAP head (InstanceNorm3d) ---
 class CNN6(nn.Module):
@@ -84,6 +61,7 @@ class CNN6(nn.Module):
             blk(96, 128), # 4   -> 2
         )
         self.head = nn.Linear(128, ncls)
+
     def forward(self, x):                 # x: [B,1,D,H,W]
         z = self.features(x)              # [B,128,2,2,2]
         z = z.mean(dim=(2,3,4))           # GAP -> [B,128]
@@ -98,30 +76,45 @@ def macro_auc_safe(y_true, proba, n_classes=4):
             aucs.append(roc_auc_score(yb, proba[:, c]))
     return float(np.mean(aucs)) if aucs else float('nan')
 
+# --- helper: resolve pet_gt to PUP SUVR path ---
+def resolve_pet_gt_to_pup_suvr(pet_gt_path):
+    """
+    Example input path in CSV:
+      /scratch/l.peiwang/kari_brainv33_top300/20520060F_T807_v1/PET_in_T1_masked.nii.gz
+    We extract '20520060F_T807_v1' and search under:
+      /ceph/chpc/mapped/benz04_kari/pup/20520060F_T807_v1/**/*msum_SUVR.nii.gz
+    If not found -> print 'we don't have it' and return None.
+    """
+    if not isinstance(pet_gt_path, str) or not pet_gt_path:
+        print("we don't have it")
+        return None
+    subj_id = os.path.basename(os.path.dirname(pet_gt_path))
+    base = os.path.join("/ceph/chpc/mapped/benz04_kari/pup", subj_id)
+    pattern = os.path.join(base, "**", "*msum_SUVR.nii.gz")
+    hits = glob.glob(pattern, recursive=True)
+    if not hits:
+        print(f"we don't have it: {subj_id}")
+        return None
+    # take the first match
+    return hits[0]
+
 # --- one fold ---
-def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=2):
+def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
     y_all = df.apply(braak_label, axis=1).astype(int).values
     tr_sub, val_sub = train_test_split(tr_idx, test_size=0.2, stratify=y_all[tr_idx], random_state=0)
 
-    # Datasets (augment only on training subset)
-    ds      = VolDataset(df, modality_col, size=size, augment=False)
-    ds_tr   = VolDataset(df.iloc[tr_sub].reset_index(drop=True), modality_col, size=size, augment=True)
-    ds_val  = VolDataset(df.iloc[val_sub].reset_index(drop=True), modality_col, size=size, augment=False)
-    ds_te   = VolDataset(df.iloc[te_idx].reset_index(drop=True),  modality_col, size=size, augment=False)
+    # Datasets (no augmentation)
+    ds_tr  = VolDataset(df.iloc[tr_sub].reset_index(drop=True), path_col, size=size)
+    ds_val = VolDataset(df.iloc[val_sub].reset_index(drop=True), path_col, size=size)
+    ds_te  = VolDataset(df.iloc[te_idx].reset_index(drop=True),  path_col, size=size)
 
-    # Build sampler for the training subset (oversampling)
+    # Loaders (no weighted sampler; simple shuffle on train)
+    dl_tr  = DataLoader(ds_tr,  batch_size=bs, shuffle=True,  num_workers=2, pin_memory=True)
+    dl_val = DataLoader(ds_val, batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
+    dl_te  = DataLoader(ds_te,  batch_size=bs, shuffle=False, num_workers=2, pin_memory=True)
+
+    # class weights for CE (kept)
     y_tr = y_all[tr_sub]
-    cls_count = np.bincount(y_tr, minlength=4).astype(np.float32)
-    sample_w = 1.0 / (cls_count[y_tr] + 1e-6)
-    sample_w = torch.tensor(sample_w, dtype=torch.float32)
-    sampler_tr = WeightedRandomSampler(weights=sample_w, num_samples=len(y_tr), replacement=True)
-
-    # Loaders
-    dl_tr  = DataLoader(ds_tr,  batch_size=bs, sampler=sampler_tr, num_workers=2, pin_memory=True)
-    dl_val = DataLoader(ds_val, batch_size=bs, shuffle=False,     num_workers=2, pin_memory=True)
-    dl_te  = DataLoader(ds_te,  batch_size=bs, shuffle=False,     num_workers=2, pin_memory=True)
-
-    # class weights from training subset (keep your original CE weighting)
     counts = np.bincount(y_tr, minlength=4)
     w = counts.sum() / (counts + 1e-6); w = (w / w.mean()).astype(np.float32)
     w = torch.tensor(w, device=device)
@@ -172,9 +165,10 @@ def run_fold(df, tr_idx, te_idx, modality_col, size, device, epochs=70, bs=2):
             print(f"[EarlyStopping] Stop at epoch {epoch} (patience={patience}).")
             break
 
-    if best_state is not None: model.load_state_dict(best_state)
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
-    # test
+    # --------- test ----------
     model.eval(); logits_, y_ = [], []
     with torch.no_grad():
         for vol, y in dl_te:
@@ -198,13 +192,31 @@ def main():
     ap.add_argument("--size", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=70)
     ap.add_argument("--folds", type=int, default=5)
-    ap.add_argument("--bs", type=int, default=5)  # larger default batch size
+    ap.add_argument("--bs", type=int, default=5)
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv)
+    # columns check (same as before)
     for c in ["subject","mri","pet_gt","pet_fake","Braak1_2","Braak3_4","Braak5_6"]:
-        if c not in df.columns: raise ValueError(f"missing column: {c}")
-    df = df[df[args.modality].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
+        if c not in df.columns: 
+            raise ValueError(f"missing column: {c}")
+
+    # resolve the path column we will actually use for this modality
+    if args.modality == "pet_gt":
+        # build new path from subject id extracted from pet_gt column
+        df = df.copy()
+        df["resolved_path"] = df["pet_gt"].apply(resolve_pet_gt_to_pup_suvr)
+    else:
+        df = df.copy()
+        df["resolved_path"] = df[args.modality]
+
+    # drop rows with missing/unreadable files (print already done in resolver for pet_gt)
+    before = len(df)
+    df = df[df["resolved_path"].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
+    after = len(df)
+    if after == 0:
+        raise RuntimeError("No valid volumes found for the selected modality after path resolution.")
+    print(f"[info] using {after}/{before} rows after path resolution & existence check.")
 
     y_all = df.apply(braak_label, axis=1).astype(int).values
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -212,12 +224,13 @@ def main():
 
     accs, aucs, cms = [], [], []
     for k, (tr, te) in enumerate(skf.split(np.zeros(len(df)), y_all), 1):
-        acc, auc, cm = run_fold(df, tr, te, args.modality, args.size, device, epochs=args.epochs, bs=args.bs)
+        acc, auc, cm = run_fold(df, tr, te, "resolved_path", args.size, device, epochs=args.epochs, bs=args.bs)
         accs.append(acc); aucs.append(auc); cms.append(cm)
         print(f"Fold{k}: AUC={auc:.3f} ACC={acc:.3f}\nConfusion:\n{cm}\n")
 
     acc_mean, acc_var = float(np.mean(accs)), float(np.var(accs, ddof=1) if len(accs)>1 else 0.0)
-    auc_mean, auc_var = float(np.nanmean(aucs)), float(np.nanvar(aucs, ddof=1) if np.sum(~np.isnan(aucs))>1 else 0.0)
+    auc_mean = float(np.nanmean(aucs))
+    auc_var  = float(np.nanvar(aucs, ddof=1) if np.sum(~np.isnan(aucs))>1 else 0.0)
     cm_sum = sum(cms)
 
     print(f"== {args.modality} ==")
