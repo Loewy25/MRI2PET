@@ -151,7 +151,7 @@ def main():
     ap.add_argument("--csv", required=True)
     ap.add_argument("--modality", choices=["mri","pet_gt","pet_fake","pet_raw"], default="pet_raw")
     ap.add_argument("--size", type=int, default=128)
-    ap.add_argument("--epochs", type=int, default=70)
+    ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--bs", type=int, default=5)
     args = ap.parse_args()
