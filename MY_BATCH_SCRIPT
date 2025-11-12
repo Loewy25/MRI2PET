@@ -37,8 +37,9 @@ export FSLOUTPUTTYPE=NIFTI_GZ
 # Example optional commands (commented)
 # ------------------------------------------------------------
 
-#python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv --modality pet_gt --epochs 200 --size 128 --bs 5
-python csv_modification.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv --pup_root /ceph/chpc/mapped/benz04_kari/pup
+python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
+
+
 
 
 
