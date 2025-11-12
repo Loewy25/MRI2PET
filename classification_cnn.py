@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, argparse, glob, time, numpy as np, pandas as pd, nibabel as nib
+import os, argparse, numpy as np, pandas as pd, nibabel as nib
 import torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -9,14 +9,14 @@ from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score
 torch.backends.cudnn.benchmark = True
 torch.manual_seed(0); np.random.seed(0)
 
-# --- labels ---
+# --- label rule ---
 def braak_label(row, thr=1.2):
     if row["Braak5_6"] > thr: return 3
     elif row["Braak3_4"] > thr: return 2
     elif row["Braak1_2"] > thr: return 1
     else: return 0
 
-# --- dataset (no augmentation) ---
+# --- dataset (no normalization, no augmentation) ---
 class VolDataset(Dataset):
     def __init__(self, df, path_col, size=128):
         self.paths = df[path_col].tolist()
@@ -28,17 +28,13 @@ class VolDataset(Dataset):
 
     def __getitem__(self, i):
         a = nib.load(self.paths[i]).get_fdata().astype(np.float32)
-        m = a != 0
-        if m.any():
-            x = a[m]
-            a[m] = (x - x.mean()) / (x.std() + 1e-6)
-            a[~m] = 0.0
-        t = torch.from_numpy(a)[None, None, ...]  # [1,1,D,H,W]
+        # no intensity normalization — use raw SUVR values
+        t = torch.from_numpy(a)[None, None, ...]        # [1,1,D,H,W]
         t = F.interpolate(t, size=(self.size,)*3, mode="trilinear", align_corners=False)
-        t = t[0]  # -> [1,D,H,W]
+        t = t[0]                                        # -> [1,D,H,W]
         return t, int(self.y[i])
 
-# --- model: 6 conv blocks + GAP head (InstanceNorm3d) ---
+# --- simple 3D CNN ---
 class CNN6(nn.Module):
     def __init__(self, ncls=4):
         super().__init__()
@@ -50,24 +46,20 @@ class CNN6(nn.Module):
                 nn.Conv3d(cout, cout, 3, padding=1),
                 nn.InstanceNorm3d(cout, affine=True, eps=1e-5),
                 nn.ReLU(inplace=True),
-                nn.MaxPool3d(2)  # /2
+                nn.MaxPool3d(2)
             )
         self.features = nn.Sequential(
-            blk(1, 16),   # 128 -> 64
-            blk(16, 32),  # 64  -> 32
-            blk(32, 48),  # 32  -> 16
-            blk(48, 64),  # 16  -> 8
-            blk(64, 96),  # 8   -> 4
-            blk(96, 128), # 4   -> 2
+            blk(1, 16), blk(16, 32), blk(32, 48),
+            blk(48, 64), blk(64, 96), blk(96, 128),
         )
         self.head = nn.Linear(128, ncls)
 
-    def forward(self, x):                 # x: [B,1,D,H,W]
-        z = self.features(x)              # [B,128,2,2,2]
-        z = z.mean(dim=(2,3,4))           # GAP -> [B,128]
-        return self.head(z)               # logits
+    def forward(self, x):
+        z = self.features(x)        # [B,128,2,2,2]
+        z = z.mean(dim=(2,3,4))     # GAP -> [B,128]
+        return self.head(z)
 
-# --- robust macro AUC ---
+# --- macro AUC ---
 def macro_auc_safe(y_true, proba, n_classes=4):
     aucs = []
     for c in range(n_classes):
@@ -76,68 +68,7 @@ def macro_auc_safe(y_true, proba, n_classes=4):
             aucs.append(roc_auc_score(yb, proba[:, c]))
     return float(np.mean(aucs)) if aucs else float('nan')
 
-# --- simple: wake up /ceph and resolve to PUP SUVR ---
-def resolve_pet_gt_to_pup_suvr(pet_gt_path, base_root="/ceph/chpc/mapped/benz04_kari/pup", verbose=True):
-    """
-    From CSV pet_gt path like:
-      /scratch/.../20520060F_T807_v1/PET_in_T1_masked.nii.gz
-    -> subject_id = 20520060F_T807_v1 (parent folder name)
-    -> search: <base_root>/<subject_id>/**/*msum_SUVR.nii.gz
-    Prints exactly what it's checking. Warms up automounts before checking.
-    """
-    if not isinstance(pet_gt_path, str) or not pet_gt_path:
-        if verbose: print("[miss] pet_gt_path is empty/None")
-        return None
-
-    subj_id = os.path.basename(os.path.dirname(pet_gt_path)).strip()
-    base = os.path.join(base_root, subj_id)
-
-    if verbose:
-        print(f"[try] subj_id={repr(subj_id)}")
-        print(f"[try] base={repr(base)}")
-
-    # wake up automount: list parent once, then retry a couple times
-    parent = os.path.dirname(base)
-    for _ in range(2):
-        try:
-            _ = os.listdir(parent)
-            break
-        except Exception:
-            time.sleep(0.2)
-
-    # re-check after warm-up (retry once if needed)
-    if not os.path.isdir(base):
-        time.sleep(0.3)
-    exists1 = os.path.exists(base)
-    isdir1  = os.path.isdir(base)
-    if verbose:
-        print(f"[check] exists(base)={exists1} isdir(base)={isdir1}")
-
-    if not (exists1 or isdir1):
-        if verbose: print(f"[miss] base folder not found: {repr(base)}")
-        return None
-
-    pattern = os.path.join(base, "**", "*msum_SUVR.nii.gz")
-    if verbose: print(f"[try] pattern={repr(pattern)}")
-    hits = glob.glob(pattern, recursive=True)
-    if verbose: print(f"[try] hits={len(hits)}")
-
-    if not hits:
-        # show a few NIfTIs found so you can tweak the pattern
-        peek = glob.glob(os.path.join(base, "**", "*nii*"), recursive=True)
-        if verbose:
-            print(f"[miss] no '*msum_SUVR.nii.gz' under: {repr(base)}")
-            for q in sorted(peek)[:10]:
-                print("       found:", os.path.relpath(q, base))
-            if len(peek) > 10:
-                print(f"       ...and {len(peek)-10} more")
-        return None
-
-    chosen = hits[0]
-    if verbose: print(f"[hit] {subj_id} -> {chosen}")
-    return chosen
-
-# --- one fold ---
+# --- one fold run ---
 def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
     y_all = df.apply(braak_label, axis=1).astype(int).values
     tr_sub, val_sub = train_test_split(tr_idx, test_size=0.2, stratify=y_all[tr_idx], random_state=0)
@@ -218,7 +149,7 @@ def run_fold(df, tr_idx, te_idx, path_col, size, device, epochs=70, bs=2):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
-    ap.add_argument("--modality", choices=["mri","pet_gt","pet_fake"], default="pet_gt")
+    ap.add_argument("--modality", choices=["mri","pet_gt","pet_fake","pet_raw"], default="pet_raw")
     ap.add_argument("--size", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=70)
     ap.add_argument("--folds", type=int, default=5)
@@ -226,32 +157,17 @@ def main():
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv)
-    for c in ["subject","mri","pet_gt","pet_fake","Braak1_2","Braak3_4","Braak5_6"]:
-        if c not in df.columns: 
+    needed = ["subject","mri","pet_gt","pet_fake","pet_raw","Braak1_2","Braak3_4","Braak5_6"]
+    for c in needed:
+        if c not in df.columns:
             raise ValueError(f"missing column: {c}")
 
-    df = df.copy()
-    if args.modality == "pet_gt":
-        df["resolved_path"] = df["pet_gt"].apply(lambda p: resolve_pet_gt_to_pup_suvr(p, verbose=True))
-    else:
-        df["resolved_path"] = df[args.modality]
-
-    before = len(df)
-
-    # show a few failures so you see exactly what it tried
-    bad = df[df["resolved_path"].isna() | ~df["resolved_path"].apply(lambda p: isinstance(p, str) and os.path.exists(p))]
-    if len(bad) > 0:
-        print(f"[diag] unresolved/missing rows: {len(bad)} (showing up to 5)")
-        for _, r in bad.head(5).iterrows():
-            print("  CSV pet_gt :", repr(r["pet_gt"]))
-            print("  resolved   :", repr(r["resolved_path"]))
-
-    df = df[df["resolved_path"].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
-    after = len(df)
-    if after == 0:
-        print("[fatal] No valid volumes found after resolution.")
+    path_col = args.modality
+    df = df[df[path_col].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
+    if len(df) == 0:
+        print("[fatal] No valid volumes found for selected modality.")
         return
-    print(f"[info] using {after}/{before} rows after path resolution & existence check.")
+    print(f"[info] using {len(df)} rows with existing files from column '{path_col}'.")
 
     y_all = df.apply(braak_label, axis=1).astype(int).values
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -259,14 +175,15 @@ def main():
 
     accs, aucs, cms = [], [], []
     for k, (tr, te) in enumerate(skf.split(np.zeros(len(df)), y_all), 1):
-        acc, auc, cm = run_fold(df, tr, te, "resolved_path", args.size, device, epochs=args.epochs, bs=args.bs)
+        acc, auc, cm = run_fold(df, tr, te, path_col, args.size, device, epochs=args.epochs, bs=args.bs)
         accs.append(acc); aucs.append(auc); cms.append(cm)
         print(f"Fold{k}: AUC={auc:.3f} ACC={acc:.3f}\nConfusion:\n{cm}\n")
 
-    acc_mean, acc_var = float(np.mean(accs)), float(np.var(accs, ddof=1) if len(accs)>1 else 0.0)
+    acc_mean = float(np.mean(accs))
+    acc_var  = float(np.var(accs, ddof=1) if len(accs)>1 else 0.0)
     auc_mean = float(np.nanmean(aucs))
     auc_var  = float(np.nanvar(aucs, ddof=1) if np.sum(~np.isnan(aucs))>1 else 0.0)
-    cm_sum = sum(cms)
+    cm_sum   = sum(cms)
 
     print(f"== {args.modality} ==")
     print(f"ACC mean={acc_mean:.3f} var={acc_var:.4f} | AUC mean={auc_mean:.3f} var={auc_var:.4f}")
