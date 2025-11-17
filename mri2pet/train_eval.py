@@ -48,6 +48,11 @@ def train_paggan(
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
     for epoch in range(1, epochs + 1):
+            # --- MGDA monitoring accumulators (per epoch) ---
+        alpha_running = 0.0
+        cos_running = 0.0
+        grad_recon_running = 0.0
+        grad_gan_running = 0.0
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
@@ -110,11 +115,24 @@ def train_paggan(
             # Closed-form α* for 2 tasks (per-sample), then take robust median
             V1 = v1n.reshape(v1n.size(0), -1)
             V2 = v2n.reshape(v2n.size(0), -1)
+    
+            # --- MGDA monitoring: cosine similarity & grad norms (per batch) ---
+            cos_batch = (V1 * V2).sum(dim=1)          # since v1n, v2n are unit vectors
+            cos_mean = cos_batch.mean().item()
+            cos_running += cos_mean
+    
+            grad_recon_running += v1.norm().item()
+            grad_gan_running   += v2.norm().item()
+            # -------------------------------------------------------------
+    
             diff = (V2 - V1)
+
             num  = (diff * V2).sum(dim=1)                 # (v2 - v1) · v2
             den  = (diff * diff).sum(dim=1) + eps         # ||v1 - v2||^2
             alpha_batch = torch.clamp(num / den, 0.0, 1.0)
             alpha = alpha_batch.median()                  # scalar α* for this batch
+        # accumulate alpha for epoch-wise average
+            alpha_running += float(alpha.item())
 
             # Combined output-space direction and single backward through G
             v_comb = alpha * v1n + (1.0 - alpha) * v2n
@@ -125,50 +143,6 @@ def train_paggan(
 
             # For logging only (proxy scalar; not used for backward)
             loss_G_log = (loss_recon + loss_gan).detach().item()
-            # =========================================================================
-
-            # ------------------ Legacy gradient-ratio controller ------------------
-            # (Commented out per your request; leave here for quick rollback)
-            """
-            # measure grad norms at last decoder conv params (cheap & stable)
-            params_L = [G.out_conv.weight]
-            if getattr(G.out_conv, "bias", None) is not None:
-                params_L.append(G.out_conv.bias)
-
-            grads_r = torch.autograd.grad(loss_recon, params_L, retain_graph=True, allow_unused=True)
-            norm_recon_sq = 0.0
-            for g in grads_r:
-                if g is not None:
-                    norm_recon_sq = norm_recon_sq + g.pow(2).sum()
-            norm_recon = torch.sqrt(norm_recon_sq + 0.0)
-
-            grads_g = torch.autograd.grad(loss_gan, params_L, retain_graph=True, allow_unused=True)
-            norm_gan_sq = 0.0
-            for g in grads_g:
-                if g is not None:
-                    norm_gan_sq = norm_gan_sq + g.pow(2).sum()
-            norm_gan = torch.sqrt(norm_gan_sq + 0.0)
-
-            # update dynamic lambda_g with EMA + clipping + trust-region
-            if torch.isfinite(norm_recon) and torch.isfinite(norm_gan):
-                raw = (norm_recon / (norm_gan + 1e-8)).item()
-                raw = max(LAM_MIN, min(LAM_MAX, raw))  # clip
-                lam_new = ema_beta * lambda_g + (1.0 - ema_beta) * raw
-                if lambda_g > 0.0:
-                    max_up = (1.0 + TRUST_TAU) * lambda_g
-                    max_dn = (1.0 - TRUST_TAU) * lambda_g
-                    lam_new = min(max(lam_new, max_dn), max_up)
-                lambda_g = lam_new
-
-            loss_G = loss_recon + lambda_g * loss_gan
-            opt_G.zero_grad(set_to_none=True)
-            loss_G.backward()
-            torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
-            opt_G.step()
-
-            loss_G_log = loss_G.detach().item()
-            """
-            # ----------------------------------------------------------------------
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
@@ -177,6 +151,13 @@ def train_paggan(
 
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
+            # --- MGDA monitoring: epoch-wise averages ---
+        avg_alpha = alpha_running / max(1, n_batches)
+        avg_cos = cos_running / max(1, n_batches)
+        avg_grad_recon = grad_recon_running / max(1, n_batches)
+        avg_grad_gan = grad_gan_running / max(1, n_batches)
+        # --------------------------------------------
+
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
 
@@ -214,11 +195,21 @@ def train_paggan(
                       f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                       f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                       f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s")
+                print(f"      [MGDA] alpha={avg_alpha:.3f}  "
+                      f"cos(v1,v2)={avg_cos:.3f}  "
+                      f"||grad_recon||={avg_grad_recon:.3e}  "
+                      f"||grad_gan||={avg_grad_gan:.3e}")
+
 
             G.train()
         elif verbose:
             dt = time.time() - t0
             print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
+            print(f"      [MGDA] alpha={avg_alpha:.3f}  "
+                  f"cos(v1,v2)={avg_cos:.3f}  "
+                  f"||grad_recon||={avg_grad_recon:.3e}  "
+                  f"||grad_gan||={avg_grad_gan:.3e}")
+
 
     if best_G is not None:
         G.load_state_dict(best_G)
