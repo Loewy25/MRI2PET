@@ -76,7 +76,7 @@ def find_dataset_root() -> str:
 
 def list_subject_dirs(root: str,
                       require_mask: bool = True) -> List[str]:
-    patterns = [os.path.join(root, "*T807*"), os.path.join(root, "*t807*")]
+    patterns = [os.path.join(root, "*T807*"), os.path.join(root, "**")]
     cand_dirs = []
     for p in patterns:
         cand_dirs.extend(glob.glob(p))
