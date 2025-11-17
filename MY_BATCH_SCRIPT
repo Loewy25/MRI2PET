@@ -2,8 +2,8 @@
 #SBATCH --job-name=pet_gt
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-#SBATCH --gres=gpu:tesla_a100:1
-#SBATCH --partition=tier1_gpu
+##SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua408
 #SBATCH --output=slurm-%A_haha.out
@@ -37,7 +37,7 @@ export FSLOUTPUTTYPE=NIFTI_GZ
 # Example optional commands (commented)
 # ------------------------------------------------------------
 
-python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
+#python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
 
 
 
@@ -58,10 +58,10 @@ python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_
 # ------------------------------------------------------------
 
 # Actual job
-#python cv_creator_tau.py \
-#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --root /scratch/l.peiwang/kari_brainv33_top300 \
-#  --outdir /scratch/l.peiwang/kari_brainv33_top300/CV5_tau_strat
+python cv_creator.py \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --root /scratch/l.peiwang/braak_merged_300 \
+  --outdir /scratch/l.peiwang/braak_merged_300/CV5_braak_strat
 #python summary.py
 #python Data_T807.py --part 1
 
