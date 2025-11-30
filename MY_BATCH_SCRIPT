@@ -7,8 +7,8 @@
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua408
-#SBATCH --output=/scratch/l.peiwang/log/slurm-%A_haha.out
-#SBATCH --error=/scratch/l.peiwang/log/slurm-%A_haha.out
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.out
 
 # ------------------------------------------------------------
 # Environment setup
