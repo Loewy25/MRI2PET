@@ -3,12 +3,12 @@
 #SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-##SBATCH --gres=gpu:tesla_a100:1
-#SBATCH --partition=tier1_cpu
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua408
-#SBATCH --output=china.out
-#SBATCH --error=china.err
+#SBATCH --output=/scratch/l.peiwang/log/china.out
+#SBATCH --error=/scratch/l.peiwang/log/china.err
 
 # ------------------------------------------------------------
 # Environment setup
