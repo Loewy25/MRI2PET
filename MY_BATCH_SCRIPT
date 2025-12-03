@@ -29,7 +29,7 @@ conda activate pasta
 
 # Ensure FSL writes NIfTI_GZ
 export FSLOUTPUTTYPE=NIFTI_GZ
-
+module load freesurfer/7.1.1
 
 # ------------------------------------------------------------
 # Main execution
