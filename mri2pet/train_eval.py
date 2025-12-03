@@ -35,8 +35,7 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
-    adv_criterion = nn.MSELoss()
-    #bce = nn.BCEWithLogitsLoss()
+    bce = nn.BCEWithLogitsLoss()
 
     # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
     lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
@@ -84,9 +83,10 @@ def train_paggan(
             out_real = D(pair_real)   # [B,1,d,h,w]
             out_fake = D(pair_fake)   # [B,1,d,h,w]
 
-            loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
-            loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
-            loss_D = 0.5 * (loss_D_real + loss_D_fake)
+            loss_D = (
+                bce(out_real, torch.ones_like(out_real))
+                + bce(out_fake, torch.zeros_like(out_fake))
+            )
             loss_D.backward()
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
@@ -97,14 +97,12 @@ def train_paggan(
             # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-    
-            # LSGAN generator loss:
-            #  1/2 * E[(D(fake) - 1)^2]
-            loss_gan   = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1    = l1_loss(fake, pet5)
-            ssim_val   = ssim3d(fake, pet5, data_range=data_range)
-            loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
+            # losses (two objectives): Recon = gamma*(L1 + (1-SSIM)), GAN = BCE
+            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1 = l1_loss(fake, pet5)
+            ssim_val = ssim3d(fake, pet5, data_range=data_range)
+            loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
             # ========================= MGDA-UB (Two tasks) =========================
             # Compute output-space gradients wrt 'fake' for each objective
