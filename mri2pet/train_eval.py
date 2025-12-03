@@ -35,8 +35,7 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
-    CLIP_VALUE = 0.01  # WGAN weight clipping bound (can tune)
-    #bce = nn.BCEWithLogitsLoss()
+    bce = nn.BCEWithLogitsLoss()
 
     # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
     lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
@@ -83,20 +82,14 @@ def train_paggan(
 
             out_real = D(pair_real)   # [B,1,d,h,w]
             out_fake = D(pair_fake)   # [B,1,d,h,w]
-            
-            # WGAN critic loss:
-            # maximize E[D(real)] - E[D(fake)]
-            # -> minimize -(E[D(real)] - E[D(fake)])
-            loss_D = -(out_real.mean() - out_fake.mean())
+
+            loss_D = (
+                bce(out_real, torch.ones_like(out_real))
+                + bce(out_fake, torch.zeros_like(out_fake))
+            )
             loss_D.backward()
-            
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
-            
-            # WGAN weight clipping to enforce 1-Lipschitz critic
-            for p in D.parameters():
-                p.data.clamp_(-CLIP_VALUE, CLIP_VALUE)
-
 
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
@@ -104,14 +97,12 @@ def train_paggan(
             # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-            
-            # WGAN generator loss: minimize -E[D(fake)] → push critic score on fake up
-            loss_gan   = -out_fake_for_G.mean()
-            loss_l1    = l1_loss(fake, pet5)
-            ssim_val   = ssim3d(fake, pet5, data_range=data_range)
+
+            # losses (two objectives): Recon = gamma*(L1 + (1-SSIM)), GAN = BCE
+            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1 = l1_loss(fake, pet5)
+            ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
-
-
 
             # ========================= MGDA-UB (Two tasks) =========================
             # Compute output-space gradients wrt 'fake' for each objective
