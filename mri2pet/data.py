@@ -56,6 +56,7 @@ class KariAV1451Dataset(Dataset):
         patterns = [
             os.path.join(root_dir, "*T807*"),
             os.path.join(root_dir, "*t807*"),
+            os.path.join(root_dir, "*1451*"),
         ]
         subjects: List[str] = []
         for p in patterns:
