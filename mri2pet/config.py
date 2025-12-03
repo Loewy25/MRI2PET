@@ -6,7 +6,7 @@ import torch
 ROOT_DIR   = "/scratch/l.peiwang/braak_merged_300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
-RUN_NAME   = "tau_MGDA_UB_v33_500_1_4"
+RUN_NAME   = "tau_MGDA_UB_v33_500_1_5"
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
 VOL_DIR    = os.path.join(OUT_RUN, "volumes")
