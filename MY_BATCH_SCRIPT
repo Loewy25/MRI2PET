@@ -17,7 +17,10 @@ module load cudnn/9.11.0.98-cuda12
 . ~/miniconda3/bin/activate
 conda activate pasta
 
+pip install wandb
 
+# one‑time login (writes a token to ~/.netrc or ~/.config/wandb)
+wandb login
 
 python main.py
 
