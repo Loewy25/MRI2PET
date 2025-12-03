@@ -27,24 +27,24 @@ class VolDataset(Dataset):
         return len(self.paths)
 
     def __getitem__(self, i):
-    a = nib.load(self.paths[i]).get_fdata().astype(np.float32)
-
-    # Make sure a is 3D: (D, H, W)
-    if a.ndim == 4:
-        # assume last dim is a singleton channel/time
-        if a.shape[-1] == 1:
-            a = a[..., 0]
-        else:
-            # you can decide what to do here; this is a safe default
-            # e.g. average over last dim if it's dynamic PET
-            a = a.mean(axis=-1)
-    elif a.ndim != 3:
-        raise ValueError(f"Unexpected volume shape {a.shape} for {self.paths[i]}")
-
-    t = torch.from_numpy(a)[None, None, ...]  # [1,1,D,H,W]
-    t = F.interpolate(t, size=(self.size,)*3, mode="trilinear", align_corners=False)
-    t = t[0]  # -> [1,D,H,W]
-    return t, int(self.y[i])
+        a = nib.load(self.paths[i]).get_fdata().astype(np.float32)
+    
+        # Make sure a is 3D: (D, H, W)
+        if a.ndim == 4:
+            # assume last dim is a singleton channel/time
+            if a.shape[-1] == 1:
+                a = a[..., 0]
+            else:
+                # you can decide what to do here; this is a safe default
+                # e.g. average over last dim if it's dynamic PET
+                a = a.mean(axis=-1)
+        elif a.ndim != 3:
+            raise ValueError(f"Unexpected volume shape {a.shape} for {self.paths[i]}")
+    
+        t = torch.from_numpy(a)[None, None, ...]  # [1,1,D,H,W]
+        t = F.interpolate(t, size=(self.size,)*3, mode="trilinear", align_corners=False)
+        t = t[0]  # -> [1,D,H,W]
+        return t, int(self.y[i])
 
 
 # --- simple 3D CNN ---
