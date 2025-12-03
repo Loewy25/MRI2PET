@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import torch
+import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
@@ -20,6 +21,23 @@ if __name__ == "__main__":
     print(f"Run dir: {OUT_RUN}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # ---- NEW: wandb init ----
+    wandb.init(
+        project="mri2pet",      # choose any project name
+        name=RUN_NAME,          # nice to match your RUN_NAME
+        dir=OUT_RUN,            # store wandb files under this run directory
+        config={
+            "root_dir": ROOT_DIR,
+            "run_name": RUN_NAME,
+            "epochs": EPOCHS,
+            "gamma": GAMMA,
+            "lambda_gan": LAMBDA_GAN,
+            "data_range": DATA_RANGE,
+            "batch_size": 1,
+            "resize_to": (128, 128, 128),
+        },
+    )
 
     # Build loaders
     if os.path.isfile(FOLD_CSV):
@@ -43,14 +61,20 @@ if __name__ == "__main__":
     G = Generator(in_ch=1, out_ch=1)
     D = CondPatchDiscriminator3D(in_ch=2)
 
+    # ---- NEW: optionally track gradients & params ----
+    wandb.watch(G, log="gradients", log_freq=50)
+    wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
     out = train_paggan(
         G, D, train_loader, val_loader,
-        device=device, epochs=EPOCHS, gamma=GAMMA, lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE, verbose=True
+        device=device, epochs=EPOCHS, gamma=GAMMA,
+        lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE,
+        verbose=True,
+        log_to_wandb=True,              # <--- NEW FLAG
     )
 
-    # Save curves & CSV
+    # Save curves & CSV (still useful)
     curves_path = os.path.join(OUT_RUN, "loss_curves.png")
     save_loss_curves(out["history"], curves_path)
     print(f"Saved loss curves to: {curves_path}")
@@ -67,8 +91,18 @@ if __name__ == "__main__":
     )
     print("Test metrics:", metrics)
 
+    # ---- NEW: log test metrics to wandb ----
+    wandb.log({
+        "test/SSIM": metrics["SSIM"],
+        "test/PSNR": metrics["PSNR"],
+        "test/MSE": metrics["MSE"],
+        "test/MMD": metrics["MMD"],
+    })
+
     metrics_txt = os.path.join(OUT_RUN, "test_metrics.txt")
     with open(metrics_txt, "w") as f:
         for k, v in metrics.items():
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
+
+    wandb.finish()
