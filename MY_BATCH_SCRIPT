@@ -21,6 +21,7 @@ pip install wandb
 
 # one‑time login (writes a token to ~/.netrc or ~/.config/wandb)
 wandb login
+export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
 python main.py
 
