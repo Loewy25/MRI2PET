@@ -35,6 +35,26 @@ def ci_get(row, key, default=""):
             return v if v is not None else default
     return default
 
+def which(cmd):
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        full = os.path.join(p, cmd)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            return full
+    # common fallback: $FSLDIR/bin/cmd
+    fsldir = os.environ.get("FSLDIR", "")
+    if fsldir:
+        full = os.path.join(fsldir, "bin", cmd)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            return full
+    return None
+
+def run_or_die(cmd, tag):
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        tail = "\n".join(r.stderr.splitlines()[-60:])
+        die(f"{tag} failed (exit={r.returncode}). Tail:\n{tail}")
+    return r
+
 def mr_rank(mr_session: str) -> int:
     """lower is better: mri > mmr > token mr > other"""
     s = (mr_session or "").strip().lower()
@@ -57,28 +77,23 @@ def load_t807_groups(csv_path):
     return groups
 
 def pick_row_for_session(rows):
-    # prefer MR-like; tie-break by MR_Session + TAU_PUP_ID (deterministic)
+    # prefer MR-like (mri/mmr/mr), then deterministic tie-break
     def key(r):
         mr  = ci_get(r, "MR_Session", "").strip()
         pup = ci_get(r, "TAU_PUP_ID", "").strip()
         return (mr_rank(mr), mr, pup)
-    rows_sorted = sorted(rows, key=key)
-    return rows_sorted[0]
+    return sorted(rows, key=key)[0]
 
 def match_tau_session(folder_name, sessions):
-    # 1) exact
     if folder_name in sessions:
         return folder_name
-    # 2) substring (pick longest match)
     fn = folder_name.lower()
-    best = None
-    best_len = -1
+    best, best_len = None, -1
     for s in sessions:
         sl = s.lower()
         if sl in fn or fn in sl:
             if len(s) > best_len:
-                best = s
-                best_len = len(s)
+                best, best_len = s, len(s)
     return best
 
 def find_fs_subject_dir(fs_root, mr_session):
@@ -87,7 +102,6 @@ def find_fs_subject_dir(fs_root, mr_session):
     mr_l = mr_session.lower()
     cands = []
 
-    # fast passes
     for d in glob.glob(os.path.join(fs_root, "*")):
         if os.path.isdir(d) and mr_l in os.path.basename(d).lower():
             cands.append(d)
@@ -95,8 +109,6 @@ def find_fs_subject_dir(fs_root, mr_session):
         for d in glob.glob(os.path.join(fs_root, "*", "*")):
             if os.path.isdir(d) and mr_l in os.path.basename(d).lower():
                 cands.append(d)
-
-    # last resort
     if not cands:
         for root, dirs, _ in os.walk(fs_root):
             for dd in dirs:
@@ -106,10 +118,8 @@ def find_fs_subject_dir(fs_root, mr_session):
     if not cands:
         return None
 
-    # prefer folder names containing mri/mmr, then shortest path
     def rank_path(p):
         b = os.path.basename(p).lower()
-        r = 0
         if "mri" in b: r = 0
         elif "mmr" in b: r = 1
         else: r = 2
@@ -122,10 +132,21 @@ def find_aseg_mgz(fs_subject_dir):
     hits = glob.glob(os.path.join(fs_subject_dir, "**", "aseg.mgz"), recursive=True)
     if not hits:
         return None
-    # prefer .../mri/aseg.mgz, then newest mtime
     mri_hits = [h for h in hits if (os.sep + "mri" + os.sep + "aseg.mgz") in h]
     candidates = mri_hits if mri_hits else hits
     return max(candidates, key=os.path.getmtime)
+
+def find_fs_ref_mgz(fs_subject_dir):
+    # prefer brain.mgz, then T1.mgz, then orig.mgz
+    for name in ("brain.mgz", "T1.mgz", "orig.mgz"):
+        hits = glob.glob(os.path.join(fs_subject_dir, "**", name), recursive=True)
+        hits = [h for h in hits if os.path.isfile(h)]
+        if hits:
+            # prefer .../mri/<name> and newest mtime
+            mri_hits = [h for h in hits if (os.sep + "mri" + os.sep + name) in h]
+            candidates = mri_hits if mri_hits else hits
+            return max(candidates, key=os.path.getmtime)
+    return None
 
 def shapes_affines_match(a_path, b_path, atol):
     ia, ib = nib.load(a_path), nib.load(b_path)
@@ -133,36 +154,58 @@ def shapes_affines_match(a_path, b_path, atol):
     aff_ok = np.allclose(ia.affine, ib.affine, atol=atol)
     return shape_ok and aff_ok, shape_ok, aff_ok
 
-def ensure_aseg_in_t1_grid(aseg_path, t1_path, tmp_out):
-    # if already matching, just return original
+def save_as_nifti(src_path, dst_path, dtype=None):
+    img = nib.load(src_path)
+    data = np.asanyarray(img.dataobj)
+    if dtype is not None:
+        data = data.astype(dtype, copy=False)
+    nib.save(nib.Nifti1Image(data, img.affine), dst_path)
+
+def ensure_aseg_in_t1_grid_flirt(fs_dir, aseg_path, t1_path, tmp_out, work_dir):
     same, shape_ok, aff_ok = shapes_affines_match(aseg_path, t1_path, ATOL_AFFINE)
     if same:
         return aseg_path, "direct"
 
-    # else: simple header-based mapping
-    if not shutil_which("mri_vol2vol"):
-        die("mri_vol2vol not found on PATH (source FreeSurfer env).")
+    flirt = which("flirt")
+    if not flirt:
+        die("flirt not found on PATH. In your job script do: module load fsl (or source FSLDIR).")
 
-    cmd = ["mri_vol2vol",
-           "--mov", aseg_path,
-           "--targ", t1_path,
-           "--regheader",
-           "--interp", "nearest",
-           "--o", tmp_out]
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if r.returncode != 0:
-        tail = "\n".join(r.stderr.splitlines()[-40:])
-        die("mri_vol2vol failed (tail):\n" + tail)
+    fs_ref = find_fs_ref_mgz(fs_dir)
+    if not fs_ref:
+        die(f"FS ref not found under {fs_dir} (expected brain.mgz/T1.mgz/orig.mgz)")
 
-    return tmp_out, f"vol2vol(regheader) (shape_ok={shape_ok}, affine_ok={aff_ok})"
+    tmp_ref  = os.path.join(work_dir, "._tmp_fsref.nii.gz")
+    tmp_aseg = os.path.join(work_dir, "._tmp_aseg.nii.gz")
+    tmp_mat  = os.path.join(work_dir, "._tmp_fs2t1.mat")
 
-def shutil_which(cmd):
-    # tiny local which to avoid importing shutil just for this
-    for p in os.environ.get("PATH", "").split(os.pathsep):
-        full = os.path.join(p, cmd)
-        if os.path.isfile(full) and os.access(full, os.X_OK):
-            return full
-    return None
+    # Convert mgz -> nifti for FLIRT
+    save_as_nifti(fs_ref, tmp_ref, dtype=np.float32)
+    save_as_nifti(aseg_path, tmp_aseg, dtype=np.int16)
+
+    info(f"{os.path.basename(work_dir)}: mismatch (shape_ok={shape_ok}, affine_ok={aff_ok}) -> using FLIRT")
+    info(f"{os.path.basename(work_dir)}: fs_ref={fs_ref}")
+
+    # 1) rigid FSref -> T1
+    run_or_die([flirt, "-in", tmp_ref, "-ref", t1_path,
+                "-omat", tmp_mat, "-dof", "6", "-cost", "normmi"],
+               "flirt(fsref->T1)")
+
+    # 2) apply to aseg labels (nearest)
+    run_or_die([flirt, "-in", tmp_aseg, "-ref", t1_path,
+                "-applyxfm", "-init", tmp_mat,
+                "-interp", "nearestneighbour",
+                "-out", tmp_out],
+               "flirt(apply aseg)")
+
+    # cleanup
+    for p in (tmp_ref, tmp_aseg, tmp_mat):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+    return tmp_out, f"flirt(dof6,normmi,nearest) (shape_ok={shape_ok}, affine_ok={aff_ok})"
 
 def main():
     if not os.path.isdir(DATASET_ROOT): die(f"DATASET_ROOT missing: {DATASET_ROOT}")
@@ -210,13 +253,16 @@ def main():
         info(f"{subj}: FS={fs_dir}")
         info(f"{subj}: aseg={aseg_path}")
 
-        tmp_aseg = os.path.join(subj_dir, "._tmp_aseg_inT1.nii.gz")
-        aseg_in_t1, how = ensure_aseg_in_t1_grid(aseg_path, t1_path, tmp_aseg)
+        tmp_aseg_out = os.path.join(subj_dir, "._tmp_aseg_inT1.nii.gz")
+        aseg_in_t1, how = ensure_aseg_in_t1_grid_flirt(fs_dir, aseg_path, t1_path, tmp_aseg_out, subj_dir)
         info(f"{subj}: aseg->T1 method: {how}")
 
         t1 = nib.load(t1_path)
         aseg_img = nib.load(aseg_in_t1)
         lab = np.asanyarray(aseg_img.dataobj)
+
+        # FLIRT output might be float but still integer-like; make it safe:
+        lab = np.rint(lab).astype(np.int32, copy=False)
 
         if lab.shape != t1.shape:
             die(f"{subj}: after mapping, aseg shape {lab.shape} != T1 shape {t1.shape}")
@@ -229,9 +275,8 @@ def main():
         out_path = os.path.join(subj_dir, OUT_MASK)
         nib.save(nib.Nifti1Image(mask, t1.affine), out_path)
 
-        # cleanup temp if used
-        if aseg_in_t1 == tmp_aseg and os.path.exists(tmp_aseg):
-            try: os.remove(tmp_aseg)
+        if aseg_in_t1 == tmp_aseg_out and os.path.exists(tmp_aseg_out):
+            try: os.remove(tmp_aseg_out)
             except Exception: pass
 
         info(f"{subj}: wrote {out_path} (voxels={vox})")
