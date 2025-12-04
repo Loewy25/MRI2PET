@@ -79,7 +79,6 @@ def main():
 
     # the masks we expect
     MASK_LIST = [
-        "mask_cortex.nii.gz",
         "mask_basalganglia.nii.gz",
         "mask_parenchyma_noBG.nii.gz",
         "ROI_Hippocampus.nii.gz",
