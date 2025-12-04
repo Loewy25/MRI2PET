@@ -30,7 +30,11 @@ conda activate pasta
 # Ensure FSL writes NIfTI_GZ
 export FSLOUTPUTTYPE=NIFTI_GZ
 
-python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
+#python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
+python xg_class.py \
+  --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv \
+  --pet-col pet_gt \
+  --folds 5
 
 
 #python ROI_eval.py \
