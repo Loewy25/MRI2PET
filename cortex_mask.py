@@ -224,7 +224,8 @@ def main():
         subj_dir = os.path.join(DATASET_ROOT, subj)
         t1_path = os.path.join(subj_dir, T1_NAME)
         if not os.path.exists(t1_path):
-            die(f"{subj}: missing {T1_NAME} at {t1_path}")
+            warn(f"{subj}: missing {T1_NAME} at {t1_path}, SKIP folder")
+            continue
 
         tau_session = match_tau_session(subj, sessions)
         if not tau_session:
@@ -285,3 +286,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
