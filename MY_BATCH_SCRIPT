@@ -16,7 +16,7 @@
 module purge
 
 # 1) Load freesurfer FIRST (so it sets FREESURFER_HOME and wrapper scripts)
-module load freesurfer/7.1.1
+module load freesurfer
 
 # 2) If your cluster recommends it, *then* source SetUpFreeSurfer.sh
 if [ -n "$FREESURFER_HOME" ] && [ -f "$FREESURFER_HOME/SetUpFreeSurfer.sh" ]; then
