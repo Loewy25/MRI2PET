@@ -26,7 +26,8 @@ fi
 # Conda environment
 . ~/miniconda3/bin/activate
 conda activate pasta
-
+conda install xgboost
+pip install xgboost
 # Ensure FSL writes NIfTI_GZ
 export FSLOUTPUTTYPE=NIFTI_GZ
 
