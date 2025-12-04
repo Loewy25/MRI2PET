@@ -14,28 +14,43 @@
 
 # ------------------------------------------------------------
 module purge
-module load cuda/12.9
-module load cudnn/9.11.0.98-cuda12
 
-# Properly source FreeSurfer so mri_vol2vol etc. are in PATH
+# 1) Load freesurfer FIRST (so it sets FREESURFER_HOME and wrapper scripts)
+module load freesurfer
+
+# 2) If your cluster recommends it, *then* source SetUpFreeSurfer.sh
 if [ -n "$FREESURFER_HOME" ] && [ -f "$FREESURFER_HOME/SetUpFreeSurfer.sh" ]; then
+  # container may not need this, but it won't hurt
   # shellcheck disable=SC1090
   source "$FREESURFER_HOME/SetUpFreeSurfer.sh"
 fi
 
-# Conda environment
+# 3) Then load CUDA stuff (if you really need them here)
+module load cuda/12.9
+module load cudnn/9.11.0.98-cuda12
+
+# 4) Conda env
 . ~/miniconda3/bin/activate
 conda activate pasta
-conda install xgboost
-pip install xgboost
-# Ensure FSL writes NIfTI_GZ
+
 export FSLOUTPUTTYPE=NIFTI_GZ
 
+# DEBUG: confirm mri_vol2vol works *before* Python
+echo "=== which mri_vol2vol ==="
+which mri_vol2vol || echo "no mri_vol2vol in PATH"
+
+echo "=== mri_vol2vol --help (first 5 lines) ==="
+mri_vol2vol --help | head -n 5
+module load fsl
+# 5) Run script
+python cortex_mask.py
+
+
 #python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
-python xg_class.py \
-  --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv \
-  --pet-col pet_gt \
-  --folds 5
+#python xg_class.py \
+#  --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv \
+#  --pet-col pet_gt \
+#  --folds 5
 
 
 #python ROI_eval.py \
