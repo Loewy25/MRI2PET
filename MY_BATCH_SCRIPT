@@ -1,9 +1,9 @@
 #!/bin/bash
 
-#SBATCH --job-name=bl_MGDA_UB_1
+#SBATCH --job-name=lse_MGDA_UB_1
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpua408,gpua401,gpu07,gpu09
