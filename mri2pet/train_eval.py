@@ -54,7 +54,7 @@ def train_paggan(
     # =========================================================================
     avg_norm_recon = 0.0
     avg_norm_gan = 0.0
-    norm_decay = 0.95  # Exponential Moving Average decay (keeps ~20 batches of history)
+    norm_decay = 0.9  # Exponential Moving Average decay (keeps ~20 batches of history)
 
     for epoch in range(1, epochs + 1):
         # --- MGDA monitoring accumulators (per epoch) ---
