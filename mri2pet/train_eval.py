@@ -26,7 +26,7 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
     verbose: bool = True,
-    log_to_wandb: bool = False,   # <--- NEW FLAG
+    log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
     G.to(device)
     D.to(device)
@@ -36,20 +36,25 @@ def train_paggan(
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
-    #bce = nn.BCEWithLogitsLoss()
+    # bce = nn.BCEWithLogitsLoss()
 
     # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
     lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
-    ema_beta = 0.9                # EMA smoothing for B=1 noise (currently unused)
-    LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
-    EPS = 1e-8
-    TRUST_TAU = 0.5               # trust-region: max 50% change per step
-
+    
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
+
+    # =========================================================================
+    # [MGDA-UB STANDARDIZATION INIT]
+    # Initialize running averages for the gradient magnitudes (norms).
+    # We use these to standardize gradients so L1 loss doesn't dominate GAN loss.
+    # =========================================================================
+    avg_norm_recon = 0.0
+    avg_norm_gan = 0.0
+    norm_decay = 0.95  # Exponential Moving Average decay (keeps ~20 batches of history)
 
     for epoch in range(1, epochs + 1):
         # --- MGDA monitoring accumulators (per epoch) ---
@@ -78,8 +83,8 @@ def train_paggan(
                 fake = G(mri5)
 
             D.zero_grad(set_to_none=True)
-            pair_real = torch.cat([mri5, pet5], dim=1)           # [B,2,...]
-            pair_fake = torch.cat([mri5, fake.detach()], dim=1)  # [B,2,...]
+            pair_real = torch.cat([mri5, pet5], dim=1)            # [B,2,...]
+            pair_fake = torch.cat([mri5, fake.detach()], dim=1)   # [B,2,...]
 
             out_real = D(pair_real)   # [B,1,d,h,w]
             out_fake = D(pair_fake)   # [B,1,d,h,w]
@@ -97,47 +102,62 @@ def train_paggan(
             # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-    
+            
             # LSGAN generator loss:
-            #  1/2 * E[(D(fake) - 1)^2]
             loss_gan   = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
             loss_l1    = l1_loss(fake, pet5)
             ssim_val   = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
 
-            # ========================= MGDA-UB (Two tasks) =========================
-            # Compute output-space gradients wrt 'fake' for each objective
-            v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # ∇_fake L_recon
-            v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # ∇_fake L_gan
+            # ========================= MGDA-UB (Standardized) =========================
+            # 1. Compute output-space gradients wrt 'fake' for each objective
+            #    We retain_graph=True because we need to backprop twice (conceptually)
+            v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # Recon Gradient
+            v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # GAN Gradient
             
-            # IMPORTANT: do NOT unit-normalize v1/v2 here.
-            # With 2 tasks, unit-norm gradients force the closed-form alpha to be exactly 0.5.
+            # 2. Update Running Averages (Standardization Logic)
+            current_n1 = v1.norm().item()
+            current_n2 = v2.norm().item()
+
+            # Initialize if first batch, otherwise use EMA
+            if avg_norm_recon == 0: avg_norm_recon = current_n1
+            else: avg_norm_recon = norm_decay * avg_norm_recon + (1 - norm_decay) * current_n1
             
+            if avg_norm_gan == 0: avg_norm_gan = current_n2
+            else: avg_norm_gan = norm_decay * avg_norm_gan + (1 - norm_decay) * current_n2
+            
+            # 3. Scale the gradients by their history
+            #    This ensures v1_s and v2_s are roughly on the same scale (~1.0)
+            #    so MGDA judges them by relative urgency, not absolute size.
+            v1_s = v1 / (avg_norm_recon + 1e-8)
+            v2_s = v2 / (avg_norm_gan + 1e-8)
+            
+            V1 = v1_s.reshape(v1_s.size(0), -1)
+            V2 = v2_s.reshape(v2_s.size(0), -1)
+            
+            # --- MGDA monitoring: cosine similarity & RAW grad norms ---
             eps = 1e-12
-            V1 = v1.reshape(v1.size(0), -1)
-            V2 = v2.reshape(v2.size(0), -1)
-            
-            # --- MGDA monitoring: cosine similarity & grad norms (per batch) ---
             cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
             cos_mean = cos_batch.mean().item()
             cos_running += cos_mean
             
-            grad_recon_running += v1.norm().item()
-            grad_gan_running += v2.norm().item()
+            grad_recon_running += current_n1 # Log the RAW norm for sanity check
+            grad_gan_running += current_n2   # Log the RAW norm
             # -------------------------------------------------------------
             
-            # Closed-form α* for 2 tasks (per-sample), then robust median
+            # 4. Closed-form α* for 2 tasks using SCALED gradients
             diff = V2 - V1
-            num = (diff * V2).sum(dim=1)              # (g2 - g1) · g2
-            den = (diff * diff).sum(dim=1) + eps      # ||g1 - g2||^2
+            num = (diff * V2).sum(dim=1)             # (g2 - g1) · g2
+            den = (diff * diff).sum(dim=1) + eps     # ||g1 - g2||^2
             alpha_batch = torch.clamp(num / den, 0.0, 1.0)
             alpha = alpha_batch.median()
             
             alpha_running += float(alpha.item())
             
-            # Combined output-space direction and single backward through G
-            v_comb = alpha * v1 + (1.0 - alpha) * v2
+            # 5. Combined output-space direction using SCALED gradients
+            #    We backward the SCALED version. This acts as an adaptive LR.
+            v_comb = alpha * v1_s + (1.0 - alpha) * v2_s
             
             opt_G.zero_grad(set_to_none=True)
             fake.backward(v_comb)
@@ -203,7 +223,7 @@ def train_paggan(
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA] alpha={avg_alpha:.3f}  "
+                    f"      [MGDA-Std] alpha={avg_alpha:.3f}  "
                     f"cos(v1,v2)={avg_cos:.3f}  "
                     f"||grad_recon||={avg_grad_recon:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
@@ -217,7 +237,7 @@ def train_paggan(
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
             )
             print(
-                f"      [MGDA] alpha={avg_alpha:.3f}  "
+                f"      [MGDA-Std] alpha={avg_alpha:.3f}  "
                 f"cos(v1,v2)={avg_cos:.3f}  "
                 f"||grad_recon||={avg_grad_recon:.3e}  "
                 f"||grad_gan||={avg_grad_gan:.3e}"
@@ -246,7 +266,6 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
-
 
 @torch.no_grad()
 def evaluate_paggan(
