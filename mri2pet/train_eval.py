@@ -23,10 +23,10 @@ def train_paggan(
     device: torch.device,
     epochs: int = EPOCHS,
     gamma: float = GAMMA,
-    lambda_gan: float = LAMBDA_GAN,   # kept for API compatibility (not used by WGAN)
+    lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
     verbose: bool = True,
-    log_to_wandb: bool = False,
+    log_to_wandb: bool = False,   # <--- NEW FLAG
 ) -> Dict[str, Any]:
     G.to(device)
     D.to(device)
@@ -35,42 +35,15 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
+    adv_criterion = nn.MSELoss()
+    #bce = nn.BCEWithLogitsLoss()
 
-    # ---- WGAN-GP knobs ----
-    LAMBDA_GP = 10.0
-    N_CRITIC = 5
-
-    def _critic_score_map_to_scalar(out: torch.Tensor) -> torch.Tensor:
-        # out: [B,1,d,h,w] -> [B]
-        return out.view(out.size(0), -1).mean(dim=1)
-
-    def _grad_penalty(Dnet: nn.Module, real_pair: torch.Tensor, fake_pair: torch.Tensor) -> torch.Tensor:
-        # real_pair, fake_pair: [B,2,D,H,W]
-        B = real_pair.size(0)
-        eps = torch.rand(B, 1, 1, 1, 1, device=real_pair.device, dtype=real_pair.dtype)
-        interp = eps * real_pair + (1.0 - eps) * fake_pair
-        interp.requires_grad_(True)
-
-        out = Dnet(interp)                       # [B,1,d,h,w]
-        out_s = _critic_score_map_to_scalar(out) # [B]
-
-        grad = torch.autograd.grad(
-            outputs=out_s.sum(),
-            inputs=interp,
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-        grad = grad.view(B, -1)
-        gp = ((grad.norm(2, dim=1) - 1.0) ** 2).mean()
-        return gp
-
-    # === Global Gradient‑Ratio Controller (kept; unused) ===
-    lambda_g = float(lambda_gan)
-    ema_beta = 0.9
-    LAM_MIN, LAM_MAX = 0.05, 5.0
+    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
+    lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
+    ema_beta = 0.9                # EMA smoothing for B=1 noise (currently unused)
+    LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
     EPS = 1e-8
-    TRUST_TAU = 0.5
+    TRUST_TAU = 0.5               # trust-region: max 50% change per step
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -79,11 +52,11 @@ def train_paggan(
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
     for epoch in range(1, epochs + 1):
+        # --- MGDA monitoring accumulators (per epoch) ---
         alpha_running = 0.0
         cos_running = 0.0
         grad_recon_running = 0.0
         grad_gan_running = 0.0
-
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
@@ -95,83 +68,88 @@ def train_paggan(
 
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
+            B = mri.size(0) if mri.dim() == 5 else 1
 
+            # ---- Update D ----
             mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
             pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
 
-            # ---- Update D / Critic (WGAN-GP) ----
-            d_loss_acc = 0.0
-            for _ in range(N_CRITIC):
-                with torch.no_grad():
-                    fake = G(mri5)
+            with torch.no_grad():
+                fake = G(mri5)
 
-                D.zero_grad(set_to_none=True)
+            D.zero_grad(set_to_none=True)
+            pair_real = torch.cat([mri5, pet5], dim=1)           # [B,2,...]
+            pair_fake = torch.cat([mri5, fake.detach()], dim=1)  # [B,2,...]
 
-                pair_real = torch.cat([mri5, pet5], dim=1)           # [B,2,...]
-                pair_fake = torch.cat([mri5, fake.detach()], dim=1)  # [B,2,...]
+            out_real = D(pair_real)   # [B,1,d,h,w]
+            out_fake = D(pair_fake)   # [B,1,d,h,w]
 
-                out_real = D(pair_real)  # [B,1,d,h,w]
-                out_fake = D(pair_fake)  # [B,1,d,h,w]
+            loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
+            loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
+            loss_D = 0.5 * (loss_D_real + loss_D_fake)
+            loss_D.backward()
+            torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
+            opt_D.step()
 
-                real_s = _critic_score_map_to_scalar(out_real)  # [B]
-                fake_s = _critic_score_map_to_scalar(out_fake)  # [B]
-
-                w_dist = fake_s.mean() - real_s.mean()          # minimize this
-                gp = _grad_penalty(D, pair_real, pair_fake)
-
-                loss_D = w_dist + LAMBDA_GP * gp
-
-                loss_D.backward()
-                torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
-                opt_D.step()
-
-                d_loss_acc += float(loss_D.item())
-
-            # ---- Update G (MGDA between recon and WGAN) ----
+            # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
+            # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
-            loss_gan = -_critic_score_map_to_scalar(out_fake_for_G).mean()
-
-            loss_l1 = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)
+    
+            # LSGAN generator loss:
+            #  1/2 * E[(D(fake) - 1)^2]
+            loss_gan   = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            loss_l1    = l1_loss(fake, pet5)
+            ssim_val   = ssim3d(fake, pet5, data_range=data_range)
             loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # ========================= MGDA-UB (Two tasks, corrected) =========================
+
+            # ========================= MGDA-UB (Two tasks) =========================
+            # Compute output-space gradients wrt 'fake' for each objective
             v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # ∇_fake L_recon
             v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # ∇_fake L_gan
-
+            
+            # IMPORTANT: do NOT unit-normalize v1/v2 here.
+            # With 2 tasks, unit-norm gradients force the closed-form alpha to be exactly 0.5.
+            
             eps = 1e-12
             V1 = v1.reshape(v1.size(0), -1)
             V2 = v2.reshape(v2.size(0), -1)
-
+            
+            # --- MGDA monitoring: cosine similarity & grad norms (per batch) ---
             cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
-            cos_running += cos_batch.mean().item()
-
+            cos_mean = cos_batch.mean().item()
+            cos_running += cos_mean
+            
             grad_recon_running += v1.norm().item()
             grad_gan_running += v2.norm().item()
-
+            # -------------------------------------------------------------
+            
+            # Closed-form α* for 2 tasks (per-sample), then robust median
             diff = V2 - V1
             num = (diff * V2).sum(dim=1)              # (g2 - g1) · g2
             den = (diff * diff).sum(dim=1) + eps      # ||g1 - g2||^2
             alpha_batch = torch.clamp(num / den, 0.0, 1.0)
             alpha = alpha_batch.median()
-
+            
             alpha_running += float(alpha.item())
-
+            
+            # Combined output-space direction and single backward through G
             v_comb = alpha * v1 + (1.0 - alpha) * v2
-
+            
             opt_G.zero_grad(set_to_none=True)
             fake.backward(v_comb)
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # logging proxies
+
+            # For logging only (proxy scalar; not used for backward)
             loss_G_log = (loss_recon + loss_gan).detach().item()
 
             g_running += float(loss_G_log)
-            d_running += d_loss_acc / float(N_CRITIC)
+            d_running += loss_D.item()
             n_batches += 1
 
         # ---- Epoch aggregates ----
@@ -187,6 +165,7 @@ def train_paggan(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
+
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
@@ -229,6 +208,7 @@ def train_paggan(
                     f"||grad_recon||={avg_grad_recon:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
                 )
+
             G.train()
         elif verbose:
             dt = time.time() - t0
@@ -266,7 +246,6 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
-
 
 
 @torch.no_grad()
@@ -470,4 +449,5 @@ def evaluate_and_save(
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
     }
+
 
