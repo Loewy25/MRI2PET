@@ -3,10 +3,11 @@
 #SBATCH --job-name=m_MGDA_UB_5
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --exclude=gpua408,gpua401,gpu07,gpu09
+
+##SBATCH --exclude=gpua408,gpua401,gpu07,gpu09
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
 
