@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=m_MGDA_UB_4
+#SBATCH --job-name=m_MGDA_UB_2
 #SBATCH --mem=10G
 #SBATCH -t 23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
