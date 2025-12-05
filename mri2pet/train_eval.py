@@ -110,40 +110,40 @@ def train_paggan(
             # Compute output-space gradients wrt 'fake' for each objective
             v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # ∇_fake L_recon
             v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # ∇_fake L_gan
-
-            # L2-normalize to avoid scale bias between objectives
+            
+            # IMPORTANT: do NOT unit-normalize v1/v2 here.
+            # With 2 tasks, unit-norm gradients force the closed-form alpha to be exactly 0.5.
+            
             eps = 1e-12
-            v1n = v1 / (v1.norm() + eps)
-            v2n = v2 / (v2.norm() + eps)
-
-            # Closed-form α* for 2 tasks (per-sample), then take robust median
-            V1 = v1n.reshape(v1n.size(0), -1)
-            V2 = v2n.reshape(v2n.size(0), -1)
-
+            V1 = v1.reshape(v1.size(0), -1)
+            V2 = v2.reshape(v2.size(0), -1)
+            
             # --- MGDA monitoring: cosine similarity & grad norms (per batch) ---
-            cos_batch = (V1 * V2).sum(dim=1)          # since v1n, v2n are unit vectors
+            cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
             cos_mean = cos_batch.mean().item()
             cos_running += cos_mean
-
+            
             grad_recon_running += v1.norm().item()
             grad_gan_running += v2.norm().item()
             # -------------------------------------------------------------
-
+            
+            # Closed-form α* for 2 tasks (per-sample), then robust median
             diff = V2 - V1
-            num = (diff * V2).sum(dim=1)              # (v2 - v1) · v2
-            den = (diff * diff).sum(dim=1) + eps      # ||v1 - v2||^2
+            num = (diff * V2).sum(dim=1)              # (g2 - g1) · g2
+            den = (diff * diff).sum(dim=1) + eps      # ||g1 - g2||^2
             alpha_batch = torch.clamp(num / den, 0.0, 1.0)
-            alpha = alpha_batch.median()              # scalar α* for this batch
-
-            # accumulate alpha for epoch-wise average
+            alpha = alpha_batch.median()
+            
             alpha_running += float(alpha.item())
-
+            
             # Combined output-space direction and single backward through G
-            v_comb = alpha * v1n + (1.0 - alpha) * v2n
+            v_comb = alpha * v1 + (1.0 - alpha) * v2
+            
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_comb)                     # ONE backward through G
+            fake.backward(v_comb)
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
+
 
             # For logging only (proxy scalar; not used for backward)
             loss_G_log = (loss_recon + loss_gan).detach().item()
