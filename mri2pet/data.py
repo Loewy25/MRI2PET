@@ -80,38 +80,60 @@ class KariAV1451Dataset(Dataset):
     def __getitem__(self, idx: int):
         t1_path, pet_path, mask_path = self.items[idx]
         sid = os.path.basename(os.path.dirname(t1_path))
-
+    
         t1_img  = nib.load(t1_path);  t1  = np.asarray(t1_img.get_fdata(), dtype=np.float32)
         pet_img = nib.load(pet_path); pet = np.asarray(pet_img.get_fdata(), dtype=np.float32)
-
+    
         if mask_path is not None:
             m_img = nib.load(mask_path); mask = (np.asarray(m_img.get_fdata()) > 0)
         else:
             raise TypeError("No Mask")
-
+    
+        # === NEW: cortex ROI mask (optional) ===
+        cortex = None
+        cortex_path = os.path.join(os.path.dirname(t1_path), "mask_cortex.nii.gz")
+        if os.path.exists(cortex_path):
+            c_img = nib.load(cortex_path)
+            cortex = (np.asarray(c_img.get_fdata()) > 0)
+            if cortex.shape != t1.shape:
+                raise TypeError("mask_cortex is not in the same grid as T1/PET")
+            # keep cortex within brain (helps avoid stray voxels)
+            cortex = np.logical_and(cortex, mask)
+        else:
+            raise TypeError("No Cortex Mask")
+    
         orig_shape = tuple(t1.shape)
         t1_affine  = t1_img.affine
         pet_affine = pet_img.affine
-
+    
         if t1.shape != pet.shape:
             raise TypeError("T1 and PET are not in the same grid")
-
+    
         t1  = _maybe_resize(t1,  self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
-
+    
         if self.resize_to is not None and mask is not None:
             Dz, Hy, Wx = mask.shape
             td, th, tw = self.resize_to
             if (Dz,Hy,Wx) != (td,th,tw):
                 mask = nd_zoom(mask.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5
-
+    
+        # === NEW: resize cortex mask with nearest neighbor ===
+        if self.resize_to is not None and cortex is not None:
+            Dz, Hy, Wx = cortex.shape
+            td, th, tw = self.resize_to
+            if (Dz,Hy,Wx) != (td,th,tw):
+                cortex = nd_zoom(cortex.astype(np.float32), (td/Dz, th/Hy, tw/Wx), order=0) > 0.5
+            # keep within resized brain mask too
+            cortex = np.logical_and(cortex, mask)
+    
         t1n  = norm_mri_to_01(t1,  mask)
         petn = norm_pet_to_01(pet, mask=mask)
-
+    
         t1n_t  = torch.from_numpy(np.expand_dims(t1n,  axis=0))
         petn_t = torch.from_numpy(np.expand_dims(petn, axis=0))
-
+    
         meta = {
             "sid": sid,
             "t1_path": t1_path,
@@ -122,8 +144,11 @@ class KariAV1451Dataset(Dataset):
             "cur_shape": cur_shape,
             "resized_to": self.resize_to,
             "brain_mask": mask.astype(np.uint8) if mask is not None else None,
+            # === NEW ===
+            "cortex_mask": cortex.astype(np.uint8) if cortex is not None else None,
         }
         return t1n_t, petn_t, meta
+
 
 def _collate_keep_meta(batch: List[Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]]):
     if len(batch) == 1:
