@@ -119,12 +119,18 @@ class CondPatchDiscriminator3D(nn.Module):
         super().__init__()
         layers = []
         prev = in_ch
-        for c in [32, 64, 128, 256, 512]:
+
+        # PatchGAN-style: 3 downsampling layers (stride=2), then 2 local layers (stride=1)
+        channels = [32, 64, 128, 256, 512]
+        strides  = [2, 2, 2, 1, 1]
+
+        for c, s in zip(channels, strides):
             layers += [
-                nn.Conv3d(prev, c, kernel_size=3, stride=2, padding=1, bias=True),
+                nn.Conv3d(prev, c, kernel_size=3, stride=s, padding=1, bias=True),
                 nn.LeakyReLU(0.2, inplace=True),
             ]
             prev = c
+
         self.features = nn.Sequential(*layers)
         self.head = nn.Conv3d(prev, 1, kernel_size=3, padding=1, bias=True)  # patch logits
 
