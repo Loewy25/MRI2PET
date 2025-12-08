@@ -43,7 +43,7 @@ echo "=== mri_vol2vol --help (first 5 lines) ==="
 mri_vol2vol --help | head -n 5
 module load fsl
 # 5) Run script
-python cortex_mask.py
+python add_label.py
 
 
 #python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv --modality pet_raw
