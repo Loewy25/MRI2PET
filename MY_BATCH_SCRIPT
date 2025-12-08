@@ -42,6 +42,7 @@ which mri_vol2vol || echo "no mri_vol2vol in PATH"
 echo "=== mri_vol2vol --help (first 5 lines) ==="
 mri_vol2vol --help | head -n 5
 module load fsl
+pip install torch
 # 5) Run script
 #python add_label.py
 
