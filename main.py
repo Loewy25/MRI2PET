@@ -24,9 +24,9 @@ if __name__ == "__main__":
 
     # ---- NEW: wandb init ----
     wandb.init(
-        project="mri2pet",      # choose any project name
-        name=RUN_NAME,          # nice to match your RUN_NAME
-        dir=OUT_RUN,            # store wandb files under this run directory
+        project="mri2pet",      
+        name=RUN_NAME,          
+        dir=OUT_RUN,            
         config={
             "root_dir": ROOT_DIR,
             "run_name": RUN_NAME,
@@ -61,7 +61,6 @@ if __name__ == "__main__":
     G = Generator(in_ch=1, out_ch=1)
     D = CondPatchDiscriminator3D(in_ch=2)
 
-    # ---- NEW: optionally track gradients & params ----
     wandb.watch(G, log="gradients", log_freq=50)
     wandb.watch(D, log="gradients", log_freq=50)
 
@@ -71,7 +70,7 @@ if __name__ == "__main__":
         device=device, epochs=EPOCHS, gamma=GAMMA,
         lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE,
         verbose=True,
-        log_to_wandb=True,              # <--- NEW FLAG
+        log_to_wandb=True,              
     )
 
     # Save curves & CSV (still useful)
