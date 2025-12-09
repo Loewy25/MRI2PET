@@ -15,16 +15,20 @@ module load cuda/12.9
 module load cudnn/9.11.0.98-cuda12
 
 
-. ~/miniconda3/bin/activate
+ . ~/miniconda3/bin/activate
 conda activate pasta
 
 pip install wandb
 
-
-wandb login
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
+# wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
+
+# ---- NEW: per-job config ----
+export RUN_NAME="roi_recon_patch_lse_mgda_ub_1_fold0"
+export FOLD_INDEX=0   # fold1
 
 python main.py
+
 
 
 
