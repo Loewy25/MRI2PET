@@ -26,7 +26,7 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
     verbose: bool = True,
-    log_to_wandb: bool = False,   # <--- NEW FLAG
+    log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
     G.to(device)
     D.to(device)
@@ -35,14 +35,10 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
-    bce = nn.BCEWithLogitsLoss()
+    adv_criterion = nn.MSELoss()
 
     # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
-    lambda_g = float(lambda_gan)  # initialize from config LAMBDA_GAN
-    ema_beta = 0.9                # EMA smoothing for B=1 noise (currently unused)
-    LAM_MIN, LAM_MAX = 0.05, 5.0  # clamp range for stability
-    EPS = 1e-8
-    TRUST_TAU = 0.5               # trust-region: max 50% change per step
+    lambda_g = float(lambda_gan)  # (kept as-is; not used in pure MGDA path)
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -50,18 +46,78 @@ def train_paggan(
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
+    # =========================================================================
+    # [MGDA-UB STANDARDIZATION INIT]
+    # We now have:
+    #   - global recon gradient (v_global)
+    #   - ROI/cortex recon gradient (v_roi)
+    #   - GAN gradient (v_gan)
+    # and we do 2-level MGDA:
+    #   (global vs roi) -> v_recon, then (v_recon vs gan) -> v_final
+    # =========================================================================
+    avg_norm_recon_global = 0.0
+    avg_norm_recon_roi = 0.0
+    avg_norm_recon_combined = 0.0
+    avg_norm_gan = 0.0
+    norm_decay = 0.9
+
+    def _meta_to_cortex_mask(meta_any, B_expected: int) -> Optional[torch.Tensor]:
+        """
+        Returns cortex mask tensor [B,1,D,H,W] on device, or None if unavailable.
+        Supports meta as dict (B=1) or list of dicts (B>1).
+        """
+        if isinstance(meta_any, dict):
+            cm = meta_any.get("cortex_mask", None)
+            if cm is None:
+                return None
+            t = torch.from_numpy(cm.astype(np.float32))
+            if t.dim() == 3:
+                t = t.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
+            elif t.dim() == 4:
+                t = t.unsqueeze(0)  # [1,?,D,H,W] (rare)
+            return t.to(device, non_blocking=True)
+
+        if isinstance(meta_any, list) and len(meta_any) == B_expected:
+            masks = []
+            for m in meta_any:
+                if not isinstance(m, dict):
+                    return None
+                cm = m.get("cortex_mask", None)
+                if cm is None:
+                    return None
+                t = torch.from_numpy(cm.astype(np.float32))
+                if t.dim() != 3:
+                    return None
+                masks.append(t.unsqueeze(0).unsqueeze(0))  # [1,1,D,H,W]
+            return torch.cat(masks, dim=0).to(device, non_blocking=True)
+
+        return None
+
+    def _masked_l1(fake5: torch.Tensor, pet5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
+        """
+        Masked mean absolute error over mask voxels.
+        fake5, pet5, mask5: [B,1,D,H,W]
+        """
+        diff = (fake5 - pet5).abs() * mask5
+        num = diff.sum(dim=(1, 2, 3, 4))
+        den = mask5.sum(dim=(1, 2, 3, 4)) + 1e-6
+        return (num / den).mean()
+
     for epoch in range(1, epochs + 1):
         # --- MGDA monitoring accumulators (per epoch) ---
-        alpha_running = 0.0
+        alpha_running = 0.0               # stage-2 alpha (recon vs gan)
+        alpha_recon_running = 0.0         # stage-1 alpha (global vs roi)
         cos_running = 0.0
-        grad_recon_running = 0.0
-        grad_gan_running = 0.0
+        grad_recon_running = 0.0          # raw ||grad_global||
+        grad_roi_running = 0.0            # raw ||grad_roi||
+        grad_gan_running = 0.0            # raw ||grad_gan||
+
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
 
         for batch in train_loader:
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                mri, pet, _ = batch
+                mri, pet, meta = batch
             else:
                 raise ValueError("There is something wrong happened when passing data")
 
@@ -77,16 +133,15 @@ def train_paggan(
                 fake = G(mri5)
 
             D.zero_grad(set_to_none=True)
-            pair_real = torch.cat([mri5, pet5], dim=1)           # [B,2,...]
-            pair_fake = torch.cat([mri5, fake.detach()], dim=1)  # [B,2,...]
+            pair_real = torch.cat([mri5, pet5], dim=1)
+            pair_fake = torch.cat([mri5, fake.detach()], dim=1)
 
-            out_real = D(pair_real)   # [B,1,d,h,w]
-            out_fake = D(pair_fake)   # [B,1,d,h,w]
+            out_real = D(pair_real)
+            out_fake = D(pair_fake)
 
-            loss_D = (
-                bce(out_real, torch.ones_like(out_real))
-                + bce(out_fake, torch.zeros_like(out_fake))
-            )
+            loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
+            loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
+            loss_D = 0.5 * (loss_D_real + loss_D_fake)
             loss_D.backward()
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
@@ -94,57 +149,115 @@ def train_paggan(
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
-            # forward through G and D (for GAN loss)
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # losses (two objectives): Recon = gamma*(L1 + (1-SSIM)), GAN = BCE
-            loss_gan = bce(out_fake_for_G, torch.ones_like(out_fake_for_G))
+            # GAN objective (as-is)
+            loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
+
+            # Global recon objective (as-is)
             loss_l1 = l1_loss(fake, pet5)
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
-            loss_recon = gamma * (loss_l1 + (1.0 - ssim_val))
+            loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # ========================= MGDA-UB (Two tasks) =========================
-            # Compute output-space gradients wrt 'fake' for each objective
-            v1 = torch.autograd.grad(loss_recon, fake, retain_graph=True)[0]  # ∇_fake L_recon
-            v2 = torch.autograd.grad(loss_gan,   fake, retain_graph=True)[0]  # ∇_fake L_gan
+            # === NEW: ROI/cortex recon objective (masked L1) ===
+            cortex5 = _meta_to_cortex_mask(meta, B_expected=(mri5.size(0)))
+            use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
+            if use_roi:
+                loss_recon_roi = _masked_l1(fake, pet5, cortex5)
+            else:
+                # dummy scalar to keep code simple; we will skip ROI MGDA if not usable
+                loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # L2-normalize to avoid scale bias between objectives
+            # ========================= MGDA-UB (Hierarchical) =========================
+            # Stage 1: (global recon) vs (ROI recon) -> v_recon
+            v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
+            current_nglobal = v_global.norm().item()
+            if avg_norm_recon_global == 0:
+                avg_norm_recon_global = current_nglobal
+            else:
+                avg_norm_recon_global = norm_decay * avg_norm_recon_global + (1 - norm_decay) * current_nglobal
+            v_global_s = v_global / (avg_norm_recon_global + 1e-8)
+
+            if use_roi:
+                v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0]
+                current_nroi = v_roi.norm().item()
+                if avg_norm_recon_roi == 0:
+                    avg_norm_recon_roi = current_nroi
+                else:
+                    avg_norm_recon_roi = norm_decay * avg_norm_recon_roi + (1 - norm_decay) * current_nroi
+                v_roi_s = v_roi / (avg_norm_recon_roi + 1e-8)
+
+                Vg = v_global_s.reshape(v_global_s.size(0), -1)
+                Vr = v_roi_s.reshape(v_roi_s.size(0), -1)
+
+                eps = 1e-12
+                diff1 = Vr - Vg
+                num1 = (diff1 * Vr).sum(dim=1)
+                den1 = (diff1 * diff1).sum(dim=1) + eps
+                alpha1_batch = torch.clamp(num1 / den1, 0.0, 1.0)
+                alpha1 = alpha1_batch.median()  # scalar tensor
+
+                # recon direction (standardized space)
+                v_recon = alpha1 * v_global_s + (1.0 - alpha1) * v_roi_s
+
+                alpha_recon_running += float(alpha1.item())
+                grad_roi_running += current_nroi
+            else:
+                # no ROI available -> use global recon only
+                alpha1 = torch.tensor(1.0, device=device, dtype=fake.dtype)
+                v_recon = v_global_s
+                current_nroi = 0.0
+                alpha_recon_running += float(alpha1.item())
+                grad_roi_running += 0.0
+
+            grad_recon_running += current_nglobal
+
+            # Stage 2: (recon) vs (gan) -> v_final
+            v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0]
+            current_ngan = v_gan.norm().item()
+            if avg_norm_gan == 0:
+                avg_norm_gan = current_ngan
+            else:
+                avg_norm_gan = norm_decay * avg_norm_gan + (1 - norm_decay) * current_ngan
+            v_gan_s = v_gan / (avg_norm_gan + 1e-8)
+
+            # standardize combined recon direction for stage-2
+            current_nrecon_comb = v_recon.norm().item()
+            if avg_norm_recon_combined == 0:
+                avg_norm_recon_combined = current_nrecon_comb
+            else:
+                avg_norm_recon_combined = norm_decay * avg_norm_recon_combined + (1 - norm_decay) * current_nrecon_comb
+            v_recon_s2 = v_recon / (avg_norm_recon_combined + 1e-8)
+
+            V1 = v_recon_s2.reshape(v_recon_s2.size(0), -1)
+            V2 = v_gan_s.reshape(v_gan_s.size(0), -1)
+
+            # monitoring cosine similarity (recon vs gan)
             eps = 1e-12
-            v1n = v1 / (v1.norm() + eps)
-            v2n = v2 / (v2.norm() + eps)
+            cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
+            cos_running += cos_batch.mean().item()
 
-            # Closed-form α* for 2 tasks (per-sample), then take robust median
-            V1 = v1n.reshape(v1n.size(0), -1)
-            V2 = v2n.reshape(v2n.size(0), -1)
+            grad_gan_running += current_ngan
 
-            # --- MGDA monitoring: cosine similarity & grad norms (per batch) ---
-            cos_batch = (V1 * V2).sum(dim=1)          # since v1n, v2n are unit vectors
-            cos_mean = cos_batch.mean().item()
-            cos_running += cos_mean
+            # closed-form α for stage-2
+            diff2 = V2 - V1
+            num2 = (diff2 * V2).sum(dim=1)
+            den2 = (diff2 * diff2).sum(dim=1) + eps
+            alpha2_batch = torch.clamp(num2 / den2, 0.0, 1.0)
+            alpha2 = alpha2_batch.median()
 
-            grad_recon_running += v1.norm().item()
-            grad_gan_running += v2.norm().item()
-            # -------------------------------------------------------------
+            alpha_running += float(alpha2.item())
 
-            diff = V2 - V1
-            num = (diff * V2).sum(dim=1)              # (v2 - v1) · v2
-            den = (diff * diff).sum(dim=1) + eps      # ||v1 - v2||^2
-            alpha_batch = torch.clamp(num / den, 0.0, 1.0)
-            alpha = alpha_batch.median()              # scalar α* for this batch
+            v_final = alpha2 * v_recon_s2 + (1.0 - alpha2) * v_gan_s
 
-            # accumulate alpha for epoch-wise average
-            alpha_running += float(alpha.item())
-
-            # Combined output-space direction and single backward through G
-            v_comb = alpha * v1n + (1.0 - alpha) * v2n
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_comb)                     # ONE backward through G
+            fake.backward(v_final)
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
             # For logging only (proxy scalar; not used for backward)
-            loss_G_log = (loss_recon + loss_gan).detach().item()
+            loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
@@ -153,9 +266,11 @@ def train_paggan(
         # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
-        avg_alpha = alpha_running / max(1, n_batches)
+        avg_alpha2 = alpha_running / max(1, n_batches)
+        avg_alpha1 = alpha_recon_running / max(1, n_batches)
         avg_cos = cos_running / max(1, n_batches)
         avg_grad_recon = grad_recon_running / max(1, n_batches)
+        avg_grad_roi = grad_roi_running / max(1, n_batches)
         avg_grad_gan = grad_gan_running / max(1, n_batches)
 
         hist["train_G"].append(avg_g)
@@ -201,9 +316,11 @@ def train_paggan(
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA] alpha={avg_alpha:.3f}  "
-                    f"cos(v1,v2)={avg_cos:.3f}  "
-                    f"||grad_recon||={avg_grad_recon:.3e}  "
+                    f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
+                    f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
+                    f"cos(recon,gan)={avg_cos:.3f}  "
+                    f"||grad_global||={avg_grad_recon:.3e}  "
+                    f"||grad_roi||={avg_grad_roi:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
                 )
 
@@ -215,9 +332,11 @@ def train_paggan(
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
             )
             print(
-                f"      [MGDA] alpha={avg_alpha:.3f}  "
-                f"cos(v1,v2)={avg_cos:.3f}  "
-                f"||grad_recon||={avg_grad_recon:.3e}  "
+                f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
+                f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
+                f"cos(recon,gan)={avg_cos:.3f}  "
+                f"||grad_global||={avg_grad_recon:.3e}  "
+                f"||grad_roi||={avg_grad_roi:.3e}  "
                 f"||grad_gan||={avg_grad_gan:.3e}"
             )
 
@@ -227,9 +346,11 @@ def train_paggan(
                 "epoch": epoch,
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
-                "mgda/alpha": avg_alpha,
-                "mgda/cos_v1v2": avg_cos,
-                "mgda/grad_recon_norm": avg_grad_recon,
+                "mgda/alpha": avg_alpha2,
+                "mgda/alpha_global_vs_roi": avg_alpha1,
+                "mgda/cos_recon_gan": avg_cos,
+                "mgda/grad_recon_global_norm": avg_grad_recon,
+                "mgda/grad_recon_roi_norm": avg_grad_roi,
                 "mgda/grad_gan_norm": avg_grad_gan,
             }
             if val_recon_epoch is not None:
@@ -447,3 +568,4 @@ def evaluate_and_save(
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
     }
+
