@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=patch2
+#SBATCH --job-name=patch3
 #SBATCH --mem=10G
 #SBATCH -t 15:50:00
 #SBATCH --gres=gpu:tesla_a100:1
@@ -24,8 +24,8 @@ export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="roi_recon_patch_lse_mgda_ub_1_fold3"
-export FOLD_INDEX=3   # fold1
+export RUN_NAME="roi_recon_patch_lse_mgda_ub_1_fold2"
+export FOLD_INDEX=2   # fold1
 
 python main.py
 
