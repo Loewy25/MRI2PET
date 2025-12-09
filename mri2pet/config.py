@@ -29,7 +29,6 @@ LR_D        = 4e-4
 GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
-# Keep fixed SUVR range as in your current code
 DATA_RANGE  = 3.5
 
 # Torch flags
