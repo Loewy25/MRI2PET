@@ -37,7 +37,7 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
 
-    # === Global Gradient-Ratio Controller (dynamic lambda_g) ===
+    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
     lambda_g = float(lambda_gan)  # (kept as-is; not used in pure MGDA path)
 
     best_val = float("inf")
@@ -278,50 +278,25 @@ def train_paggan(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
-        val_global_epoch: Optional[float] = None
-        val_roi_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_sum, v_batches = 0.0, 0
-                val_global_sum, val_roi_sum = 0.0, 0.0
-
+                val_recon, v_batches = 0.0, 0
                 for batch in val_loader:
-                    # expect (mri, pet, meta) so ROI is available
-                    if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
-                        raise ValueError("Validation loader must return (mri, pet, meta) for ROI validation.")
-                    mri, pet, meta = batch
-
+                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                        mri, pet, _ = batch
+                    else:
+                        mri, pet = batch
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
-
-                    mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
-                    pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
-
-                    fake = G(mri5)
-                    pet_for_metric = pet5
-
-                    # global recon
+                    fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
+                    pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
                     loss_l1_v = l1_loss(fake, pet_for_metric)
                     ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
-                    loss_global = loss_l1_v + (1.0 - ssim_v)
-
-                    # ROI recon
-                    cortex5 = _meta_to_cortex_mask(meta, B_expected=mri5.size(0))
-                    if (cortex5 is None) or (float(cortex5.sum().item()) <= 0.0):
-                        raise ValueError("Validation batch missing usable cortex_mask in meta.")
-                    loss_roi = _masked_l1(fake, pet_for_metric, cortex5)
-
-                    val_global_sum += float(loss_global.item())
-                    val_roi_sum += float(loss_roi.item())
-                    val_sum += float((loss_global + loss_roi).item())
+                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
                     v_batches += 1
-
-            val_recon = val_sum / max(1, v_batches)
-            val_global_epoch = val_global_sum / max(1, v_batches)
-            val_roi_epoch = val_roi_sum / max(1, v_batches)
-
+            val_recon /= max(1, v_batches)
             val_recon_epoch = val_recon
             hist["val_recon"].append(val_recon)
 
@@ -337,8 +312,7 @@ def train_paggan(
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"Val(global+roi): {val_recon:.4f}  "
-                    f"(global={val_global_epoch:.4f}, roi={val_roi_epoch:.4f})  "
+                    f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
@@ -380,12 +354,8 @@ def train_paggan(
                 "mgda/grad_gan_norm": avg_grad_gan,
             }
             if val_recon_epoch is not None:
-                log_dict["val/recon_total"] = val_recon_epoch
-                if val_global_epoch is not None:
-                    log_dict["val/recon_global"] = val_global_epoch
-                if val_roi_epoch is not None:
-                    log_dict["val/recon_roi"] = val_roi_epoch
-                log_dict["val/best_recon_total"] = best_val
+                log_dict["val/recon_loss"] = val_recon_epoch
+                log_dict["val/best_recon_loss"] = best_val
             wandb.log(log_dict, step=epoch)
 
     # ---- Load best weights ----
@@ -395,7 +365,6 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
-
 
 
 @torch.no_grad()
