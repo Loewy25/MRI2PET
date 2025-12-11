@@ -8,8 +8,10 @@ import torch.nn.functional as F
 
 from .config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
-    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1
+    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    LAMBDA_SENS, LAMBDA_LOCAL, FGSM_EPS, SENS_TAU,
 )
+
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 import wandb
@@ -25,6 +27,10 @@ def train_paggan(
     gamma: float = GAMMA,
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
+    lambda_sens: float = LAMBDA_SENS,
+    lambda_local: float = LAMBDA_LOCAL,
+    fgsm_eps: float = FGSM_EPS,
+    sens_tau: float = SENS_TAU,
     verbose: bool = True,
     log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
@@ -112,9 +118,17 @@ def train_paggan(
         grad_roi_running = 0.0            # raw ||grad_roi||
         grad_gan_running = 0.0            # raw ||grad_gan||
 
+        # --- NEW: loss-component accumulators (per epoch) ---
+        recon_running = 0.0               # L_global (pre-aug)
+        roi_running = 0.0                 # L_roi
+        gan_running = 0.0                 # L_gan
+        sens_running = 0.0                # L_sens
+        local_running = 0.0               # L_local
+        delta_cortex_running = 0.0        # Δ_cortex
+        delta_out_running = 0.0           # Δ_outside
+
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
-
         for batch in train_loader:
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
                 mri, pet, meta = batch
@@ -149,6 +163,10 @@ def train_paggan(
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
+            # enable gradients w.r.t. MRI for FGSM/Jacobian regularization
+            mri5 = mri5.detach()
+            mri5.requires_grad_(True)
+
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
@@ -160,7 +178,7 @@ def train_paggan(
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # === NEW: ROI/cortex recon objective (masked L1) ===
+            # === ROI/cortex recon objective (masked L1) ===
             cortex5 = _meta_to_cortex_mask(meta, B_expected=(mri5.size(0)))
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
             if use_roi:
@@ -169,9 +187,62 @@ def train_paggan(
                 # dummy scalar to keep code simple; we will skip ROI MGDA if not usable
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
+            # === NEW: FGSM-based cortex sensitivity & locality losses ===
+            loss_sens = torch.zeros((), device=device, dtype=fake.dtype)
+            loss_local = torch.zeros((), device=device, dtype=fake.dtype)
+            delta_cortex = torch.zeros((), device=device, dtype=fake.dtype)
+            delta_out = torch.zeros((), device=device, dtype=fake.dtype)
+
+            if use_roi and fgsm_eps > 0.0:
+                # gradient of recon loss w.r.t input MRI
+                grad_x = torch.autograd.grad(
+                    loss_recon_global,
+                    mri5,
+                    retain_graph=True,
+                    create_graph=False,
+                )[0]
+
+                # cortex-only FGSM perturbation
+                delta_x = fgsm_eps * grad_x.sign() * cortex5
+                mri_pert = (mri5 + delta_x).detach()
+
+                with torch.no_grad():
+                    fake_pert = G(mri_pert)
+
+                # response magnitude inside and outside cortex
+                diff = (fake_pert - fake.detach()).abs()
+                M = cortex5
+                Mbar = 1.0 - M
+
+                num_cortex = M.sum(dim=(1, 2, 3, 4)) + 1e-6
+                delta_cortex = (diff * M).sum(dim=(1, 2, 3, 4)) / num_cortex
+                delta_cortex = delta_cortex.mean()
+
+                num_out = Mbar.sum(dim=(1, 2, 3, 4)) + 1e-6
+                delta_out = (diff * Mbar).sum(dim=(1, 2, 3, 4)) / num_out
+                delta_out = delta_out.mean()
+
+                # sensitivity: enforce non-zero response in cortex
+                if sens_tau > 0.0:
+                    loss_sens = torch.clamp(sens_tau - delta_cortex, min=0.0)
+
+                # locality: penalize response outside cortex
+                loss_local = delta_out
+
+            # augmented global recon loss (used as Task A in MGDA)
+            loss_recon_global_aug = (
+                loss_recon_global
+                + lambda_sens * loss_sens
+                + lambda_local * loss_local
+            )
+
             # ========================= MGDA-UB (Hierarchical) =========================
             # Stage 1: (global recon) vs (ROI recon) -> v_recon
-            v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
+            v_global = torch.autograd.grad(
+                loss_recon_global_aug,
+                fake,
+                retain_graph=True,
+            )[0]
             current_nglobal = v_global.norm().item()
             if avg_norm_recon_global == 0:
                 avg_norm_recon_global = current_nglobal
@@ -257,11 +328,25 @@ def train_paggan(
             opt_G.step()
 
             # For logging only (proxy scalar; not used for backward)
-            loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
+            loss_G_log = (
+                loss_recon_global_aug
+                + (loss_recon_roi if use_roi else 0.0)
+                + loss_gan
+            ).detach().item()
+
+            # accumulate epoch stats
+            recon_running += loss_recon_global.detach().item()
+            roi_running += (loss_recon_roi.detach().item() if use_roi else 0.0)
+            gan_running += loss_gan.detach().item()
+            sens_running += loss_sens.detach().item()
+            local_running += loss_local.detach().item()
+            delta_cortex_running += delta_cortex.detach().item()
+            delta_out_running += delta_out.detach().item()
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
             n_batches += 1
+
 
         # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
@@ -272,6 +357,15 @@ def train_paggan(
         avg_grad_recon = grad_recon_running / max(1, n_batches)
         avg_grad_roi = grad_roi_running / max(1, n_batches)
         avg_grad_gan = grad_gan_running / max(1, n_batches)
+
+        avg_recon = recon_running / max(1, n_batches)
+        avg_roi = roi_running / max(1, n_batches)
+        avg_gan = gan_running / max(1, n_batches)
+        avg_sens = sens_running / max(1, n_batches)
+        avg_local = local_running / max(1, n_batches)
+        avg_delta_cortex = delta_cortex_running / max(1, n_batches)
+        avg_delta_out = delta_out_running / max(1, n_batches)
+
 
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
@@ -316,6 +410,11 @@ def train_paggan(
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
+                    f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  "
+                    f"gan={avg_gan:.4f}  sens={avg_sens:.4f}  local={avg_local:.4f}  "
+                    f"Δcortex={avg_delta_cortex:.4f}  Δout={avg_delta_out:.4f}"
+                )
+                print(
                     f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
                     f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
                     f"cos(recon,gan)={avg_cos:.3f}  "
@@ -324,12 +423,18 @@ def train_paggan(
                     f"||grad_gan||={avg_grad_gan:.3e}"
                 )
 
+
             G.train()
         elif verbose:
             dt = time.time() - t0
             print(
                 f"Epoch [{epoch:03d}/{epochs}]  "
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
+            )
+            print(
+                f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  "
+                f"gan={avg_gan:.4f}  sens={avg_sens:.4f}  local={avg_local:.4f}  "
+                f"Δcortex={avg_delta_cortex:.4f}  Δout={avg_delta_out:.4f}"
             )
             print(
                 f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
@@ -340,12 +445,23 @@ def train_paggan(
                 f"||grad_gan||={avg_grad_gan:.3e}"
             )
 
+
+        # ---- wandb logging per epoch ----
         # ---- wandb logging per epoch ----
         if log_to_wandb and wandb.run is not None:
             log_dict = {
                 "epoch": epoch,
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
+                # NEW: loss component scales
+                "train/recon_global": avg_recon,
+                "train/recon_roi": avg_roi,
+                "train/gan": avg_gan,
+                "train/sens": avg_sens,
+                "train/local": avg_local,
+                "train/delta_cortex": avg_delta_cortex,
+                "train/delta_out": avg_delta_out,
+                # existing MGDA diagnostics
                 "mgda/alpha": avg_alpha2,
                 "mgda/alpha_global_vs_roi": avg_alpha1,
                 "mgda/cos_recon_gan": avg_cos,
