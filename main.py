@@ -5,7 +5,8 @@ import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    LAMBDA_SENS, LAMBDA_LOCAL, FGSM_EPS, SENS_TAU,
 )
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
@@ -24,9 +25,9 @@ if __name__ == "__main__":
 
     # ---- NEW: wandb init ----
     wandb.init(
-        project="mri2pet",      
-        name=RUN_NAME,          
-        dir=OUT_RUN,            
+        project="mri2pet",
+        name=RUN_NAME,
+        dir=OUT_RUN,
         config={
             "root_dir": ROOT_DIR,
             "run_name": RUN_NAME,
@@ -36,8 +37,14 @@ if __name__ == "__main__":
             "data_range": DATA_RANGE,
             "batch_size": 1,
             "resize_to": (128, 128, 128),
+            # ---- NEW: Jacobian regularization hyperparameters ----
+            "lambda_sens": LAMBDA_SENS,
+            "lambda_local": LAMBDA_LOCAL,
+            "fgsm_eps": FGSM_EPS,
+            "sens_tau": SENS_TAU,
         },
     )
+
 
     # Build loaders
     if os.path.isfile(FOLD_CSV):
@@ -67,11 +74,19 @@ if __name__ == "__main__":
     # Train
     out = train_paggan(
         G, D, train_loader, val_loader,
-        device=device, epochs=EPOCHS, gamma=GAMMA,
-        lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE,
+        device=device,
+        epochs=EPOCHS,
+        gamma=GAMMA,
+        lambda_gan=LAMBDA_GAN,
+        data_range=DATA_RANGE,
+        lambda_sens=LAMBDA_SENS,
+        lambda_local=LAMBDA_LOCAL,
+        fgsm_eps=FGSM_EPS,
+        sens_tau=SENS_TAU,
         verbose=True,
-        log_to_wandb=True,              
+        log_to_wandb=True,
     )
+
 
     # Save curves & CSV (still useful)
     curves_path = os.path.join(OUT_RUN, "loss_curves.png")
