@@ -31,9 +31,16 @@ LR_D        = 4e-4
 GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
+
+LAMBDA_SENS  = float(os.environ.get("LAMBDA_SENS", "0.5"))
+LAMBDA_LOCAL = float(os.environ.get("LAMBDA_LOCAL", "0.5"))
+FGSM_EPS     = float(os.environ.get("FGSM_EPS", "0.01"))
+SENS_TAU     = float(os.environ.get("SENS_TAU", "0.01"))
+
 DATA_RANGE  = 3.5
 
 torch.backends.cudnn.benchmark = True
+
 
 SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")
 
