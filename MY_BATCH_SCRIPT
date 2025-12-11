@@ -21,11 +21,15 @@ conda activate pasta
 pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
-# wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
-# ---- NEW: per-job config ----
 export RUN_NAME="roi_recon_patch_lse_mgda_ub_1_fold4"
-export FOLD_INDEX=4 # fold1
+export FOLD_INDEX=4   # 0-based -> fold5
+
+# ---- NEW: Jacobian regularization hyperparams ----
+export LAMBDA_SENS=0.5    
+export LAMBDA_LOCAL=0.2   
+export FGSM_EPS=0.01      
+export SENS_TAU=0.01      
 
 python main.py
 
