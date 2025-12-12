@@ -44,7 +44,7 @@ module load fsl
 pip install torch
 # 5) Run script
 
-python summary.py
+#python summary.py
 
 #python add_label.py
 
@@ -124,19 +124,19 @@ python summary.py
 #  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_amyloid
 
 
-#python ROI_eval_cv_split.py \
-#  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-#  --vols-roots \
-#    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_1_fold0/volumes \
-#    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_1_fold1/volumes \
-#    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_1_fold2/volumes \
-#    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_1_fold3/volumes \
-#    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_1_fold4/volumes \
-#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --session-col TAU_PET_Session \
-#  --split-by braak \
-#  --thr-braak 1.2 \
-#  --out /scratch/l.peiwang/roi_recon_patch_lse_mgda_ub_1_fold0
+python ROI_eval_cv_split.py \
+  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+  --vols-roots \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold0/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold1/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold2/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold3/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold4/volumes \
+  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --session-col TAU_PET_Session \
+  --split-by braak \
+  --thr-braak 1.2 \
+  --out /scratch/l.peiwang/roi_recon_patch_lse_mgda_ub_JACOBIAN_1050202_fold0
 
 
 #python new_class.py \
