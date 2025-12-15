@@ -375,38 +375,71 @@ def train_paggan(
 
         if val_loader is not None:
             G.eval()
+            w_roi = 1.0  # weight for combined validation (as you requested)
+        
             with torch.no_grad():
-                val_recon, v_batches = 0.0, 0
+                val_combo_sum = 0.0
+                val_global_sum = 0.0
+                val_roi_sum = 0.0
+                v_batches = 0
+        
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                        mri, pet, _ = batch
+                        mri, pet, meta = batch
                     else:
                         mri, pet = batch
+                        meta = None
+        
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
+        
                     fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
                     pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
+        
+                    # ---- Global validation loss (same as before) ----
                     loss_l1_v = l1_loss(fake, pet_for_metric)
                     ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
-                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
+                    loss_global_v = (loss_l1_v + (1.0 - ssim_v))
+        
+                    # ---- ROI validation loss (masked L1 on cortex) ----
+                    loss_roi_v = torch.zeros((), device=device, dtype=fake.dtype)
+                    if meta is not None:
+                        cortex5 = _meta_to_cortex_mask(meta, B_expected=fake.size(0))
+                        if (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0):
+                            loss_roi_v = _masked_l1(fake, pet_for_metric, cortex5)
+        
+                    # ---- Combined validation score (w=1.0) ----
+                    loss_combo_v = loss_global_v + w_roi * loss_roi_v
+        
+                    val_global_sum += float(loss_global_v.item())
+                    val_roi_sum += float(loss_roi_v.item())
+                    val_combo_sum += float(loss_combo_v.item())
                     v_batches += 1
-            val_recon /= max(1, v_batches)
+        
+            val_combo = val_combo_sum / max(1, v_batches)
+            val_global = val_global_sum / max(1, v_batches)
+            val_roi = val_roi_sum / max(1, v_batches)
+        
+            # Keep your existing variable names/structure, but now "val_recon" means L_combo
+            val_recon = val_combo
             val_recon_epoch = val_recon
             hist["val_recon"].append(val_recon)
-
+        
+            # Best checkpoint selection now uses combined loss
             if val_recon < best_val:
                 best_val = val_recon
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
-
+        
             if verbose:
                 dt = time.time() - t0
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
+                    f"ValCombo(Global + ROI, w=1): {val_recon:.4f}  "
+                    f"(Global={val_global:.4f}, ROI={val_roi:.4f})  "
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
@@ -422,9 +455,9 @@ def train_paggan(
                     f"||grad_roi||={avg_grad_roi:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
                 )
-
-
+        
             G.train()
+
         elif verbose:
             dt = time.time() - t0
             print(
@@ -445,9 +478,6 @@ def train_paggan(
                 f"||grad_gan||={avg_grad_gan:.3e}"
             )
 
-
-        # ---- wandb logging per epoch ----
-        # ---- wandb logging per epoch ----
         if log_to_wandb and wandb.run is not None:
             log_dict = {
                 "epoch": epoch,
