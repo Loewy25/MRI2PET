@@ -27,7 +27,7 @@ export FOLD_INDEX=1  # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
 export LAMBDA_SENS=4    
-export LAMBDA_LOCAL=2   
+export LAMBDA_LOCAL=50   
 export FGSM_EPS=0.015     
 export SENS_TAU=0.006      
 
