@@ -26,8 +26,8 @@ export RUN_NAME="roi_recon_patch_lse_mgda_ub_JACOBIAN_550015006_fold1"
 export FOLD_INDEX=1  # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
-export LAMBDA_SENS=5    
-export LAMBDA_LOCAL=50   
+export LAMBDA_SENS=4    
+export LAMBDA_LOCAL=2   
 export FGSM_EPS=0.015     
 export SENS_TAU=0.006      
 
