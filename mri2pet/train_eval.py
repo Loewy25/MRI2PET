@@ -210,7 +210,7 @@ def train_paggan(
                     fake_pert = G(mri_pert)
 
                 # response magnitude inside and outside cortex
-                diff = (fake_pert - fake.detach()).abs()
+                diff = (fake_pert - fake).abs()
                 M = cortex5
                 Mbar = 1.0 - M
 
