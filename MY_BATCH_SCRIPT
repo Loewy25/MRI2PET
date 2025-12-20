@@ -22,8 +22,8 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="roi_recon_patch_lse_mgda_ub_JACOBIAN_010100501_fold2"
-export FOLD_INDEX=2 # 0-based -> fold5
+export RUN_NAME="roi_recon_patch_lse_mgda_ub_JACOBIAN_010100501_fold1"
+export FOLD_INDEX=1 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
 export LAMBDA_SENS=0.1    
