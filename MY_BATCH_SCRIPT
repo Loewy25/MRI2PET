@@ -127,16 +127,16 @@ pip install torch
 python ROI_eval_cv_split.py \
   --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
   --vols-roots \
-    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold0/volumes \
-    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold1/volumes \
-    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold2/volumes \
-    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold3/volumes \
-    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold4/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold0/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold1/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold2/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold3/volumes \
+    /home/l.peiwang/MRI2PET/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold4/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/roi_recon_patch_lse_mgda_ub_JACOBIAN_03010101_fold0
+  --out /scratch/l.peiwang/roi_recon_patch_lse_mgda_ub_JACOBIAN_050200501_fold0
 
 
 #python new_class.py \
