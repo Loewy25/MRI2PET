@@ -78,7 +78,7 @@ if __name__ == "__main__":
     wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
-     out = train_paggan(
+    out = train_paggan(
         G, D, train_loader, val_loader,
         device=device,
         epochs=EPOCHS,
