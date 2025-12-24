@@ -6,8 +6,11 @@ import wandb  # <-- add this
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
-    LAMBDA_SENS, LAMBDA_LOCAL, FGSM_EPS, SENS_TAU,
+    E_NORMAL1, E_CONTRAST,
+    CONTRAST_EPS, CONTRAST_EPS0,
+    LAMBDA_CONTRAST_OUT, LAMBDA_CONTRAST_CTX,
 )
+
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
