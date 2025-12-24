@@ -40,11 +40,14 @@ if __name__ == "__main__":
             "data_range": DATA_RANGE,
             "batch_size": 1,
             "resize_to": (128, 128, 128),
-            # ---- NEW: Jacobian regularization hyperparameters ----
-            "lambda_sens": LAMBDA_SENS,
-            "lambda_local": LAMBDA_LOCAL,
-            "fgsm_eps": FGSM_EPS,
-            "sens_tau": SENS_TAU,
+            # ---- NEW: epoch-scheduled cortex contrast hyperparameters ----
+            "e_normal1": E_NORMAL1,
+            "e_contrast": E_CONTRAST,
+            "contrast_eps": CONTRAST_EPS,
+            "contrast_eps0": CONTRAST_EPS0,
+            "lambda_contrast_out": LAMBDA_CONTRAST_OUT,
+            "lambda_contrast_ctx": LAMBDA_CONTRAST_CTX,
+
         },
     )
 
