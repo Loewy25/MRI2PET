@@ -32,10 +32,15 @@ GAMMA       = 1.0
 LAMBDA_GAN  = 0.5
 
 
-LAMBDA_SENS  = float(os.environ.get("LAMBDA_SENS", "0.5"))
-LAMBDA_LOCAL = float(os.environ.get("LAMBDA_LOCAL", "0.5"))
-FGSM_EPS     = float(os.environ.get("FGSM_EPS", "0.01"))
-SENS_TAU     = float(os.environ.get("SENS_TAU", "0.01"))
+E_NORMAL1  = int(os.environ.get("E_NORMAL1", "0"))   # epochs of normal training before contrast
+E_CONTRAST = int(os.environ.get("E_CONTRAST", "0"))  # number of contrast epochs
+
+CONTRAST_EPS  = float(os.environ.get("CONTRAST_EPS", "0.005"))    # eps for cortex-only sign noise
+CONTRAST_EPS0 = float(os.environ.get("CONTRAST_EPS0", "1e-6"))    # epsilon inside log
+
+LAMBDA_CONTRAST_OUT = float(os.environ.get("LAMBDA_CONTRAST_OUT", "0.05"))   # lambda_out
+LAMBDA_CONTRAST_CTX = float(os.environ.get("LAMBDA_CONTRAST_CTX", "0.005"))  # lambda_ctx
+
 
 DATA_RANGE  = 3.5
 
