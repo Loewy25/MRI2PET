@@ -78,20 +78,23 @@ if __name__ == "__main__":
     wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
-    out = train_paggan(
+     out = train_paggan(
         G, D, train_loader, val_loader,
         device=device,
         epochs=EPOCHS,
         gamma=GAMMA,
         lambda_gan=LAMBDA_GAN,
         data_range=DATA_RANGE,
-        lambda_sens=LAMBDA_SENS,
-        lambda_local=LAMBDA_LOCAL,
-        fgsm_eps=FGSM_EPS,
-        sens_tau=SENS_TAU,
+        e_normal1=E_NORMAL1,
+        e_contrast=E_CONTRAST,
+        contrast_eps=CONTRAST_EPS,
+        contrast_eps0=CONTRAST_EPS0,
+        lambda_contrast_out=LAMBDA_CONTRAST_OUT,
+        lambda_contrast_ctx=LAMBDA_CONTRAST_CTX,
         verbose=True,
         log_to_wandb=True,
     )
+
 
 
     # Save curves & CSV (still useful)
