@@ -22,14 +22,21 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="roi_recon_patch_lse_mgda_ub_JACOBIAN_010100101_fold0"
+export RUN_NAME="new_contrast_2013000505005_0"
 export FOLD_INDEX=0 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
-export LAMBDA_SENS=0.1    
-export LAMBDA_LOCAL=0.1  
-export FGSM_EPS=0.001     
-export SENS_TAU=0.01      
+# ---- NEW: epoch schedule ----
+export E_NORMAL1=20        # first 120 epochs normal
+export E_CONTRAST=130        # next 10 epochs contrast ON
+# then normal again until EPOCHS (150)
+
+# ---- NEW: contrast hyperparams ----
+export CONTRAST_EPS=0.005
+export LAMBDA_CONTRAST_OUT=0.05
+export LAMBDA_CONTRAST_CTX=0.005
+export CONTRAST_EPS0=1e-6
+  
 
 python main.py
 
