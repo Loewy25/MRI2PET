@@ -22,8 +22,8 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="new_contrast_201300305002_2"
-export FOLD_INDEX=2 # 0-based -> fold5
+export RUN_NAME="new_contrast_201300305002_1"
+export FOLD_INDEX=1 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
 # ---- NEW: epoch schedule ----
