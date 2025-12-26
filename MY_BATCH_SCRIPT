@@ -22,7 +22,7 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="new_contrast_201300102002_0"
+export RUN_NAME="new_contrast_201300105002_0"
 export FOLD_INDEX=0 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
@@ -33,7 +33,7 @@ export E_CONTRAST=130        # next 10 epochs contrast ON
 
 # ---- NEW: contrast hyperparams ----
 export CONTRAST_EPS=0.01
-export LAMBDA_CONTRAST_OUT=0.2
+export LAMBDA_CONTRAST_OUT=0.5
 export LAMBDA_CONTRAST_CTX=0.001
 export CONTRAST_EPS0=1e-6
   
