@@ -8,7 +8,8 @@ from mri2pet.config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
     E_NORMAL1, E_CONTRAST,
     CONTRAST_EPS, CONTRAST_EPS0,
-    LAMBDA_CONTRAST_OUT, LAMBDA_CONTRAST_CTX,
+    LAMBDA_CONTRAST_OUT, LAMBDA_CONTRAST_CTX,FAMO_BETA, FAMO_DECAY, FAMO_EPS
+
 )
 
 from mri2pet.data import build_loaders
@@ -47,6 +48,11 @@ if __name__ == "__main__":
             "contrast_eps0": CONTRAST_EPS0,
             "lambda_contrast_out": LAMBDA_CONTRAST_OUT,
             "lambda_contrast_ctx": LAMBDA_CONTRAST_CTX,
+            "mtl_method": "famo_flat_3loss",
+            "famo_beta": FAMO_BETA,
+            "famo_decay": FAMO_DECAY,
+            "famo_eps": FAMO_EPS,
+
 
         },
     )
@@ -93,6 +99,10 @@ if __name__ == "__main__":
         lambda_contrast_ctx=LAMBDA_CONTRAST_CTX,
         verbose=True,
         log_to_wandb=True,
+        famo_beta=FAMO_BETA,
+        famo_decay=FAMO_DECAY,
+        famo_eps=FAMO_EPS,
+
     )
 
 
