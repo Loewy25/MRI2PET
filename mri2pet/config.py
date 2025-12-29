@@ -41,6 +41,16 @@ CONTRAST_EPS0 = float(os.environ.get("CONTRAST_EPS0", "1e-6"))    # epsilon insi
 LAMBDA_CONTRAST_OUT = float(os.environ.get("LAMBDA_CONTRAST_OUT", "0.05"))   # lambda_out
 LAMBDA_CONTRAST_CTX = float(os.environ.get("LAMBDA_CONTRAST_CTX", "0.005"))  # lambda_ctx
 
+# ---- NEW: FAMO hyperparameters (env-overridable) ----
+# β in the paper: learning rate for the task logits ξ update
+FAMO_BETA  = float(os.environ.get("FAMO_BETA", "0.01"))
+
+# γ in the paper: decay for ξ (paper default is 0.001)
+FAMO_DECAY = float(os.environ.get("FAMO_DECAY", "0.001"))
+
+# ε: keep losses strictly > 0 for log() and division
+FAMO_EPS   = float(os.environ.get("FAMO_EPS", "1e-8"))
+
 
 DATA_RANGE  = 3.5
 
