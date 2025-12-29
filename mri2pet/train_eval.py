@@ -51,13 +51,16 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
 
-    # ---- NEW: epoch-scheduled cortex contrast (env-overridable) ----
-    # schedule:
-    e_normal1: Optional[int] = None,          # epochs of normal training before contrast
-    e_contrast: Optional[int] = None,         # number of epochs with contrast ON
-    # contrast params:
-    contrast_eps: Optional[float] = None,     # eps for cortex-only sign noise
-    contrast_eps0: Optional[float] = None,    # epsilon in log
+    # ---- NEW: FAMO hyperparams (env-overridable) ----
+    famo_beta: Optional[float] = None,   # β for ξ update
+    famo_decay: Optional[float] = None,  # γ decay for ξ
+    famo_eps: Optional[float] = None,    # ε for positivity/log stability
+
+    # ---- epoch-scheduled cortex contrast (env-overridable) ----
+    e_normal1: Optional[int] = None,
+    e_contrast: Optional[int] = None,
+    contrast_eps: Optional[float] = None,
+    contrast_eps0: Optional[float] = None,
     lambda_contrast_out: Optional[float] = None,
     lambda_contrast_ctx: Optional[float] = None,
 
@@ -71,20 +74,18 @@ def train_paggan(
     log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
     """
-    Trains PatchGAN + Generator with MGDA on:
-      - global recon
-      - cortex ROI recon
-      - GAN
-    AND additionally (only during scheduled contrast epochs):
-      - cortex contrast loss:
-          L = lambda_out * Δ_out + lambda_ctx * (-log(Δ_ctx + eps0))
-        where Δ_* are mean |G(x_pert) - stopgrad(G(x))| inside/outside cortex,
-        with x_pert = x + eps * sign_noise * cortex_mask
+    Trains PatchGAN + Generator using **FAMO** task weighting over 3 losses:
+      1) global recon: gamma * (L1 + (1-SSIM))
+      2) cortex ROI recon: masked L1
+      3) GAN loss (LSGAN objective for G)
 
-    Env vars (optional, if args are not passed):
-      E_NORMAL1, E_CONTRAST
-      CONTRAST_EPS, CONTRAST_EPS0
-      LAMBDA_CONTRAST_OUT, LAMBDA_CONTRAST_CTX
+    Additionally (only during scheduled contrast epochs):
+      - cortex contrast loss (unchanged from your code)
+
+    FAMO follows Algorithm 1 from the paper:
+      - compute z = softmax(ξ)
+      - compute w_i ∝ z_i / ℓ_i, normalized to sum to 1 (via c_t)
+      - update ξ using change in log-losses log ℓ_t - log ℓ_{t+1}
     """
 
     # ---- Resolve env-overridable hyperparams (only if not explicitly passed) ----
@@ -103,11 +104,19 @@ def train_paggan(
     if lambda_contrast_ctx is None:
         lambda_contrast_ctx = _env_float("LAMBDA_CONTRAST_CTX", 0.005)
 
+    # ---- FAMO params ----
+    if famo_beta is None:
+        famo_beta = _env_float("FAMO_BETA", 0.01)
+    if famo_decay is None:
+        famo_decay = _env_float("FAMO_DECAY", 0.001)
+    if famo_eps is None:
+        famo_eps = _env_float("FAMO_EPS", 1e-8)
+
     # One-time note if old (deprecated) args were passed
     if verbose and any(x is not None for x in [lambda_sens, lambda_local, fgsm_eps, sens_tau]):
         print(
             "[INFO] Deprecated FGSM/Jacobian args (lambda_sens/lambda_local/fgsm_eps/sens_tau) "
-            "were provided but are ignored in the new contrast-loss training."
+            "were provided but are ignored in the new training."
         )
 
     G.to(device)
@@ -119,42 +128,24 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
 
-    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
-    lambda_g = float(lambda_gan)  # (kept as-is; not used in pure MGDA path)
-
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
-    # =========================================================================
-    # [MGDA-UB STANDARDIZATION INIT]
-    # We have:
-    #   - global recon gradient (v_global)
-    #   - ROI/cortex recon gradient (v_roi)
-    #   - GAN gradient (v_gan)
-    # and we do 2-level MGDA:
-    #   (global vs roi) -> v_recon, then (v_recon vs gan) -> v_final
-    # =========================================================================
-    avg_norm_recon_global = 0.0
-    avg_norm_recon_roi = 0.0
-    avg_norm_recon_combined = 0.0
-    avg_norm_gan = 0.0
-    norm_decay = 0.9
+    # ---- FAMO state: task logits ξ (task order fixed!) ----
+    # [0]=global recon, [1]=ROI recon, [2]=GAN
+    xi = torch.zeros(3, device=device, dtype=torch.float32)
 
     def _meta_to_cortex_mask(meta_any, B_expected: int) -> Optional[torch.Tensor]:
-        """
-        Returns cortex mask tensor [B,1,D,H,W] on device, or None if unavailable.
-        Supports meta as dict (B=1) or list of dicts (B>1).
-        """
         if isinstance(meta_any, dict):
             cm = meta_any.get("cortex_mask", None)
             if cm is None:
                 return None
             t = torch.from_numpy(cm.astype(np.float32))
             if t.dim() == 3:
-                t = t.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
+                t = t.unsqueeze(0).unsqueeze(0)
             elif t.dim() == 4:
                 t = t.unsqueeze(0)
             return t.to(device, non_blocking=True)
@@ -170,23 +161,19 @@ def train_paggan(
                 t = torch.from_numpy(cm.astype(np.float32))
                 if t.dim() != 3:
                     return None
-                masks.append(t.unsqueeze(0).unsqueeze(0))  # [1,1,D,H,W]
+                masks.append(t.unsqueeze(0).unsqueeze(0))
             return torch.cat(masks, dim=0).to(device, non_blocking=True)
 
         return None
 
     def _meta_to_brain_mask(meta_any, B_expected: int) -> Optional[torch.Tensor]:
-        """
-        Returns brain mask tensor [B,1,D,H,W] on device, or None if unavailable.
-        Supports meta as dict (B=1) or list of dicts (B>1).
-        """
         if isinstance(meta_any, dict):
             bm = meta_any.get("brain_mask", None)
             if bm is None:
                 return None
             t = torch.from_numpy(bm.astype(np.float32))
             if t.dim() == 3:
-                t = t.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
+                t = t.unsqueeze(0).unsqueeze(0)
             return t.to(device, non_blocking=True)
 
         if isinstance(meta_any, list) and len(meta_any) == B_expected:
@@ -200,16 +187,12 @@ def train_paggan(
                 t = torch.from_numpy(bm.astype(np.float32))
                 if t.dim() != 3:
                     return None
-                masks.append(t.unsqueeze(0).unsqueeze(0))  # [1,1,D,H,W]
+                masks.append(t.unsqueeze(0).unsqueeze(0))
             return torch.cat(masks, dim=0).to(device, non_blocking=True)
 
         return None
 
     def _masked_l1(fake5: torch.Tensor, target5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
-        """
-        Masked mean absolute error over mask voxels.
-        fake5, target5, mask5: [B,1,D,H,W]
-        """
         diff = (fake5 - target5).abs() * mask5
         num = diff.sum(dim=(1, 2, 3, 4))
         den = mask5.sum(dim=(1, 2, 3, 4)) + 1e-6
@@ -218,24 +201,23 @@ def train_paggan(
     for epoch in range(1, epochs + 1):
         contrast_on_epoch = (epoch > int(e_normal1)) and (epoch <= (int(e_normal1) + int(e_contrast)))
 
-        # --- MGDA monitoring accumulators (per epoch) ---
-        alpha_running = 0.0               # stage-2 alpha (recon vs gan)
-        alpha_recon_running = 0.0         # stage-1 alpha (global vs roi)
-        cos_running = 0.0
-        grad_recon_running = 0.0          # raw ||grad_global||
-        grad_roi_running = 0.0            # raw ||grad_roi||
-        grad_gan_running = 0.0            # raw ||grad_gan||
+        # ---- Per-epoch accumulators ----
+        recon_running = 0.0
+        roi_running = 0.0
+        gan_running = 0.0
 
-        # --- Loss-component accumulators (per epoch) ---
-        recon_running = 0.0               # L_global
-        roi_running = 0.0                 # L_roi
-        gan_running = 0.0                 # L_gan
-
-        # --- Contrast accumulators (per epoch; only meaningful when contrast_on_epoch) ---
         contrast_running = 0.0
         delta_ctx_running = 0.0
         delta_out_running = 0.0
         n_contrast = 0
+
+        # ---- FAMO monitoring (averaged per epoch) ----
+        z_running = np.zeros(3, dtype=np.float64)
+        w_running = np.zeros(3, dtype=np.float64)
+        dlog_running = np.zeros(3, dtype=np.float64)
+        ct_running = 0.0
+        weighted_running = 0.0
+        n_famo = 0
 
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
@@ -249,9 +231,12 @@ def train_paggan(
             mri = mri.to(device, non_blocking=True)
             pet = pet.to(device, non_blocking=True)
 
-            # ---- Update D ----
             mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
             pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+
+            # ===================== Update D (unchanged) =====================
+            for p in D.parameters():
+                p.requires_grad_(True)
 
             with torch.no_grad():
                 fake_D = G(mri5)
@@ -270,10 +255,11 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-            # ---- Update G ----
-            # (No Jacobian/FGSM regularizer anymore; no gradients w.r.t MRI needed)
-            mri5 = mri5.detach()
+            # ===================== Update G (FAMO replaces MGDA) =====================
+            for p in D.parameters():
+                p.requires_grad_(False)
 
+            mri5 = mri5.detach()
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
@@ -293,96 +279,21 @@ def train_paggan(
             else:
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # Global recon loss used for MGDA (no augmentation now)
-            loss_recon_global_aug = loss_recon_global
+            # ---- FAMO weights over the 3 losses ----
+            losses_t = torch.stack([loss_recon_global, loss_recon_roi, loss_gan])
+            losses_t_det = losses_t.detach().clamp(min=float(famo_eps))
 
-            # ========================= MGDA-UB (Hierarchical) =========================
-            # Stage 1: (global recon) vs (ROI recon) -> v_recon
-            v_global = torch.autograd.grad(
-                loss_recon_global_aug,
-                fake,
-                retain_graph=True,
-            )[0]
-            current_nglobal = v_global.norm().item()
-            if avg_norm_recon_global == 0:
-                avg_norm_recon_global = current_nglobal
-            else:
-                avg_norm_recon_global = norm_decay * avg_norm_recon_global + (1 - norm_decay) * current_nglobal
-            v_global_s = v_global / (avg_norm_recon_global + 1e-8)
+            z = torch.softmax(xi, dim=0)  # simplex over tasks
+            inv = z / losses_t_det        # z_i / ℓ_i
+            c_t = 1.0 / (inv.sum() + 1e-12)
+            w = (c_t * inv).detach()      # convex weights on task gradients (sum=1)
 
-            if use_roi:
-                v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0]
-                current_nroi = v_roi.norm().item()
-                if avg_norm_recon_roi == 0:
-                    avg_norm_recon_roi = current_nroi
-                else:
-                    avg_norm_recon_roi = norm_decay * avg_norm_recon_roi + (1 - norm_decay) * current_nroi
-                v_roi_s = v_roi / (avg_norm_recon_roi + 1e-8)
+            loss_weighted = w[0] * loss_recon_global + w[1] * loss_recon_roi + w[2] * loss_gan
 
-                Vg = v_global_s.reshape(v_global_s.size(0), -1)
-                Vr = v_roi_s.reshape(v_roi_s.size(0), -1)
-
-                eps = 1e-12
-                diff1 = Vr - Vg
-                num1 = (diff1 * Vr).sum(dim=1)
-                den1 = (diff1 * diff1).sum(dim=1) + eps
-                alpha1_batch = torch.clamp(num1 / den1, 0.0, 1.0)
-                alpha1 = alpha1_batch.median()  # scalar tensor
-
-                v_recon = alpha1 * v_global_s + (1.0 - alpha1) * v_roi_s
-
-                alpha_recon_running += float(alpha1.item())
-                grad_roi_running += current_nroi
-            else:
-                alpha1 = torch.tensor(1.0, device=device, dtype=fake.dtype)
-                v_recon = v_global_s
-                current_nroi = 0.0
-                alpha_recon_running += float(alpha1.item())
-                grad_roi_running += 0.0
-
-            grad_recon_running += current_nglobal
-
-            # Stage 2: (recon) vs (gan) -> v_final
-            v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0]
-            current_ngan = v_gan.norm().item()
-            if avg_norm_gan == 0:
-                avg_norm_gan = current_ngan
-            else:
-                avg_norm_gan = norm_decay * avg_norm_gan + (1 - norm_decay) * current_ngan
-            v_gan_s = v_gan / (avg_norm_gan + 1e-8)
-
-            # standardize combined recon direction for stage-2
-            current_nrecon_comb = v_recon.norm().item()
-            if avg_norm_recon_combined == 0:
-                avg_norm_recon_combined = current_nrecon_comb
-            else:
-                avg_norm_recon_combined = norm_decay * avg_norm_recon_combined + (1 - norm_decay) * current_nrecon_comb
-            v_recon_s2 = v_recon / (avg_norm_recon_combined + 1e-8)
-
-            V1 = v_recon_s2.reshape(v_recon_s2.size(0), -1)
-            V2 = v_gan_s.reshape(v_gan_s.size(0), -1)
-
-            eps = 1e-12
-            cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
-            cos_running += cos_batch.mean().item()
-
-            grad_gan_running += current_ngan
-
-            diff2 = V2 - V1
-            num2 = (diff2 * V2).sum(dim=1)
-            den2 = (diff2 * diff2).sum(dim=1) + eps
-            alpha2_batch = torch.clamp(num2 / den2, 0.0, 1.0)
-            alpha2 = alpha2_batch.median()
-
-            alpha_running += float(alpha2.item())
-
-            v_final = alpha2 * v_recon_s2 + (1.0 - alpha2) * v_gan_s
-
-            # ---- Apply MGDA gradient + (optional) contrast gradient, then ONE step ----
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_final)
+            loss_weighted.backward()
 
-            # NEW: epoch-scheduled cortex contrast (ON only during the contrast block)
+            # ---- Contrast regularizer block (UNCHANGED) ----
             loss_contrast = torch.zeros((), device=device, dtype=fake.dtype)
             delta_ctx = torch.zeros((), device=device, dtype=fake.dtype)
             delta_out = torch.zeros((), device=device, dtype=fake.dtype)
@@ -395,14 +306,13 @@ def train_paggan(
             ):
                 brain5 = _meta_to_brain_mask(meta, B_expected=mri5.size(0))
                 if brain5 is None:
-                    # fallback (should not happen if aseg_brainmask is available)
                     brain5 = (pet5 > 0).float()
 
-                noise = torch.sign(torch.randn_like(mri5))  # ±1
+                noise = torch.sign(torch.randn_like(mri5))
                 mri_pert = (mri5 + float(contrast_eps) * noise * cortex5).detach()
 
-                fake_pert = G(mri_pert)       # grad-enabled
-                fake_anchor = fake.detach()    # stop-grad anchor
+                fake_pert = G(mri_pert)
+                fake_anchor = fake.detach()
 
                 out_mask = brain5 * (1.0 - cortex5)
 
@@ -424,31 +334,58 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # For logging only (proxy scalar; not used for backward)
-            loss_G_log = (
-                loss_recon_global
-                + (loss_recon_roi if use_roi else 0.0)
-                + loss_gan
-            ).detach().item()
+            # Re-enable D grads for next iteration
+            for p in D.parameters():
+                p.requires_grad_(True)
 
-            # accumulate epoch stats
-            recon_running += loss_recon_global.detach().item()
-            roi_running += (loss_recon_roi.detach().item() if use_roi else 0.0)
-            gan_running += loss_gan.detach().item()
+            # ---- FAMO ξ update needs losses at t+1 (recompute on same batch) ----
+            with torch.no_grad():
+                fake_after = G(mri5)
+                out_after = D(torch.cat([mri5, fake_after], dim=1))
+                loss_gan_after = 0.5 * adv_criterion(out_after, torch.ones_like(out_after))
+
+                loss_l1_after = l1_loss(fake_after, pet5)
+                ssim_after = ssim3d(fake_after, pet5, data_range=data_range)
+                loss_global_after = gamma * (loss_l1_after + (1.0 - ssim_after))
+
+                if use_roi:
+                    loss_roi_after = _masked_l1(fake_after, pet5, cortex5)
+                else:
+                    loss_roi_after = torch.zeros((), device=device, dtype=fake_after.dtype)
+
+                losses_after = torch.stack([loss_global_after, loss_roi_after, loss_gan_after]).clamp(min=float(famo_eps))
+                delta_log = (torch.log(losses_t_det) - torch.log(losses_after)).detach()
+
+            # δ = J_softmax(ξ)^T * Δlogℓ  (compute via autograd)
+            xi_var = xi.detach().clone().requires_grad_(True)
+            z_var = torch.softmax(xi_var, dim=0)
+            s = torch.sum(z_var * delta_log.to(device=xi_var.device, dtype=xi_var.dtype))
+            grad_xi = torch.autograd.grad(s, xi_var, retain_graph=False, create_graph=False)[0]
+
+            with torch.no_grad():
+                xi = xi - float(famo_beta) * (grad_xi + float(famo_decay) * xi)
+
+            # ---- Accumulate stats ----
+            loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
+
+            recon_running += float(loss_recon_global.detach().item())
+            roi_running += float(loss_recon_roi.detach().item()) if use_roi else 0.0
+            gan_running += float(loss_gan.detach().item())
 
             g_running += float(loss_G_log)
-            d_running += loss_D.item()
+            d_running += float(loss_D.detach().item())
             n_batches += 1
+
+            z_running += z.detach().cpu().numpy()
+            w_running += w.detach().cpu().numpy()
+            dlog_running += delta_log.detach().cpu().numpy()
+            ct_running += float(c_t.detach().item())
+            weighted_running += float(loss_weighted.detach().item())
+            n_famo += 1
 
         # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
-        avg_alpha2 = alpha_running / max(1, n_batches)
-        avg_alpha1 = alpha_recon_running / max(1, n_batches)
-        avg_cos = cos_running / max(1, n_batches)
-        avg_grad_recon = grad_recon_running / max(1, n_batches)
-        avg_grad_roi = grad_roi_running / max(1, n_batches)
-        avg_grad_gan = grad_gan_running / max(1, n_batches)
 
         avg_recon = recon_running / max(1, n_batches)
         avg_roi = roi_running / max(1, n_batches)
@@ -458,15 +395,21 @@ def train_paggan(
         avg_delta_ctx = delta_ctx_running / max(1, n_contrast) if n_contrast > 0 else 0.0
         avg_delta_out = delta_out_running / max(1, n_contrast) if n_contrast > 0 else 0.0
 
+        avg_z = z_running / max(1, n_famo)
+        avg_w = w_running / max(1, n_famo)
+        avg_dlog = dlog_running / max(1, n_famo)
+        avg_ct = ct_running / max(1, n_famo)
+        avg_weighted = weighted_running / max(1, n_famo)
+
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
 
-        # ---- Validation ----
+        # ---- Validation (UNCHANGED) ----
         val_recon_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
-            w_roi = 1.0  # keep your combined validation
+            w_roi_val = 1.0
 
             with torch.no_grad():
                 val_combo_sum = 0.0
@@ -487,20 +430,17 @@ def train_paggan(
                     fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
                     pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
 
-                    # Global validation loss
                     loss_l1_v = l1_loss(fake, pet_for_metric)
                     ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
                     loss_global_v = (loss_l1_v + (1.0 - ssim_v))
 
-                    # ROI validation loss (masked L1 on cortex)
                     loss_roi_v = torch.zeros((), device=device, dtype=fake.dtype)
                     if meta is not None:
                         cortex5_v = _meta_to_cortex_mask(meta, B_expected=fake.size(0))
                         if (cortex5_v is not None) and (float(cortex5_v.sum().item()) > 0.0):
                             loss_roi_v = _masked_l1(fake, pet_for_metric, cortex5_v)
 
-                    # Combined validation score
-                    loss_combo_v = loss_global_v + w_roi * loss_roi_v
+                    loss_combo_v = loss_global_v + w_roi_val * loss_roi_v
 
                     val_global_sum += float(loss_global_v.item())
                     val_roi_sum += float(loss_roi_v.item())
@@ -515,7 +455,6 @@ def train_paggan(
             val_recon_epoch = val_recon
             hist["val_recon"].append(val_recon)
 
-            # Best checkpoint selection uses combined loss (unchanged)
             if val_recon < best_val:
                 best_val = val_recon
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
@@ -530,7 +469,7 @@ def train_paggan(
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValCombo(Global + ROI, w=1): {val_recon:.4f}  "
                     f"(Global={val_global:.4f}, ROI={val_roi:.4f})  "
-                    f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
+                    f"| best {best_val:.4f}  | {dt:.1f}s"
                 )
                 print(
                     f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  gan={avg_gan:.4f}  "
@@ -538,46 +477,43 @@ def train_paggan(
                     f"Lc={avg_contrast:.4f}  Δctx={avg_delta_ctx:.4f}  Δout={avg_delta_out:.4f}"
                 )
                 print(
-                    f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
-                    f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
-                    f"cos(recon,gan)={avg_cos:.3f}  "
-                    f"||grad_global||={avg_grad_recon:.3e}  "
-                    f"||grad_roi||={avg_grad_roi:.3e}  "
-                    f"||grad_gan||={avg_grad_gan:.3e}"
+                    f"      [FAMO] z=[{avg_z[0]:.3f},{avg_z[1]:.3f},{avg_z[2]:.3f}]  "
+                    f"w=[{avg_w[0]:.3f},{avg_w[1]:.3f},{avg_w[2]:.3f}]  "
+                    f"ct={avg_ct:.3e}  "
+                    f"Δlog=[{avg_dlog[0]:.3e},{avg_dlog[1]:.3e},{avg_dlog[2]:.3e}]  "
+                    f"xi=[{float(xi[0].item()):.3f},{float(xi[1].item()):.3f},{float(xi[2].item()):.3f}]"
                 )
 
             G.train()
 
         elif verbose:
             dt = time.time() - t0
-            print(
-                f"Epoch [{epoch:03d}/{epochs}]  "
-                f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
-            )
+            print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
             print(
                 f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  gan={avg_gan:.4f}  "
                 f"contrast={'ON' if contrast_on_epoch else 'OFF'}  "
                 f"Lc={avg_contrast:.4f}  Δctx={avg_delta_ctx:.4f}  Δout={avg_delta_out:.4f}"
             )
             print(
-                f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
-                f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
-                f"cos(recon,gan)={avg_cos:.3f}  "
-                f"||grad_global||={avg_grad_recon:.3e}  "
-                f"||grad_roi||={avg_grad_roi:.3e}  "
-                f"||grad_gan||={avg_grad_gan:.3e}"
+                f"      [FAMO] z=[{avg_z[0]:.3f},{avg_z[1]:.3f},{avg_z[2]:.3f}]  "
+                f"w=[{avg_w[0]:.3f},{avg_w[1]:.3f},{avg_w[2]:.3f}]  "
+                f"ct={avg_ct:.3e}  "
+                f"Δlog=[{avg_dlog[0]:.3e},{avg_dlog[1]:.3e},{avg_dlog[2]:.3e}]  "
+                f"xi=[{float(xi[0].item()):.3f},{float(xi[1].item()):.3f},{float(xi[2].item()):.3f}]"
             )
 
         if log_to_wandb and wandb.run is not None:
             log_dict = {
                 "epoch": epoch,
+
+                # your existing loss logging
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
                 "train/recon_global": avg_recon,
                 "train/recon_roi": avg_roi,
                 "train/gan": avg_gan,
 
-                # contrast logs
+                # contrast logs (unchanged)
                 "contrast/active": int(contrast_on_epoch),
                 "contrast/loss": avg_contrast,
                 "contrast/delta_ctx": avg_delta_ctx,
@@ -588,13 +524,29 @@ def train_paggan(
                 "contrast/e_normal1": int(e_normal1),
                 "contrast/e_contrast": int(e_contrast),
 
-                # MGDA diagnostics
-                "mgda/alpha": avg_alpha2,
-                "mgda/alpha_global_vs_roi": avg_alpha1,
-                "mgda/cos_recon_gan": avg_cos,
-                "mgda/grad_recon_global_norm": avg_grad_recon,
-                "mgda/grad_recon_roi_norm": avg_grad_roi,
-                "mgda/grad_gan_norm": avg_grad_gan,
+                # ---- FAMO logs ----
+                "famo/beta": float(famo_beta),
+                "famo/decay": float(famo_decay),
+                "famo/eps": float(famo_eps),
+
+                "famo/z_global": float(avg_z[0]),
+                "famo/z_roi": float(avg_z[1]),
+                "famo/z_gan": float(avg_z[2]),
+
+                "famo/w_global": float(avg_w[0]),
+                "famo/w_roi": float(avg_w[1]),
+                "famo/w_gan": float(avg_w[2]),
+
+                "famo/ct": float(avg_ct),
+                "famo/weighted_loss": float(avg_weighted),
+
+                "famo/dlog_global": float(avg_dlog[0]),
+                "famo/dlog_roi": float(avg_dlog[1]),
+                "famo/dlog_gan": float(avg_dlog[2]),
+
+                "famo/xi_global": float(xi[0].item()),
+                "famo/xi_roi": float(xi[1].item()),
+                "famo/xi_gan": float(xi[2].item()),
             }
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
@@ -608,6 +560,7 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
+
 
 
 @torch.no_grad()
