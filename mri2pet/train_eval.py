@@ -51,11 +51,6 @@ def train_paggan(
     lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
 
-    # ---- NEW: FAMO hyperparams (env-overridable) ----
-    famo_beta: Optional[float] = None,   # β for ξ update
-    famo_decay: Optional[float] = None,  # γ decay for ξ
-    famo_eps: Optional[float] = None,    # ε for positivity/log stability
-
     # ---- epoch-scheduled cortex contrast (env-overridable) ----
     e_normal1: Optional[int] = None,
     e_contrast: Optional[int] = None,
@@ -74,18 +69,18 @@ def train_paggan(
     log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
     """
-    Trains PatchGAN + Generator using **FAMO** task weighting over 3 losses:
-      1) global recon: gamma * (L1 + (1-SSIM))
-      2) cortex ROI recon: masked L1
-      3) GAN loss (LSGAN objective for G)
+    PatchGAN + Generator training with:
+      - FAMO task weighting over THREE supervised losses:
+          (1) gamma * L1
+          (2) gamma * (1 - SSIM)
+          (3) ROI/cortex masked L1
+      - GAN loss added separately with fixed weight:
+          lambda_gan * L_gan
+      - Scheduled cortex contrast regularizer (UNCHANGED)
 
-    Additionally (only during scheduled contrast epochs):
-      - cortex contrast loss (unchanged from your code)
-
-    FAMO follows Algorithm 1 from the paper:
-      - compute z = softmax(ξ)
-      - compute w_i ∝ z_i / ℓ_i, normalized to sum to 1 (via c_t)
-      - update ξ using change in log-losses log ℓ_t - log ℓ_{t+1}
+    Env vars (optional):
+      FAMO_BETA, FAMO_DECAY, FAMO_EPS
+      E_NORMAL1, E_CONTRAST, CONTRAST_EPS, CONTRAST_EPS0, LAMBDA_CONTRAST_OUT, LAMBDA_CONTRAST_CTX
     """
 
     # ---- Resolve env-overridable hyperparams (only if not explicitly passed) ----
@@ -104,13 +99,10 @@ def train_paggan(
     if lambda_contrast_ctx is None:
         lambda_contrast_ctx = _env_float("LAMBDA_CONTRAST_CTX", 0.005)
 
-    # ---- FAMO params ----
-    if famo_beta is None:
-        famo_beta = _env_float("FAMO_BETA", 0.01)
-    if famo_decay is None:
-        famo_decay = _env_float("FAMO_DECAY", 0.001)
-    if famo_eps is None:
-        famo_eps = _env_float("FAMO_EPS", 1e-8)
+    # ---- FAMO hyperparams from env (no other files needed) ----
+    famo_beta = _env_float("FAMO_BETA", 0.001)
+    famo_decay = _env_float("FAMO_DECAY", 0.001)
+    famo_eps = _env_float("FAMO_EPS", 1e-8)
 
     # One-time note if old (deprecated) args were passed
     if verbose and any(x is not None for x in [lambda_sens, lambda_local, fgsm_eps, sens_tau]):
@@ -134,8 +126,7 @@ def train_paggan(
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
-    # ---- FAMO state: task logits ξ (task order fixed!) ----
-    # [0]=global recon, [1]=ROI recon, [2]=GAN
+    # ---- FAMO state: task logits ξ over [L1, SSIM_loss, ROI] ----
     xi = torch.zeros(3, device=device, dtype=torch.float32)
 
     def _meta_to_cortex_mask(meta_any, B_expected: int) -> Optional[torch.Tensor]:
@@ -202,25 +193,31 @@ def train_paggan(
         contrast_on_epoch = (epoch > int(e_normal1)) and (epoch <= (int(e_normal1) + int(e_contrast)))
 
         # ---- Per-epoch accumulators ----
-        recon_running = 0.0
+        g_running, d_running, n_batches = 0.0, 0.0, 0
+
+        # raw losses
+        l1_running = 0.0
+        ssim_running = 0.0
+        ssimloss_running = 0.0
         roi_running = 0.0
         gan_running = 0.0
+        gan_w_running = 0.0
 
+        # contrast accumulators
         contrast_running = 0.0
         delta_ctx_running = 0.0
         delta_out_running = 0.0
         n_contrast = 0
 
-        # ---- FAMO monitoring (averaged per epoch) ----
+        # FAMO monitoring
         z_running = np.zeros(3, dtype=np.float64)
         w_running = np.zeros(3, dtype=np.float64)
         dlog_running = np.zeros(3, dtype=np.float64)
         ct_running = 0.0
-        weighted_running = 0.0
+        supw_running = 0.0
         n_famo = 0
 
         t0 = time.time()
-        g_running, d_running, n_batches = 0.0, 0.0, 0
 
         for batch in train_loader:
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -235,9 +232,6 @@ def train_paggan(
             pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
 
             # ===================== Update D (unchanged) =====================
-            for p in D.parameters():
-                p.requires_grad_(True)
-
             with torch.no_grad():
                 fake_D = G(mri5)
 
@@ -255,43 +249,51 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-            # ===================== Update G (FAMO replaces MGDA) =====================
-            for p in D.parameters():
-                p.requires_grad_(False)
-
+            # ===================== Update G =====================
             mri5 = mri5.detach()
+
             fake = G(mri5)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # GAN objective (as-is)
+            # GAN loss (UNWEIGHTED here; weight applied later)
             loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
 
-            # Global recon objective (as-is)
+            # Split supervised losses (separately)
             loss_l1 = l1_loss(fake, pet5)
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
-            loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
+            loss_ssim = (1.0 - ssim_val)
 
-            # ROI/cortex recon objective (masked L1)
-            cortex5 = _meta_to_cortex_mask(meta, B_expected=(mri5.size(0)))
+            cortex5 = _meta_to_cortex_mask(meta, B_expected=mri5.size(0))
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
             if use_roi:
-                loss_recon_roi = _masked_l1(fake, pet5, cortex5)
+                loss_roi = _masked_l1(fake, pet5, cortex5)
             else:
-                loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
+                loss_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # ---- FAMO weights over the 3 losses ----
-            losses_t = torch.stack([loss_recon_global, loss_recon_roi, loss_gan])
-            losses_t_det = losses_t.detach().clamp(min=float(famo_eps))
+            # ---- FAMO supervised tasks (L1, SSIMloss, ROI) ----
+            # Keep gamma on global terms (matches previous design)
+            tasks = torch.stack([gamma * loss_l1, gamma * loss_ssim, loss_roi])
+            tasks_det = tasks.detach().clamp(min=float(famo_eps))
 
-            z = torch.softmax(xi, dim=0)  # simplex over tasks
-            inv = z / losses_t_det        # z_i / ℓ_i
+            z = torch.softmax(xi, dim=0)
+
+            # If ROI absent, exclude it from weighting (keep behavior safe)
+            if not use_roi:
+                mask = torch.tensor([1.0, 1.0, 0.0], device=device, dtype=z.dtype)
+                z = z * mask
+                z = z / (z.sum() + 1e-12)
+
+            inv = z / tasks_det
             c_t = 1.0 / (inv.sum() + 1e-12)
-            w = (c_t * inv).detach()      # convex weights on task gradients (sum=1)
+            w = (c_t * inv).detach()  # convex weights over tasks
 
-            loss_weighted = w[0] * loss_recon_global + w[1] * loss_recon_roi + w[2] * loss_gan
+            loss_sup_weighted = (w[0] * tasks[0] + w[1] * tasks[1] + w[2] * tasks[2])
+
+            # Total main loss: FAMO-supervised + fixed-weight GAN
+            loss_main = loss_sup_weighted + float(lambda_gan) * loss_gan
 
             opt_G.zero_grad(set_to_none=True)
-            loss_weighted.backward()
+            loss_main.backward()
 
             # ---- Contrast regularizer block (UNCHANGED) ----
             loss_contrast = torch.zeros((), device=device, dtype=fake.dtype)
@@ -334,62 +336,72 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # Re-enable D grads for next iteration
-            for p in D.parameters():
-                p.requires_grad_(True)
-
-            # ---- FAMO ξ update needs losses at t+1 (recompute on same batch) ----
+            # ---- FAMO ξ update (based on supervised tasks only) ----
             with torch.no_grad():
                 fake_after = G(mri5)
-                out_after = D(torch.cat([mri5, fake_after], dim=1))
-                loss_gan_after = 0.5 * adv_criterion(out_after, torch.ones_like(out_after))
-
-                loss_l1_after = l1_loss(fake_after, pet5)
+                l1_after = l1_loss(fake_after, pet5)
                 ssim_after = ssim3d(fake_after, pet5, data_range=data_range)
-                loss_global_after = gamma * (loss_l1_after + (1.0 - ssim_after))
+                ssimloss_after = (1.0 - ssim_after)
 
                 if use_roi:
-                    loss_roi_after = _masked_l1(fake_after, pet5, cortex5)
+                    roi_after = _masked_l1(fake_after, pet5, cortex5)
                 else:
-                    loss_roi_after = torch.zeros((), device=device, dtype=fake_after.dtype)
+                    roi_after = torch.zeros((), device=device, dtype=fake_after.dtype)
 
-                losses_after = torch.stack([loss_global_after, loss_roi_after, loss_gan_after]).clamp(min=float(famo_eps))
-                delta_log = (torch.log(losses_t_det) - torch.log(losses_after)).detach()
+                tasks_after = torch.stack([gamma * l1_after, gamma * ssimloss_after, roi_after]).clamp(min=float(famo_eps))
+                delta_log = (torch.log(tasks_det) - torch.log(tasks_after)).detach()
 
-            # δ = J_softmax(ξ)^T * Δlogℓ  (compute via autograd)
+                if not use_roi:
+                    delta_log = delta_log * torch.tensor([1.0, 1.0, 0.0], device=device, dtype=delta_log.dtype)
+
             xi_var = xi.detach().clone().requires_grad_(True)
             z_var = torch.softmax(xi_var, dim=0)
+            if not use_roi:
+                mask = torch.tensor([1.0, 1.0, 0.0], device=device, dtype=z_var.dtype)
+                z_var = z_var * mask
+                z_var = z_var / (z_var.sum() + 1e-12)
+
             s = torch.sum(z_var * delta_log.to(device=xi_var.device, dtype=xi_var.dtype))
             grad_xi = torch.autograd.grad(s, xi_var, retain_graph=False, create_graph=False)[0]
 
             with torch.no_grad():
                 xi = xi - float(famo_beta) * (grad_xi + float(famo_decay) * xi)
 
-            # ---- Accumulate stats ----
-            loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
-
-            recon_running += float(loss_recon_global.detach().item())
-            roi_running += float(loss_recon_roi.detach().item()) if use_roi else 0.0
-            gan_running += float(loss_gan.detach().item())
+            # ---- Logging accumulators ----
+            loss_G_log = (
+                gamma * (loss_l1 + loss_ssim)
+                + (loss_roi if use_roi else 0.0)
+                + float(lambda_gan) * loss_gan
+            ).detach().item()
 
             g_running += float(loss_G_log)
             d_running += float(loss_D.detach().item())
             n_batches += 1
 
+            l1_running += float(loss_l1.detach().item())
+            ssim_running += float(ssim_val.detach().item())
+            ssimloss_running += float(loss_ssim.detach().item())
+            roi_running += float(loss_roi.detach().item()) if use_roi else 0.0
+            gan_running += float(loss_gan.detach().item())
+            gan_w_running += float((float(lambda_gan) * loss_gan).detach().item())
+
             z_running += z.detach().cpu().numpy()
             w_running += w.detach().cpu().numpy()
             dlog_running += delta_log.detach().cpu().numpy()
             ct_running += float(c_t.detach().item())
-            weighted_running += float(loss_weighted.detach().item())
+            supw_running += float(loss_sup_weighted.detach().item())
             n_famo += 1
 
         # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
 
-        avg_recon = recon_running / max(1, n_batches)
+        avg_l1 = l1_running / max(1, n_batches)
+        avg_ssim = ssim_running / max(1, n_batches)
+        avg_ssimloss = ssimloss_running / max(1, n_batches)
         avg_roi = roi_running / max(1, n_batches)
         avg_gan = gan_running / max(1, n_batches)
+        avg_gan_w = gan_w_running / max(1, n_batches)
 
         avg_contrast = contrast_running / max(1, n_contrast) if n_contrast > 0 else 0.0
         avg_delta_ctx = delta_ctx_running / max(1, n_contrast) if n_contrast > 0 else 0.0
@@ -399,14 +411,13 @@ def train_paggan(
         avg_w = w_running / max(1, n_famo)
         avg_dlog = dlog_running / max(1, n_famo)
         avg_ct = ct_running / max(1, n_famo)
-        avg_weighted = weighted_running / max(1, n_famo)
+        avg_supw = supw_running / max(1, n_famo)
 
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
 
         # ---- Validation (UNCHANGED) ----
         val_recon_epoch: Optional[float] = None
-
         if val_loader is not None:
             G.eval()
             w_roi_val = 1.0
@@ -466,14 +477,17 @@ def train_paggan(
                 dt = time.time() - t0
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
-                    f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
+                    f"Glog: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValCombo(Global + ROI, w=1): {val_recon:.4f}  "
                     f"(Global={val_global:.4f}, ROI={val_roi:.4f})  "
                     f"| best {best_val:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  gan={avg_gan:.4f}  "
-                    f"contrast={'ON' if contrast_on_epoch else 'OFF'}  "
+                    f"      [Train split] L1={avg_l1:.4f}  (1-SSIM)={avg_ssimloss:.4f}  SSIM={avg_ssim:.4f}  "
+                    f"ROI={avg_roi:.4f}  GAN={avg_gan:.4f}  λ_gan*GAN={avg_gan_w:.4f}"
+                )
+                print(
+                    f"      [Contrast] {'ON' if contrast_on_epoch else 'OFF'}  "
                     f"Lc={avg_contrast:.4f}  Δctx={avg_delta_ctx:.4f}  Δout={avg_delta_out:.4f}"
                 )
                 print(
@@ -488,10 +502,13 @@ def train_paggan(
 
         elif verbose:
             dt = time.time() - t0
-            print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
+            print(f"Epoch [{epoch:03d}/{epochs}]  Glog: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
             print(
-                f"      [Loss] recon={avg_recon:.4f}  roi={avg_roi:.4f}  gan={avg_gan:.4f}  "
-                f"contrast={'ON' if contrast_on_epoch else 'OFF'}  "
+                f"      [Train split] L1={avg_l1:.4f}  (1-SSIM)={avg_ssimloss:.4f}  SSIM={avg_ssim:.4f}  "
+                f"ROI={avg_roi:.4f}  GAN={avg_gan:.4f}  λ_gan*GAN={avg_gan_w:.4f}"
+            )
+            print(
+                f"      [Contrast] {'ON' if contrast_on_epoch else 'OFF'}  "
                 f"Lc={avg_contrast:.4f}  Δctx={avg_delta_ctx:.4f}  Δout={avg_delta_out:.4f}"
             )
             print(
@@ -506,12 +523,18 @@ def train_paggan(
             log_dict = {
                 "epoch": epoch,
 
-                # your existing loss logging
+                # keep your main curves compatible
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
-                "train/recon_global": avg_recon,
-                "train/recon_roi": avg_roi,
+
+                # split supervised + gan
+                "train/l1": avg_l1,
+                "train/ssim": avg_ssim,
+                "train/ssim_loss": avg_ssimloss,
+                "train/roi": avg_roi,
                 "train/gan": avg_gan,
+                "train/gan_weighted": avg_gan_w,
+                "train/lambda_gan": float(lambda_gan),
 
                 # contrast logs (unchanged)
                 "contrast/active": int(contrast_on_epoch),
@@ -524,33 +547,35 @@ def train_paggan(
                 "contrast/e_normal1": int(e_normal1),
                 "contrast/e_contrast": int(e_contrast),
 
-                # ---- FAMO logs ----
+                # FAMO logs
                 "famo/beta": float(famo_beta),
                 "famo/decay": float(famo_decay),
                 "famo/eps": float(famo_eps),
 
-                "famo/z_global": float(avg_z[0]),
-                "famo/z_roi": float(avg_z[1]),
-                "famo/z_gan": float(avg_z[2]),
+                "famo/z_l1": float(avg_z[0]),
+                "famo/z_ssim": float(avg_z[1]),
+                "famo/z_roi": float(avg_z[2]),
 
-                "famo/w_global": float(avg_w[0]),
-                "famo/w_roi": float(avg_w[1]),
-                "famo/w_gan": float(avg_w[2]),
+                "famo/w_l1": float(avg_w[0]),
+                "famo/w_ssim": float(avg_w[1]),
+                "famo/w_roi": float(avg_w[2]),
 
                 "famo/ct": float(avg_ct),
-                "famo/weighted_loss": float(avg_weighted),
+                "famo/sup_weighted_loss": float(avg_supw),
 
-                "famo/dlog_global": float(avg_dlog[0]),
-                "famo/dlog_roi": float(avg_dlog[1]),
-                "famo/dlog_gan": float(avg_dlog[2]),
+                "famo/dlog_l1": float(avg_dlog[0]),
+                "famo/dlog_ssim": float(avg_dlog[1]),
+                "famo/dlog_roi": float(avg_dlog[2]),
 
-                "famo/xi_global": float(xi[0].item()),
-                "famo/xi_roi": float(xi[1].item()),
-                "famo/xi_gan": float(xi[2].item()),
+                "famo/xi_l1": float(xi[0].item()),
+                "famo/xi_ssim": float(xi[1].item()),
+                "famo/xi_roi": float(xi[2].item()),
             }
+
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
                 log_dict["val/best_recon_loss"] = best_val
+
             wandb.log(log_dict, step=epoch)
 
     # ---- Load best weights ----
@@ -560,6 +585,7 @@ def train_paggan(
         D.load_state_dict(best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
+
 
 
 
