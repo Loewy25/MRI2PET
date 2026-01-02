@@ -49,7 +49,9 @@ if __name__ == "__main__":
             "lambda_contrast_out": LAMBDA_CONTRAST_OUT,
             "lambda_contrast_ctx": LAMBDA_CONTRAST_CTX,
             "mtl_method": "famo_flat_3loss",
-
+            "famo_beta": FAMO_BETA,
+            "famo_decay": FAMO_DECAY,
+            "famo_eps": FAMO_EPS,
 
         },
     )
@@ -96,9 +98,6 @@ if __name__ == "__main__":
         lambda_contrast_ctx=LAMBDA_CONTRAST_CTX,
         verbose=True,
         log_to_wandb=True,
-        famo_beta=FAMO_BETA,
-        famo_decay=FAMO_DECAY,
-        famo_eps=FAMO_EPS,
 
     )
 
