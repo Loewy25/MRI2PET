@@ -22,7 +22,7 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="famo_15000512_005005_4_split"
+export RUN_NAME="famo_15000512_005001_4_split"
 export FOLD_INDEX=4 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
@@ -38,7 +38,7 @@ export LAMBDA_CONTRAST_CTX=2
 export CONTRAST_EPS0=1e-6
   
 export FAMO_BETA=0.005
-export FAMO_DECAY=0.005
+export FAMO_DECAY=0.001
 export FAMO_EPS=1e-8
 
 python main.py
