@@ -37,8 +37,8 @@ export LAMBDA_CONTRAST_OUT=1
 export LAMBDA_CONTRAST_CTX=2
 export CONTRAST_EPS0=1e-6
   
-export FAMO_BETA=0.001
-export FAMO_DECAY=0.005
+export FAMO_BETA=0.01
+export FAMO_DECAY=0.001
 export FAMO_EPS=1e-8
 
 python main.py
