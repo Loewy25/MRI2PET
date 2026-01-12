@@ -11,7 +11,7 @@
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
 
-module load cuda/12.9
+module load cuda/12.9https://github.com/Loewy25/MRI2PET/raw/refs/heads/recon_jacobian_famo/MY_BATCH_SCRIPT
 module load cudnn/9.11.0.98-cuda12
 
 
@@ -22,8 +22,8 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
-export RUN_NAME="famo_15000512_01001_2_split"
-export FOLD_INDEX=2 # 0-based -> fold5
+export RUN_NAME="famo_15000512_01001_3_split"
+export FOLD_INDEX=3 # 0-based -> fold5
 
 # ---- NEW: Jacobian regularization hyperparams ----
 # ---- NEW: epoch schedule ----
