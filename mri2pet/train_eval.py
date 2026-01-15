@@ -13,7 +13,9 @@ import torch.nn.functional as F
 from .config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
     LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    FAMO_BETA, FAMO_DECAY, FAMO_EPS,
 )
+
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
@@ -100,9 +102,11 @@ def train_paggan(
         lambda_contrast_ctx = _env_float("LAMBDA_CONTRAST_CTX", 0.005)
 
     # ---- FAMO hyperparams from env (no other files needed) ----
-    famo_beta = _env_float("FAMO_BETA", 0.001)
-    famo_decay = _env_float("FAMO_DECAY", 0.001)
-    famo_eps = _env_float("FAMO_EPS", 1e-8)
+    # ---- FAMO hyperparams (env overrides config defaults) ----
+    famo_beta  = _env_float("FAMO_BETA",  float(FAMO_BETA))
+    famo_decay = _env_float("FAMO_DECAY", float(FAMO_DECAY))
+    famo_eps   = _env_float("FAMO_EPS",   float(FAMO_EPS))
+
 
     # One-time note if old (deprecated) args were passed
     if verbose and any(x is not None for x in [lambda_sens, lambda_local, fgsm_eps, sens_tau]):
