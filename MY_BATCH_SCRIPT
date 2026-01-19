@@ -24,12 +24,12 @@ export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="fold1_os2_aug"
+export RUN_NAME="fold1_os5_aug"
 export FOLD_INDEX=0
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.2
+export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Augmentation (train only)
 export AUG_ENABLE=1
