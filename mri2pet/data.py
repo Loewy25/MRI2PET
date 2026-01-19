@@ -271,15 +271,17 @@ def build_loaders_from_fold_csv(
 ):
     """
     Build train/val/test DataLoaders using explicit subject lists from a fold CSV.
+    Train-only oversampling: adjust label==3 draw rate to OVERSAMPLE_LABEL3_TARGET,
+    while keeping original ratios among labels 0/1/2.
     """
-    # 1) Full dataset (no random split)
+    # 1) Read CSV split lists + train labels (label applies to TRAIN column only)
     train_sids, val_sids, test_sids, train_sid_to_label = _read_fold_csv_lists(fold_csv_path)
 
+    # 2) Full dataset
     ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to, sid_to_label=train_sid_to_label)
     N = len(ds)
 
-
-    # 2) Map subject IDs to dataset indices
+    # 3) Map subject IDs to dataset indices
     sid_list = [_sid_for_item(x) for x in ds.items]
     sid_to_index = {sid: i for i, sid in enumerate(sid_list)}
 
@@ -299,13 +301,17 @@ def build_loaders_from_fold_csv(
     idx_val   = _to_indices(val_sids)
     idx_test  = _to_indices(test_sids)
 
-        # -------------------------------
-    # Train-only oversampling (label 3 -> target fraction)
-    # Keep original ratios among labels 0/1/2
+    # 4) Create subsets (THIS WAS MISSING in your pasted version)
+    train_set = Subset(ds, idx_train)
+    val_set   = Subset(ds, idx_val)
+    test_set  = Subset(ds, idx_test)
+
+    # -------------------------------
+    # Train-only oversampling sampler
     # -------------------------------
     sampler = None
     if OVERSAMPLE_ENABLE:
-        # labels in the exact order of train_set (i.e., idx_train order)
+        # Build labels in the same order as train_set (idx_train order)
         train_labels: List[int] = []
         for idx in idx_train:
             sid = sid_list[idx]
@@ -313,18 +319,21 @@ def build_loaders_from_fold_csv(
             if lab is None:
                 print(f"[WARN] Train sid '{sid}' has no label in CSV; treating as label=0")
                 lab = 0
-            train_labels.append(int(lab))
+            lab = int(lab)
+            if lab not in (0, 1, 2, 3):
+                print(f"[WARN] Train sid '{sid}' has out-of-range label={lab}; treating as label=0")
+                lab = 0
+            train_labels.append(lab)
 
         ntr = len(train_labels)
         if ntr > 0:
             counts = {k: 0 for k in (0, 1, 2, 3)}
             for lab in train_labels:
-                if lab in counts:
-                    counts[lab] += 1
+                counts[lab] += 1
 
             p3 = counts[3] / max(1, ntr)
             target_p3 = float(OVERSAMPLE_LABEL3_TARGET)
-            target_p3 = max(0.0, min(0.95, target_p3))  # clamp
+            target_p3 = max(0.0, min(0.95, target_p3))
 
             if counts[3] == 0:
                 print("[WARN] OVERSAMPLE_ENABLE=1 but no label=3 samples in train split; sampler disabled.")
@@ -340,7 +349,6 @@ def build_loaders_from_fold_csv(
                     for k in (0, 1, 2):
                         q[k] = rest * (p[k] / p_rest)
                 else:
-                    # degenerate case: only class 3 exists
                     q = {0: 0.0, 1: 0.0, 2: 0.0, 3: 1.0}
 
                 # Class weights proportional to q_k / p_k
@@ -351,18 +359,22 @@ def build_loaders_from_fold_csv(
                     else:
                         class_w[k] = 0.0
 
-                # Safety clamp (avoid insane ratios)
+                # Clamp to avoid insane ratios
                 maxw = float(OVERSAMPLE_MAX_WEIGHT)
                 for k in class_w:
                     class_w[k] = float(np.clip(class_w[k], 0.0, maxw))
 
-                weights = torch.DoubleTensor([class_w.get(lab, 0.0) for lab in train_labels])
+                weights = torch.DoubleTensor([class_w[lab] for lab in train_labels])
 
                 if float(weights.sum().item()) > 0.0:
                     sampler = WeightedRandomSampler(weights, num_samples=ntr, replacement=True)
-                    print(f"[INFO] Oversampling train enabled:"
-                          f" target_p3={target_p3:.2f}, current_p3={p3:.2f}, counts={counts}, class_w={class_w}")
+                    print(
+                        f"[INFO] Oversampling train enabled: "
+                        f"target_p3={target_p3:.2f}, current_p3={p3:.2f}, "
+                        f"counts={counts}, class_w={class_w}"
+                    )
 
+    # 5) DataLoaders
     dl_train = DataLoader(
         train_set,
         batch_size=batch_size,
@@ -371,18 +383,26 @@ def build_loaders_from_fold_csv(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
-        collate_fn=_collate_keep_meta
+        collate_fn=_collate_keep_meta,
     )
-
     dl_val = DataLoader(
-        val_set, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
-        collate_fn=_collate_keep_meta
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+        collate_fn=_collate_keep_meta,
     )
     dl_test = DataLoader(
-        test_set, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
-        collate_fn=_collate_keep_meta
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+        collate_fn=_collate_keep_meta,
     )
 
     return dl_train, dl_val, dl_test, N, len(idx_train), len(idx_val), len(idx_test)
+
