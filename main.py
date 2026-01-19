@@ -5,8 +5,14 @@ import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE
+    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
+    AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
+    AUG_INTENSITY_PROB, AUG_NOISE_STD,
+    AUG_SCALE_MIN, AUG_SCALE_MAX,
+    AUG_SHIFT_MIN, AUG_SHIFT_MAX,
 )
+
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
@@ -36,6 +42,18 @@ if __name__ == "__main__":
             "data_range": DATA_RANGE,
             "batch_size": 1,
             "resize_to": (128, 128, 128),
+                        "oversample_enable": OVERSAMPLE_ENABLE,
+            "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
+            "aug_enable": AUG_ENABLE,
+            "aug_prob": AUG_PROB,
+            "aug_flip_prob": AUG_FLIP_PROB,
+            "aug_intensity_prob": AUG_INTENSITY_PROB,
+            "aug_noise_std": AUG_NOISE_STD,
+            "aug_scale_min": AUG_SCALE_MIN,
+            "aug_scale_max": AUG_SCALE_MAX,
+            "aug_shift_min": AUG_SHIFT_MIN,
+            "aug_shift_max": AUG_SHIFT_MAX,
+
         },
     )
 
