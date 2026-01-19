@@ -9,8 +9,10 @@ from torch.utils.data import Dataset, DataLoader, random_split, Subset, Weighted
 
 from .config import (
     ROOT_DIR, RESIZE_TO, TRAIN_FRACTION, VAL_FRACTION, BATCH_SIZE,
-    NUM_WORKERS, PIN_MEMORY
+    NUM_WORKERS, PIN_MEMORY,
+    OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET, OVERSAMPLE_MAX_WEIGHT
 )
+
 from .utils import _pad_or_crop_to  # used by models.py; keep import path if needed
 
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
@@ -50,10 +52,16 @@ class KariAV1451Dataset(Dataset):
     normalizes, optional resize, returns (MRI, PET, meta) where MRI/PET are FloatTensors [1,D,H,W].
     Uses aseg_brainmask.nii.gz if available for masking; otherwise T1>0 as mask.
     """
-    def __init__(self, root_dir: str = ROOT_DIR, resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO):
+    def __init__(
+        self,
+        root_dir: str = ROOT_DIR,
+        resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
+        sid_to_label: Optional[Dict[str, int]] = None,
+    ):
+
         self.root_dir = root_dir
         self.resize_to = resize_to
-
+        self.sid_to_label = sid_to_label or {}
         patterns = [
             os.path.join(root_dir, "*T807*"),
             os.path.join(root_dir, "*t807*"),
@@ -143,6 +151,7 @@ class KariAV1451Dataset(Dataset):
             "pet_affine": pet_affine,
             "orig_shape": orig_shape,
             "cur_shape": cur_shape,
+            "label": int(self.sid_to_label.get(sid, -1)),
             "resized_to": self.resize_to,
             "brain_mask": mask.astype(np.uint8) if mask is not None else None,
             # === NEW ===
@@ -199,25 +208,53 @@ import csv
 
 def _read_fold_csv_lists(path: str):
     """
-    Read a foldX.csv with columns train,validation,test (one subject per cell).
-    Returns three lists of subject IDs (folder names).
+    Read a foldX.csv with columns train, validation, test, and label.
+    IMPORTANT: label is assumed to correspond to the TRAIN column only.
+    Returns:
+      - train_sids, val_sids, test_sids
+      - train_sid_to_label: dict[sid] -> int label (0..3) for train subjects
     """
     train, val, test = [], [], []
+    train_sid_to_label: Dict[str, int] = {}
+
     with open(path, "r", newline="") as f:
         r = csv.DictReader(f)
-        # tolerant column matching
-        cols = {c.strip().lower(): c for c in r.fieldnames}
-        tcol = cols.get("train"); vcol = cols.get("validation"); ccol = cols.get("test")
+        cols = {c.strip().lower(): c for c in (r.fieldnames or [])}
+
+        tcol = cols.get("train")
+        vcol = cols.get("validation")
+        ccol = cols.get("test")
+        lcol = cols.get("label")  # may exist; label used only for train entries
+
         if not (tcol and vcol and ccol):
             raise ValueError(f"fold CSV missing required columns train/validation/test: {path}")
+
+        if OVERSAMPLE_ENABLE and (lcol is None):
+            raise ValueError(f"OVERSAMPLE_ENABLE=1 but fold CSV has no 'label' column: {path}")
+
         for row in r:
             t = (row.get(tcol) or "").strip()
             v = (row.get(vcol) or "").strip()
             c = (row.get(ccol) or "").strip()
-            if t: train.append(t)
-            if v: val.append(v)
-            if c: test.append(c)
-    return train, val, test
+
+            if t:
+                train.append(t)
+                if lcol is not None:
+                    lab_str = (row.get(lcol) or "").strip()
+                    if lab_str == "":
+                        print(f"[WARN] Missing label for train sid '{t}' in {path}; treating as label=0")
+                        train_sid_to_label[t] = 0
+                    else:
+                        # robust parsing in case it's "3.0"
+                        train_sid_to_label[t] = int(float(lab_str))
+
+            if v:
+                val.append(v)
+            if c:
+                test.append(c)
+
+    return train, val, test, train_sid_to_label
+
 
 def _sid_for_item(item_tuple):
     """Extract subject folder name from KariAV1451Dataset.items entry."""
@@ -236,14 +273,15 @@ def build_loaders_from_fold_csv(
     Build train/val/test DataLoaders using explicit subject lists from a fold CSV.
     """
     # 1) Full dataset (no random split)
-    ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to)
+    train_sids, val_sids, test_sids, train_sid_to_label = _read_fold_csv_lists(fold_csv_path)
+
+    ds = KariAV1451Dataset(root_dir=root, resize_to=resize_to, sid_to_label=train_sid_to_label)
     N = len(ds)
+
 
     # 2) Map subject IDs to dataset indices
     sid_list = [_sid_for_item(x) for x in ds.items]
     sid_to_index = {sid: i for i, sid in enumerate(sid_list)}
-
-    train_sids, val_sids, test_sids = _read_fold_csv_lists(fold_csv_path)
 
     def _to_indices(sids):
         idxs = []
@@ -261,16 +299,81 @@ def build_loaders_from_fold_csv(
     idx_val   = _to_indices(val_sids)
     idx_test  = _to_indices(test_sids)
 
-    from torch.utils.data import Subset
-    train_set = Subset(ds, idx_train)
-    val_set   = Subset(ds, idx_val)
-    test_set  = Subset(ds, idx_test)
+        # -------------------------------
+    # Train-only oversampling (label 3 -> target fraction)
+    # Keep original ratios among labels 0/1/2
+    # -------------------------------
+    sampler = None
+    if OVERSAMPLE_ENABLE:
+        # labels in the exact order of train_set (i.e., idx_train order)
+        train_labels: List[int] = []
+        for idx in idx_train:
+            sid = sid_list[idx]
+            lab = train_sid_to_label.get(sid, None)
+            if lab is None:
+                print(f"[WARN] Train sid '{sid}' has no label in CSV; treating as label=0")
+                lab = 0
+            train_labels.append(int(lab))
+
+        ntr = len(train_labels)
+        if ntr > 0:
+            counts = {k: 0 for k in (0, 1, 2, 3)}
+            for lab in train_labels:
+                if lab in counts:
+                    counts[lab] += 1
+
+            p3 = counts[3] / max(1, ntr)
+            target_p3 = float(OVERSAMPLE_LABEL3_TARGET)
+            target_p3 = max(0.0, min(0.95, target_p3))  # clamp
+
+            if counts[3] == 0:
+                print("[WARN] OVERSAMPLE_ENABLE=1 but no label=3 samples in train split; sampler disabled.")
+            else:
+                # Current proportions
+                p = {k: counts[k] / ntr for k in (0, 1, 2, 3)}
+                rest = 1.0 - target_p3
+                p_rest = p[0] + p[1] + p[2]
+
+                # Target proportions q: keep original ratios among 0/1/2
+                q = {0: 0.0, 1: 0.0, 2: 0.0, 3: target_p3}
+                if p_rest > 0:
+                    for k in (0, 1, 2):
+                        q[k] = rest * (p[k] / p_rest)
+                else:
+                    # degenerate case: only class 3 exists
+                    q = {0: 0.0, 1: 0.0, 2: 0.0, 3: 1.0}
+
+                # Class weights proportional to q_k / p_k
+                class_w = {}
+                for k in (0, 1, 2, 3):
+                    if p[k] > 0:
+                        class_w[k] = q[k] / p[k]
+                    else:
+                        class_w[k] = 0.0
+
+                # Safety clamp (avoid insane ratios)
+                maxw = float(OVERSAMPLE_MAX_WEIGHT)
+                for k in class_w:
+                    class_w[k] = float(np.clip(class_w[k], 0.0, maxw))
+
+                weights = torch.DoubleTensor([class_w.get(lab, 0.0) for lab in train_labels])
+
+                if float(weights.sum().item()) > 0.0:
+                    sampler = WeightedRandomSampler(weights, num_samples=ntr, replacement=True)
+                    print(f"[INFO] Oversampling train enabled:"
+                          f" target_p3={target_p3:.2f}, current_p3={p3:.2f}, counts={counts}, class_w={class_w}")
 
     dl_train = DataLoader(
-        train_set, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
+        train_set,
+        batch_size=batch_size,
+        shuffle=(sampler is None),
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
         collate_fn=_collate_keep_meta
     )
+
     dl_val = DataLoader(
         val_set, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
