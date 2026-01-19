@@ -8,8 +8,13 @@ import torch.nn.functional as F
 
 from .config import (
     EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
-    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1
+    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
+    AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
+    AUG_INTENSITY_PROB, AUG_NOISE_STD,
+    AUG_SCALE_MIN, AUG_SCALE_MAX,
+    AUG_SHIFT_MIN, AUG_SHIFT_MAX,
 )
+
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 import wandb
@@ -61,20 +66,18 @@ def train_paggan(
     avg_norm_gan = 0.0
     norm_decay = 0.9
 
-    def _meta_to_cortex_mask(meta_any, B_expected: int) -> Optional[torch.Tensor]:
+    def _meta_to_mask(meta_any, key: str, B_expected: int) -> Optional[torch.Tensor]:
         """
-        Returns cortex mask tensor [B,1,D,H,W] on device, or None if unavailable.
+        Returns mask tensor [B,1,D,H,W] on device, or None if unavailable.
         Supports meta as dict (B=1) or list of dicts (B>1).
         """
         if isinstance(meta_any, dict):
-            cm = meta_any.get("cortex_mask", None)
-            if cm is None:
+            arr = meta_any.get(key, None)
+            if arr is None:
                 return None
-            t = torch.from_numpy(cm.astype(np.float32))
+            t = torch.from_numpy(arr.astype(np.float32))
             if t.dim() == 3:
                 t = t.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
-            elif t.dim() == 4:
-                t = t.unsqueeze(0)  # [1,?,D,H,W] (rare)
             return t.to(device, non_blocking=True)
 
         if isinstance(meta_any, list) and len(meta_any) == B_expected:
@@ -82,16 +85,17 @@ def train_paggan(
             for m in meta_any:
                 if not isinstance(m, dict):
                     return None
-                cm = m.get("cortex_mask", None)
-                if cm is None:
+                arr = m.get(key, None)
+                if arr is None:
                     return None
-                t = torch.from_numpy(cm.astype(np.float32))
+                t = torch.from_numpy(arr.astype(np.float32))
                 if t.dim() != 3:
                     return None
                 masks.append(t.unsqueeze(0).unsqueeze(0))  # [1,1,D,H,W]
             return torch.cat(masks, dim=0).to(device, non_blocking=True)
 
         return None
+
 
     def _masked_l1(fake5: torch.Tensor, pet5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
         """
@@ -102,6 +106,54 @@ def train_paggan(
         num = diff.sum(dim=(1, 2, 3, 4))
         den = mask5.sum(dim=(1, 2, 3, 4)) + 1e-6
         return (num / den).mean()
+
+    def _maybe_augment_pair(
+        mri5: torch.Tensor,
+        pet5: torch.Tensor,
+        brain5: Optional[torch.Tensor],
+        cortex5: Optional[torch.Tensor],
+    ):
+        """
+        Train-only augmentation:
+          - paired random flips on MRI/PET/brain/cortex masks
+          - MRI-only intensity jitter inside brain mask
+        """
+        if not AUG_ENABLE:
+            return mri5, pet5, brain5, cortex5
+
+        # apply augmentation to this batch with probability AUG_PROB
+        if torch.rand((), device=mri5.device) > float(AUG_PROB):
+            return mri5, pet5, brain5, cortex5
+
+        # --- paired random flips (D/H/W axes) ---
+        for dim in (-1, -2, -3):  # W, H, D in [B,1,D,H,W]
+            if torch.rand((), device=mri5.device) < float(AUG_FLIP_PROB):
+                mri5 = torch.flip(mri5, dims=(dim,))
+                pet5 = torch.flip(pet5, dims=(dim,))
+                if brain5 is not None:
+                    brain5 = torch.flip(brain5, dims=(dim,))
+                if cortex5 is not None:
+                    cortex5 = torch.flip(cortex5, dims=(dim,))
+
+        # --- MRI-only intensity augmentation (inside brain mask) ---
+        if torch.rand((), device=mri5.device) < float(AUG_INTENSITY_PROB):
+            B = mri5.size(0)
+            dtype = mri5.dtype
+            dev = mri5.device
+
+            # per-sample scale/shift
+            s = float(AUG_SCALE_MIN) + (float(AUG_SCALE_MAX) - float(AUG_SCALE_MIN)) * torch.rand((B, 1, 1, 1, 1), device=dev, dtype=dtype)
+            b = float(AUG_SHIFT_MIN) + (float(AUG_SHIFT_MAX) - float(AUG_SHIFT_MIN)) * torch.rand((B, 1, 1, 1, 1), device=dev, dtype=dtype)
+            noise = torch.randn_like(mri5) * float(AUG_NOISE_STD)
+
+            if brain5 is not None:
+                m = (brain5 > 0.5).to(dtype)
+                mri5 = (mri5 * (1.0 - m)) + ((mri5 * s + b + noise) * m)
+            else:
+                mri5 = (mri5 * s + b + noise)
+
+        return mri5, pet5, brain5, cortex5
+
 
     for epoch in range(1, epochs + 1):
         # --- MGDA monitoring accumulators (per epoch) ---
@@ -126,8 +178,17 @@ def train_paggan(
             B = mri.size(0) if mri.dim() == 5 else 1
 
             # ---- Update D ----
+            # ---- Update D ----
             mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
             pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+
+            # get masks from meta (for augmentation + ROI loss)
+            brain5  = _meta_to_mask(meta, "brain_mask",  B_expected=mri5.size(0))
+            cortex5 = _meta_to_mask(meta, "cortex_mask", B_expected=mri5.size(0))
+
+            # train-only augmentation (paired)
+            mri5, pet5, brain5, cortex5 = _maybe_augment_pair(mri5, pet5, brain5, cortex5)
+
 
             with torch.no_grad():
                 fake = G(mri5)
@@ -160,9 +221,9 @@ def train_paggan(
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # === NEW: ROI/cortex recon objective (masked L1) ===
-            cortex5 = _meta_to_cortex_mask(meta, B_expected=(mri5.size(0)))
+            # === ROI/cortex recon objective (masked L1) ===
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
+
             if use_roi:
                 loss_recon_roi = _masked_l1(fake, pet5, cortex5)
             else:
