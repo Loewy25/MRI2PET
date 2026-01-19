@@ -24,8 +24,23 @@ export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="baseline_2026_1"
-export FOLD_INDEX=0 # fold1
+export RUN_NAME="fold1_os35_aug"
+export FOLD_INDEX=0
+
+# Oversampling (train only)
+export OVERSAMPLE_ENABLE=1
+export OVERSAMPLE_LABEL3_TARGET=0.35
+
+# Augmentation (train only)
+export AUG_ENABLE=1
+export AUG_PROB=0.9
+export AUG_FLIP_PROB=0.5
+export AUG_INTENSITY_PROB=0.8
+export AUG_NOISE_STD=0.03
+export AUG_SCALE_MIN=0.9
+export AUG_SCALE_MAX=1.1
+export AUG_SHIFT_MIN=-0.05
+export AUG_SHIFT_MAX=0.05
 
 python main.py
 
