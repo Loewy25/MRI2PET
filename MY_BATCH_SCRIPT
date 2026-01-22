@@ -127,16 +127,16 @@ pip install torch
 python ROI_eval_cv_split.py \
   --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
   --vols-roots \
-    /home/l.peiwang/MRI2PET/fold1_os6_aug/volumes \
-    /home/l.peiwang/MRI2PET/fold2_os6_aug/volumes \
-    /home/l.peiwang/MRI2PET/fold3_os6_aug/volumes \
-    /home/l.peiwang/MRI2PET/fold4_os6_aug/volumes \
-    /home/l.peiwang/MRI2PET/fold5_os6_aug/volumes \
+    /home/l.peiwang/MRI2PET/fold1_os7_aug/volumes \
+    /home/l.peiwang/MRI2PET/fold2_os7_aug/volumes \
+    /home/l.peiwang/MRI2PET/fold3_os7_aug/volumes \
+    /home/l.peiwang/MRI2PET/fold4_os7_aug/volumes \
+    /home/l.peiwang/MRI2PET/fold5_os7_aug/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/fold1_os6_aug
+  --out /scratch/l.peiwang/fold1_os7_aug
 
 
 #python new_class.py \
