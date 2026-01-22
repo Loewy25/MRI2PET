@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IN_ROOT="/ceph/chpc/mapped/dian_obs_data_shared/obs_mr_scans_imagids"
+OUT_ROOT="/ceph/chpc/mapped/dian_obs_data_shared/obs_mr_scans_t1_nifti"   # <-- change if you want
+T1_SUBFOLDER="4001-Accelerated_Sagittal_MPRAGE"
+
+mkdir -p "$OUT_ROOT"
+
+missing=0
+converted=0
+
+for subj_dir in "$IN_ROOT"/*_mr; do
+  [[ -d "$subj_dir" ]] || continue
+  subj="$(basename "$subj_dir")"
+  src="$subj_dir/$T1_SUBFOLDER"
+  dst="$OUT_ROOT/$subj"
+  mkdir -p "$dst"
+
+  if [[ ! -d "$src" ]]; then
+    echo "[MISSING] $subj : no '$T1_SUBFOLDER'"
+    ((missing+=1))
+    continue
+  fi
+
+  # convert into a temp folder so we can enforce a clean, consistent output name
+  tmp="$dst/.tmp_dcm2niix"
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+
+  # DICOM -> NIfTI (T1 only)
+  # Output will include JSON sidecar; we keep it.
+  dcm2niix -z y -f T1 -o "$tmp" "$src" >/dev/null
+
+  # pick the T1 nifti (handle rare cases where dcm2niix appends suffixes)
+  t1="$(ls -1t "$tmp"/T1*.nii.gz 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${t1:-}" ]]; then
+    echo "[FAIL]    $subj : dcm2niix produced no T1*.nii.gz"
+    rm -rf "$tmp"
+    continue
+  fi
+
+  # enforce dataset-wide consistent structure + filenames
+  mv -f "$t1" "$dst/T1.nii.gz"
+  json="$(ls -1t "$tmp"/T1*.json 2>/dev/null | head -n 1 || true)"
+  [[ -n "${json:-}" ]] && mv -f "$json" "$dst/T1.json" || true
+  rm -rf "$tmp"
+
+  # Step 2: quick check + print info (dims + pixdim)
+  if command -v fslinfo >/dev/null 2>&1; then
+    dimline="$(fslinfo "$dst/T1.nii.gz" | awk '/^dim1|^dim2|^dim3/{printf "%s=%s ",$1,$2}')"
+    pixline="$(fslinfo "$dst/T1.nii.gz" | awk '/^pixdim1|^pixdim2|^pixdim3/{printf "%s=%s ",$1,$2}')"
+    echo "[OK]      $subj : $dimline | $pixline -> $dst/T1.nii.gz"
+  else
+    echo "[OK]      $subj : wrote $dst/T1.nii.gz (install/load FSL to print dims)"
+  fi
+
+  ((converted+=1))
+done
+
+echo
+echo "Done. converted=$converted missing_t1_folder=$missing"
+echo "Output root: $OUT_ROOT"
