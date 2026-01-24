@@ -15,6 +15,18 @@ IN_ROOT="/ceph/chpc/mapped/dian_obs_data_shared/obs_mr_scans_imagids"
 OUT_ROOT="/scratch/l.peiwang/DIAN"
 mkdir -p "$OUT_ROOT"
 
+# If your cluster needs modules, uncomment the right one(s):
+module load dcm2niix
+module load fsl
+
+# hard fail early if dcm2niix isn't available on the node
+if ! command -v dcm2niix >/dev/null 2>&1; then
+  echo "[FATAL] dcm2niix not found on compute node. Load module or fix PATH."
+  exit 2
+fi
+echo "[INFO] dcm2niix: $(command -v dcm2niix)"
+(dcm2niix -h 2>&1 | head -n 2) || true
+
 INC_RE='mprage|mp[-_ ]?rage|spgr|fspgr|ir[-_ ]?fspgr|bravo|tfe'
 EXC_RE='moco|mosaic|localizer|3[_ -]?plane|phoenix|zipreport|report|field|mag|pha|phase|swi|mip|flair|t2|dti|diff|adc|tracew|tensor|colfa|fa|fmri|rsfmri|rest|asl|perfusion|default_ps_series|surv_new_scale_parameters|unknown'
 
@@ -60,8 +72,10 @@ for sess_dir in "$IN_ROOT"/*_mr; do
     tmp="$dst/.tmp_dcm2niix"
     rm -rf "$tmp"; mkdir -p "$tmp"
 
-    if ! dcm2niix -z y -f T1 -o "$tmp" "$dicom_dir" >/dev/null 2>&1; then
-      echo "[FAIL]    $sess | $series : dcm2niix error (dir=$(basename "$dicom_dir"))"
+    # capture stderr so we can see why it fails
+    if ! dcm2niix -z y -f T1 -o "$tmp" "$dicom_dir" >"$tmp/stdout.log" 2>"$tmp/stderr.log"; then
+      echo "[FAIL]    $sess | $series : dcm2niix failed (dir=$(basename "$dicom_dir"))"
+      echo "          $(tail -n 3 "$tmp/stderr.log" | tr '\n' ' ')"
       rm -rf "$tmp"
       ((failed+=1))
       continue
@@ -72,6 +86,7 @@ for sess_dir in "$IN_ROOT"/*_mr; do
 
     if [[ -z "${nii:-}" ]]; then
       echo "[FAIL]    $sess | $series : no T1*.nii.gz produced (dir=$(basename "$dicom_dir"))"
+      echo "          $(tail -n 3 "$tmp/stderr.log" | tr '\n' ' ')"
       rm -rf "$tmp"
       ((failed+=1))
       continue
