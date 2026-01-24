@@ -28,7 +28,6 @@ for sess_dir in "$IN_ROOT"/*_mr; do
   out_sess="$OUT_ROOT/$sess"
   mkdir -p "$out_sess"
 
-  # list subfolders (names only) and filter via egrep (robust)
   cand_list="$(find "$sess_dir" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" \
     | egrep -i "$INC_RE" | egrep -iv "$EXC_RE" | sort || true)"
 
@@ -49,6 +48,11 @@ for sess_dir in "$IN_ROOT"/*_mr; do
   while IFS= read -r series; do
     [[ -n "$series" ]] || continue
     src="$sess_dir/$series"
+
+    # handle nested DICOM folder
+    dicom_dir="$src"
+    [[ -d "$src/DICOM" ]] && dicom_dir="$src/DICOM"
+
     series_safe="$(sanitize "$series")"
     dst="$out_sess/$series_safe"
     mkdir -p "$dst"
@@ -56,8 +60,8 @@ for sess_dir in "$IN_ROOT"/*_mr; do
     tmp="$dst/.tmp_dcm2niix"
     rm -rf "$tmp"; mkdir -p "$tmp"
 
-    if ! dcm2niix -z y -f T1 -o "$tmp" "$src" >/dev/null 2>&1; then
-      echo "[FAIL]    $sess | $series : dcm2niix error"
+    if ! dcm2niix -z y -f T1 -o "$tmp" "$dicom_dir" >/dev/null 2>&1; then
+      echo "[FAIL]    $sess | $series : dcm2niix error (dir=$(basename "$dicom_dir"))"
       rm -rf "$tmp"
       ((failed+=1))
       continue
@@ -67,7 +71,7 @@ for sess_dir in "$IN_ROOT"/*_mr; do
     jsn="$(ls -1t "$tmp"/T1*.json 2>/dev/null | head -n 1 || true)"
 
     if [[ -z "${nii:-}" ]]; then
-      echo "[FAIL]    $sess | $series : no T1*.nii.gz produced"
+      echo "[FAIL]    $sess | $series : no T1*.nii.gz produced (dir=$(basename "$dicom_dir"))"
       rm -rf "$tmp"
       ((failed+=1))
       continue
