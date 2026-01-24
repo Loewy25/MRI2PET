@@ -1,11 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=obs_t1_dcm2niix
-#SBATCH --partition=compute
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
-#SBATCH --time=08:00:00
-#SBATCH --output=obs_t1_%j.out
-#SBATCH --error=obs_t1_%j.err
+
+#SBATCH --job-name=MGDA_UB
+#SBATCH --mem=10G
+#SBATCH -t 23:50:00
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.out
 
 set -euo pipefail
 
