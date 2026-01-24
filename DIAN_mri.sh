@@ -12,7 +12,7 @@
 set -euo pipefail
 
 IN_ROOT="/ceph/chpc/mapped/dian_obs_data_shared/obs_mr_scans_imagids"
-OUT_ROOT="/ceph/chpc/mapped/dian_obs_data_shared/obs_mr_t1_candidates_nifti"
+OUT_ROOT="/scratch/l.peiwang/DIAN"
 mkdir -p "$OUT_ROOT"
 
 INC_RE='mprage|mp[-_ ]?rage|spgr|fspgr|ir[-_ ]?fspgr|bravo|tfe'
