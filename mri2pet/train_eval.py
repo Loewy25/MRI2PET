@@ -43,7 +43,7 @@ def train_paggan(
     adv_criterion = nn.MSELoss()
 
     # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
-    lambda_g = float(lambda_gan)  # (kept as-is; not used in pure MGDA path)
+    lambda_g = float(lambda_gan)  # (kept as-is; not used in MGDA path, but left unchanged)
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -57,12 +57,10 @@ def train_paggan(
     #   - global recon gradient (v_global)
     #   - ROI/cortex recon gradient (v_roi)
     #   - GAN gradient (v_gan)
-    # and we do 2-level MGDA:
-    #   (global vs roi) -> v_recon, then (v_recon vs gan) -> v_final
+    # and we do a single-stage 3-way MGDA on these three.
     # =========================================================================
     avg_norm_recon_global = 0.0
     avg_norm_recon_roi = 0.0
-    avg_norm_recon_combined = 0.0
     avg_norm_gan = 0.0
     norm_decay = 0.9
 
@@ -95,7 +93,6 @@ def train_paggan(
             return torch.cat(masks, dim=0).to(device, non_blocking=True)
 
         return None
-
 
     def _masked_l1(fake5: torch.Tensor, pet5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
         """
@@ -154,12 +151,108 @@ def train_paggan(
 
         return mri5, pet5, brain5, cortex5
 
+    # -----------------------------
+    # MGDA-UB (3-way) utilities
+    # -----------------------------
+    def _mgda_weights_from_gram_3(Gm: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Solve min || sum_i w_i g_i ||^2 s.t. w_i >= 0, sum w_i = 1 for 3 objectives,
+        given Gram matrix Gm[i,j] = <g_i, g_j>.
+        Active-set enumeration: interior + edges + vertices.
+        Returns: w tensor shape [3] (global, roi, gan).
+        """
+        dev, dtype = Gm.device, Gm.dtype
+        one = torch.ones(3, device=dev, dtype=dtype)
+
+        def _obj(w: torch.Tensor) -> torch.Tensor:
+            return torch.dot(w, Gm @ w)
+
+        candidates = []
+
+        # Interior candidate (if feasible)
+        try:
+            try:
+                pinv = torch.linalg.pinv(Gm)
+            except Exception:
+                pinv = torch.pinverse(Gm)
+            w_int = pinv @ one
+            denom = torch.dot(one, w_int)
+            if torch.isfinite(denom) and float(denom.abs().item()) > eps:
+                w_int = w_int / denom
+                if torch.all(w_int >= -1e-6):
+                    w_int = torch.clamp(w_int, min=0.0)
+                    w_int = w_int / (w_int.sum() + eps)
+                    candidates.append(w_int)
+        except Exception:
+            pass
+
+        # Edge candidates (two objectives active)
+        def _edge(i: int, j: int) -> torch.Tensor:
+            Gii = Gm[i, i]
+            Gjj = Gm[j, j]
+            Gij = Gm[i, j]
+            num = (Gjj - Gij)
+            den = (Gii + Gjj - 2.0 * Gij) + eps
+            a = torch.clamp(num / den, 0.0, 1.0)
+            w = torch.zeros(3, device=dev, dtype=dtype)
+            w[i] = a
+            w[j] = 1.0 - a
+            return w
+
+        candidates += [_edge(0, 1), _edge(0, 2), _edge(1, 2)]
+
+        # Vertices
+        candidates += [
+            torch.tensor([1.0, 0.0, 0.0], device=dev, dtype=dtype),
+            torch.tensor([0.0, 1.0, 0.0], device=dev, dtype=dtype),
+            torch.tensor([0.0, 0.0, 1.0], device=dev, dtype=dtype),
+        ]
+
+        best_w = candidates[0]
+        best_val = _obj(best_w)
+        for w in candidates[1:]:
+            v = _obj(w)
+            if float(v.item()) < float(best_val.item()):
+                best_val = v
+                best_w = w
+
+        best_w = torch.clamp(best_w, min=0.0)
+        best_w = best_w / (best_w.sum() + eps)
+        return best_w
+
+    def _mgda_weights_3(Vg: torch.Tensor, Vr: torch.Tensor, Vgan: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Vg, Vr, Vgan: [B, N] flattened standardized gradients.
+        Returns: weights per-sample [B, 3] = (w_global, w_roi, w_gan)
+        """
+        B = Vg.size(0)
+        ws = []
+        for b in range(B):
+            g0 = Vg[b]
+            g1 = Vr[b]
+            g2 = Vgan[b]
+
+            Gm = torch.empty((3, 3), device=Vg.device, dtype=Vg.dtype)
+            Gm[0, 0] = torch.dot(g0, g0)
+            Gm[0, 1] = torch.dot(g0, g1)
+            Gm[0, 2] = torch.dot(g0, g2)
+            Gm[1, 0] = Gm[0, 1]
+            Gm[1, 1] = torch.dot(g1, g1)
+            Gm[1, 2] = torch.dot(g1, g2)
+            Gm[2, 0] = Gm[0, 2]
+            Gm[2, 1] = Gm[1, 2]
+            Gm[2, 2] = torch.dot(g2, g2)
+
+            ws.append(_mgda_weights_from_gram_3(Gm, eps=eps))
+
+        return torch.stack(ws, dim=0)
 
     for epoch in range(1, epochs + 1):
         # --- MGDA monitoring accumulators (per epoch) ---
-        alpha_running = 0.0               # stage-2 alpha (recon vs gan)
-        alpha_recon_running = 0.0         # stage-1 alpha (global vs roi)
-        cos_running = 0.0
+        w_global_running = 0.0
+        w_roi_running = 0.0
+        w_gan_running = 0.0
+
         grad_recon_running = 0.0          # raw ||grad_global||
         grad_roi_running = 0.0            # raw ||grad_roi||
         grad_gan_running = 0.0            # raw ||grad_gan||
@@ -178,17 +271,15 @@ def train_paggan(
             B = mri.size(0) if mri.dim() == 5 else 1
 
             # ---- Update D ----
-            # ---- Update D ----
             mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
             pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
 
             # get masks from meta (for augmentation + ROI loss)
-            brain5  = _meta_to_mask(meta, "brain_mask",  B_expected=mri5.size(0))
+            brain5 = _meta_to_mask(meta, "brain_mask",  B_expected=mri5.size(0))
             cortex5 = _meta_to_mask(meta, "cortex_mask", B_expected=mri5.size(0))
 
             # train-only augmentation (paired)
             mri5, pet5, brain5, cortex5 = _maybe_augment_pair(mri5, pet5, brain5, cortex5)
-
 
             with torch.no_grad():
                 fake = G(mri5)
@@ -221,17 +312,16 @@ def train_paggan(
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # === ROI/cortex recon objective (masked L1) ===
+            # ROI/cortex recon objective (masked L1)
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
-
             if use_roi:
                 loss_recon_roi = _masked_l1(fake, pet5, cortex5)
             else:
-                # dummy scalar to keep code simple; we will skip ROI MGDA if not usable
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # ========================= MGDA-UB (Hierarchical) =========================
-            # Stage 1: (global recon) vs (ROI recon) -> v_recon
+            # ========================= MGDA-UB (3-way, single stage) =========================
+
+            # ---- global recon grad ----
             v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
             current_nglobal = v_global.norm().item()
             if avg_norm_recon_global == 0:
@@ -240,6 +330,7 @@ def train_paggan(
                 avg_norm_recon_global = norm_decay * avg_norm_recon_global + (1 - norm_decay) * current_nglobal
             v_global_s = v_global / (avg_norm_recon_global + 1e-8)
 
+            # ---- ROI recon grad ----
             if use_roi:
                 v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0]
                 current_nroi = v_roi.norm().item()
@@ -248,33 +339,11 @@ def train_paggan(
                 else:
                     avg_norm_recon_roi = norm_decay * avg_norm_recon_roi + (1 - norm_decay) * current_nroi
                 v_roi_s = v_roi / (avg_norm_recon_roi + 1e-8)
-
-                Vg = v_global_s.reshape(v_global_s.size(0), -1)
-                Vr = v_roi_s.reshape(v_roi_s.size(0), -1)
-
-                eps = 1e-12
-                diff1 = Vr - Vg
-                num1 = (diff1 * Vr).sum(dim=1)
-                den1 = (diff1 * diff1).sum(dim=1) + eps
-                alpha1_batch = torch.clamp(num1 / den1, 0.0, 1.0)
-                alpha1 = alpha1_batch.median()  # scalar tensor
-
-                # recon direction (standardized space)
-                v_recon = alpha1 * v_global_s + (1.0 - alpha1) * v_roi_s
-
-                alpha_recon_running += float(alpha1.item())
-                grad_roi_running += current_nroi
             else:
-                # no ROI available -> use global recon only
-                alpha1 = torch.tensor(1.0, device=device, dtype=fake.dtype)
-                v_recon = v_global_s
+                v_roi_s = torch.zeros_like(v_global_s)
                 current_nroi = 0.0
-                alpha_recon_running += float(alpha1.item())
-                grad_roi_running += 0.0
 
-            grad_recon_running += current_nglobal
-
-            # Stage 2: (recon) vs (gan) -> v_final
+            # ---- GAN grad ----
             v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0]
             current_ngan = v_gan.norm().item()
             if avg_norm_gan == 0:
@@ -283,34 +352,40 @@ def train_paggan(
                 avg_norm_gan = norm_decay * avg_norm_gan + (1 - norm_decay) * current_ngan
             v_gan_s = v_gan / (avg_norm_gan + 1e-8)
 
-            # standardize combined recon direction for stage-2
-            current_nrecon_comb = v_recon.norm().item()
-            if avg_norm_recon_combined == 0:
-                avg_norm_recon_combined = current_nrecon_comb
+            # Flatten standardized grads
+            Vg = v_global_s.reshape(v_global_s.size(0), -1)
+            Vr = v_roi_s.reshape(v_roi_s.size(0), -1)
+            Vgan = v_gan_s.reshape(v_gan_s.size(0), -1)
+
+            if use_roi:
+                # 3-way MGDA weights (per-sample), then robust median across batch
+                w_batch = _mgda_weights_3(Vg, Vr, Vgan)         # [B,3]
+                w_med = w_batch.median(dim=0).values            # [3]
+                w_sum = (w_med.sum() + 1e-12)
+                w_med = w_med / w_sum
+                w_global, w_roi, w_gan_w = w_med[0], w_med[1], w_med[2]
             else:
-                avg_norm_recon_combined = norm_decay * avg_norm_recon_combined + (1 - norm_decay) * current_nrecon_comb
-            v_recon_s2 = v_recon / (avg_norm_recon_combined + 1e-8)
+                # fallback: 2-way MGDA between global recon and GAN
+                diff = Vgan - Vg
+                num = (diff * Vgan).sum(dim=1)
+                den = (diff * diff).sum(dim=1) + 1e-12
+                a_batch = torch.clamp(num / den, 0.0, 1.0)
+                a = a_batch.median()
+                w_global = a
+                w_roi = torch.tensor(0.0, device=device, dtype=fake.dtype)
+                w_gan_w = 1.0 - a
 
-            V1 = v_recon_s2.reshape(v_recon_s2.size(0), -1)
-            V2 = v_gan_s.reshape(v_gan_s.size(0), -1)
+            # Monitoring
+            w_global_running += float(w_global.item())
+            w_roi_running += float(w_roi.item())
+            w_gan_running += float(w_gan_w.item())
 
-            # monitoring cosine similarity (recon vs gan)
-            eps = 1e-12
-            cos_batch = (V1 * V2).sum(dim=1) / (V1.norm(dim=1) * V2.norm(dim=1) + eps)
-            cos_running += cos_batch.mean().item()
-
+            grad_recon_running += current_nglobal
+            grad_roi_running += current_nroi
             grad_gan_running += current_ngan
 
-            # closed-form α for stage-2
-            diff2 = V2 - V1
-            num2 = (diff2 * V2).sum(dim=1)
-            den2 = (diff2 * diff2).sum(dim=1) + eps
-            alpha2_batch = torch.clamp(num2 / den2, 0.0, 1.0)
-            alpha2 = alpha2_batch.median()
-
-            alpha_running += float(alpha2.item())
-
-            v_final = alpha2 * v_recon_s2 + (1.0 - alpha2) * v_gan_s
+            # Final direction
+            v_final = (w_global * v_global_s) + (w_roi * v_roi_s) + (w_gan_w * v_gan_s)
 
             opt_G.zero_grad(set_to_none=True)
             fake.backward(v_final)
@@ -327,9 +402,11 @@ def train_paggan(
         # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
-        avg_alpha2 = alpha_running / max(1, n_batches)
-        avg_alpha1 = alpha_recon_running / max(1, n_batches)
-        avg_cos = cos_running / max(1, n_batches)
+
+        avg_w_global = w_global_running / max(1, n_batches)
+        avg_w_roi = w_roi_running / max(1, n_batches)
+        avg_w_gan = w_gan_running / max(1, n_batches)
+
         avg_grad_recon = grad_recon_running / max(1, n_batches)
         avg_grad_roi = grad_roi_running / max(1, n_batches)
         avg_grad_gan = grad_gan_running / max(1, n_batches)
@@ -377,9 +454,8 @@ def train_paggan(
                     f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
-                    f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
-                    f"cos(recon,gan)={avg_cos:.3f}  "
+                    f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
+                    f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
                     f"||grad_global||={avg_grad_recon:.3e}  "
                     f"||grad_roi||={avg_grad_roi:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
@@ -393,9 +469,8 @@ def train_paggan(
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
             )
             print(
-                f"      [MGDA-Std] alpha2(recon-vs-gan)={avg_alpha2:.3f}  "
-                f"alpha1(global-vs-roi)={avg_alpha1:.3f}  "
-                f"cos(recon,gan)={avg_cos:.3f}  "
+                f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
+                f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
                 f"||grad_global||={avg_grad_recon:.3e}  "
                 f"||grad_roi||={avg_grad_roi:.3e}  "
                 f"||grad_gan||={avg_grad_gan:.3e}"
@@ -407,9 +482,13 @@ def train_paggan(
                 "epoch": epoch,
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
-                "mgda/alpha": avg_alpha2,
-                "mgda/alpha_global_vs_roi": avg_alpha1,
-                "mgda/cos_recon_gan": avg_cos,
+
+                # --- NEW: 3-way MGDA weights ---
+                "mgda/w_recon_global": avg_w_global,
+                "mgda/w_recon_roi": avg_w_roi,
+                "mgda/w_gan": avg_w_gan,
+
+                # keep grad norm tracking
                 "mgda/grad_recon_global_norm": avg_grad_recon,
                 "mgda/grad_recon_roi_norm": avg_grad_roi,
                 "mgda/grad_gan_norm": avg_grad_gan,
