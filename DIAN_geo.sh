@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=t1_geom_filter
-#SBATCH --partition=tier1
+#SBATCH --partition=tier1_cpu
+#SBATCH --account=shinjini_kundu
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 #SBATCH --time=02:00:00
