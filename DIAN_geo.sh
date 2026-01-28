@@ -9,6 +9,8 @@
 #SBATCH --error=slurm-%A_haha.out
 set -euo pipefail
 
+module load fsl
+
 # INPUT: already-converted candidates
 IN_ROOT="/scratch/l.peiwang/DIAN"
 
