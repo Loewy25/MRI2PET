@@ -8,8 +8,13 @@
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.out
 
+set -euo pipefail
+
+# initialize module system for batch shell
+source /etc/profile.d/modules.sh
 
 module load fsl/6.0.7.8
+
 set -euo pipefail
 
 
