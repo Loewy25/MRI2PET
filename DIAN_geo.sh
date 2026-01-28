@@ -17,27 +17,29 @@ mkdir -p "$OUT_ROOT"
 MIN_VOXELS=15000000
 MAX_ANISO=1.25
 
-echo "[INFO] host=$(hostname) job=$SLURM_JOB_ID user=$USER"
+echo "[INFO] host=$(hostname) job=${SLURM_JOB_ID:-NA} user=$USER"
 echo "[INFO] IN_ROOT=$IN_ROOT"
 echo "[INFO] OUT_ROOT=$OUT_ROOT"
 
-# ---------- Robust module init ----------
-# (Some CHPC batch shells don't have module() initialized)
-for f in /etc/profile \
-         /etc/profile.d/modules.sh \
+# ---------- Robust module init (without sourcing /etc/profile) ----------
+# Temporarily disable nounset while sourcing env scripts that may reference unset vars.
+set +u
+for f in /etc/profile.d/modules.sh \
          /usr/share/Modules/init/bash \
          /usr/share/lmod/lmod/init/bash; do
   [[ -r "$f" ]] && source "$f" || true
 done
+set -u
 
-# Try module load (don’t assume it works)
+# Try module load FSL (if module exists)
 if command -v module >/dev/null 2>&1; then
   module purge >/dev/null 2>&1 || true
   module load fsl/6.0.7.8 >/dev/null 2>&1 || true
   module list 2>/dev/null || true
+else
+  echo "[WARN] module command not available in this shell"
 fi
 
-# ---------- Decide header reader ----------
 USE_FSLINFO=0
 if command -v fslinfo >/dev/null 2>&1; then
   USE_FSLINFO=1
@@ -46,7 +48,6 @@ else
   echo "[WARN] fslinfo not found; will try Python nibabel fallback"
 fi
 
-# Python header reader (fallback)
 py_hdr() {
 python3 - "$1" <<'PY'
 import sys
@@ -100,7 +101,7 @@ for sess in "$IN_ROOT"/*_mr; do
 
     geom="$(read_geom "$nii" || true)"
     if [[ "$geom" == NO_NIBABEL* ]]; then
-      echo "[FATAL] nibabel not available and fslinfo missing. Fix by loading FSL correctly or install nibabel."
+      echo "[FATAL] nibabel not available and fslinfo missing. Load FSL correctly or install nibabel."
       echo "[DEBUG] $geom"
       exit 4
     fi
