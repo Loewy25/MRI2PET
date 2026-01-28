@@ -7,9 +7,11 @@
 #SBATCH --account=shinjini_kundu
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.out
+
+
+module load fsl/6.0.7.8
 set -euo pipefail
 
-module load fsl
 
 # INPUT: already-converted candidates
 IN_ROOT="/scratch/l.peiwang/DIAN"
