@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=t1_geom_filter
-#SBATCH --partition=tier1_cpu
+#SBATCH --job-name=MGDA_UB
+#SBATCH --mem=10G
+#SBATCH -t 23:50:00
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=2G
-#SBATCH --time=02:00:00
-#SBATCH --output=t1_geom_%j.out
-#SBATCH --error=t1_geom_%j.err
-
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.out
 set -euo pipefail
 
 # INPUT: already-converted candidates
