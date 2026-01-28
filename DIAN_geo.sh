@@ -1,73 +1,85 @@
 #!/bin/bash
 #SBATCH --job-name=DIAN_geom
-#SBATCH --partition=tier1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=4G
-#SBATCH --time=04:00:00
-#SBATCH --output=geom_%j.out
-#SBATCH --error=geom_%j.err
+#SBATCH --mem=10G
+#SBATCH -t 23:50:00
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --output=slurm-%A_geom.out
+#SBATCH --error=slurm-%A_geom.out
 
 set -euo pipefail
 
-# ===================== USER PATHS =====================
-IN_ROOT="/scratch/l.peiwang/DIAN"        # has <session>/<series>/T1.nii.gz
-OUT_ROOT="/scratch/l.peiwang/DIAN_geom"  # new root to write filtered results
+IN_ROOT="/scratch/l.peiwang/DIAN"
+OUT_ROOT="/scratch/l.peiwang/DIAN_geom"
 mkdir -p "$OUT_ROOT"
 
-# ===================== THRESHOLDS =====================
 MIN_VOXELS=15000000
 MAX_ANISO=1.25
 
-# ===================== FIND/ENABLE FSLINFO =====================
-echo "[INFO] host=$(hostname)  pwd=$(pwd)"
-echo "[INFO] bash=$BASH_VERSION"
+echo "[INFO] host=$(hostname) job=$SLURM_JOB_ID user=$USER"
+echo "[INFO] IN_ROOT=$IN_ROOT"
+echo "[INFO] OUT_ROOT=$OUT_ROOT"
 
-# Try to initialize environment/module system (harmless if absent)
+# ---------- Robust module init ----------
+# (Some CHPC batch shells don't have module() initialized)
 for f in /etc/profile \
          /etc/profile.d/modules.sh \
-         /usr/share/lmod/lmod/init/bash \
-         /usr/share/Modules/init/bash; do
+         /usr/share/Modules/init/bash \
+         /usr/share/lmod/lmod/init/bash; do
   [[ -r "$f" ]] && source "$f" || true
 done
 
-# Try module load if module exists
+# Try module load (don’t assume it works)
 if command -v module >/dev/null 2>&1; then
-  echo "[INFO] module system detected: $(command -v module)"
+  module purge >/dev/null 2>&1 || true
   module load fsl/6.0.7.8 >/dev/null 2>&1 || true
   module list 2>/dev/null || true
+fi
+
+# ---------- Decide header reader ----------
+USE_FSLINFO=0
+if command -v fslinfo >/dev/null 2>&1; then
+  USE_FSLINFO=1
+  echo "[INFO] using fslinfo: $(command -v fslinfo)"
 else
-  echo "[INFO] module command not available in this job shell"
+  echo "[WARN] fslinfo not found; will try Python nibabel fallback"
 fi
 
-# If still missing, try to locate fslinfo and prepend PATH
-if ! command -v fslinfo >/dev/null 2>&1; then
-  echo "[WARN] fslinfo not in PATH after module load; attempting bounded search..."
+# Python header reader (fallback)
+py_hdr() {
+python3 - "$1" <<'PY'
+import sys
+nii = sys.argv[1]
+try:
+    import nibabel as nib
+except Exception as e:
+    print("NO_NIBABEL", e)
+    sys.exit(3)
+img = nib.load(nii)
+hdr = img.header
+d1,d2,d3 = (int(hdr['dim'][1]), int(hdr['dim'][2]), int(hdr['dim'][3]))
+p1,p2,p3 = (float(hdr['pixdim'][1]), float(hdr['pixdim'][2]), float(hdr['pixdim'][3]))
+print(d1, d2, d3, p1, p2, p3)
+PY
+}
 
-  found=""
-  for base in /usr/local /opt /ceph /share /cvmfs; do
-    [[ -d "$base" ]] || continue
-    found="$(find "$base" -maxdepth 6 -type f -name fslinfo -perm -111 2>/dev/null | head -n 1 || true)"
-    [[ -n "$found" ]] && break
-  done
-
-  if [[ -n "$found" ]]; then
-    bindir="$(dirname "$found")"
-    export PATH="$bindir:$PATH"
-    echo "[INFO] found fslinfo at: $found"
+read_geom() {
+  local nii="$1"
+  if [[ "$USE_FSLINFO" -eq 1 ]]; then
+    fslinfo "$nii" | awk '
+      $1=="dim1"{d1=$2}
+      $1=="dim2"{d2=$2}
+      $1=="dim3"{d3=$2}
+      $1=="pixdim1"{p1=$2}
+      $1=="pixdim2"{p2=$2}
+      $1=="pixdim3"{p3=$2}
+      END{print d1,d2,d3,p1,p2,p3}'
+  else
+    py_hdr "$nii"
   fi
-fi
+}
 
-# Final check
-if ! command -v fslinfo >/dev/null 2>&1; then
-  echo "[FATAL] fslinfo still not found."
-  echo "[DEBUG] PATH=$PATH"
-  echo "[DEBUG] which module: $(command -v module || echo NONE)"
-  exit 2
-fi
-
-echo "[INFO] using fslinfo: $(command -v fslinfo)"
-
-# ===================== GEOMETRY FILTER =====================
 pass=0
 fail=0
 sess_fail=0
@@ -75,8 +87,6 @@ sess_fail=0
 for sess in "$IN_ROOT"/*_mr; do
   [[ -d "$sess" ]] || continue
   sess_id="$(basename "$sess")"
-
-  in_sess="$sess"
   out_sess="$OUT_ROOT/$sess_id"
   mkdir -p "$out_sess"
 
@@ -88,17 +98,14 @@ for sess in "$IN_ROOT"/*_mr; do
   while IFS= read -r nii; do
     series="$(basename "$(dirname "$nii")")"
 
-    # Extract dims + pixdims from header
-    read -r d1 d2 d3 p1 p2 p3 < <(
-      fslinfo "$nii" | awk '
-        $1=="dim1"{d1=$2}
-        $1=="dim2"{d2=$2}
-        $1=="dim3"{d3=$2}
-        $1=="pixdim1"{p1=$2}
-        $1=="pixdim2"{p2=$2}
-        $1=="pixdim3"{p3=$2}
-        END{printf "%s %s %s %s %s %s\n", d1,d2,d3,p1,p2,p3}'
-    )
+    geom="$(read_geom "$nii" || true)"
+    if [[ "$geom" == NO_NIBABEL* ]]; then
+      echo "[FATAL] nibabel not available and fslinfo missing. Fix by loading FSL correctly or install nibabel."
+      echo "[DEBUG] $geom"
+      exit 4
+    fi
+
+    read -r d1 d2 d3 p1 p2 p3 <<<"$geom"
 
     voxels="$(awk -v a="$d1" -v b="$d2" -v c="$d3" 'BEGIN{printf "%.0f",a*b*c}')"
     aniso="$(awk -v a="$p1" -v b="$p2" -v c="$p3" 'BEGIN{
@@ -128,7 +135,7 @@ for sess in "$IN_ROOT"/*_mr; do
       ((fail+=1))
     fi
 
-  done < <(find "$in_sess" -mindepth 2 -maxdepth 2 -type f -name "T1.nii.gz" | sort)
+  done < <(find "$sess" -mindepth 2 -maxdepth 2 -type f -name "T1.nii.gz" | sort)
 
   if [[ "$any_pass" -eq 0 ]]; then
     echo "[SESSION_FAIL] $sess_id : no candidates passed geometry (see $summary)"
@@ -140,8 +147,7 @@ done
 
 echo
 echo "Done."
-echo "candidate_pass=$pass  candidate_fail=$fail  sessions_with_no_pass=$sess_fail"
-echo "IN_ROOT=$IN_ROOT"
-echo "OUT_ROOT=$OUT_ROOT"
-echo "Thresholds: MIN_VOXELS=$MIN_VOXELS  MAX_ANISO=$MAX_ANISO"
+echo "candidate_pass=$pass candidate_fail=$fail sessions_with_no_pass=$sess_fail"
+echo "Thresholds: MIN_VOXELS=$MIN_VOXELS MAX_ANISO=$MAX_ANISO"
+
 
