@@ -14,7 +14,7 @@ IN_ROOT="/scratch/l.peiwang/DIAN"
 OUT_ROOT="/scratch/l.peiwang/DIAN_geom"
 mkdir -p "$OUT_ROOT"
 
-MIN_VOXELS=15000000
+MIN_VOXELS=8000000
 MAX_ANISO=1.25
 
 echo "[INFO] host=$(hostname) job=${SLURM_JOB_ID:-NA} user=$USER"
