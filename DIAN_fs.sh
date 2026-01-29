@@ -5,11 +5,13 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --array=1-2983%20
+#SBATCH --array=1%20
 #SBATCH --output=slurm-%A_%a_fs.out
 #SBATCH --error=slurm-%A_%a_fs.out
 
 set -euo pipefail
+
+module load freesurfer
 
 LIST="/scratch/l.peiwang/dian_geom_all_t1_list.tsv"
 FS_SUBJECTS_DIR="/scratch/l.peiwang/freesurfer_DIAN"
