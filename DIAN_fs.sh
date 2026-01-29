@@ -5,7 +5,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
-#SBATCH --array=1-1%10
+#SBATCH --array=2%10
 #SBATCH --output=slurm-%A_%a_fs.out
 #SBATCH --error=slurm-%A_%a_fs.out
 
