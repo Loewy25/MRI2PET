@@ -1,4 +1,16 @@
+
+
 #!/bin/bash
+#SBATCH --job-name=DIAN_geom
+#SBATCH --mem=10G
+#SBATCH -t 23:50:00
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --output=slurm-%A_geom.out
+#SBATCH --error=slurm-%A_geom.out
+
+
 set -euo pipefail
 
 IN_ROOT="/scratch/l.peiwang/DIAN_geom"
