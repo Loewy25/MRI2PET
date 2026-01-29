@@ -12,6 +12,13 @@
 set -euo pipefail
 
 module load freesurfer
+which recon-all
+recon-all -version || true
+echo "FREESURFER_HOME=$FREESURFER_HOME"
+ls -l "$FREESURFER_HOME" 2>/dev/null || true
+ls -l /usr/local/freesurfer 2>/dev/null || true
+
+
 
 LIST="/scratch/l.peiwang/dian_geom_all_t1_list.tsv"
 FS_SUBJECTS_DIR="/scratch/l.peiwang/freesurfer_DIAN"
