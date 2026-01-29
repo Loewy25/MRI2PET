@@ -1,5 +1,3 @@
-
-
 #!/bin/bash
 #SBATCH --job-name=DIAN_geom
 #SBATCH --mem=10G
