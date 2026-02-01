@@ -24,8 +24,8 @@ export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="spatial_nohierachy_fold4_os65_aug_5"
-export FOLD_INDEX=3
+export RUN_NAME="spatial_nohierachy_fold3_os65_aug_5"
+export FOLD_INDEX=2
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
