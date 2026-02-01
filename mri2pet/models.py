@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from .utils import _pad_or_crop_to
 
+
 class SelfAttention3D(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -25,6 +26,39 @@ class SelfAttention3D(nn.Module):
         a = self.Wv(summed.view(B, C, 1, 1, 1))
         return self.sigmoid(a)
 
+
+class SpatialAttention3D(nn.Module):
+    """
+    Lightweight 3D spatial attention (CBAM-style):
+      - compress channels with (mean, max) -> [B, 2, D, H, W]
+      - conv 2->1 -> sigmoid -> [B, 1, D, H, W]
+    Identity-preserving init:
+      - conv weights = 0, bias = 0 => conv output = 0
+      - sigmoid(0)=0.5; we return (2 * mask) so initial gate == 1 everywhere.
+    """
+    def __init__(self, kernel_size: int = 3):
+        super().__init__()
+        if kernel_size % 2 != 1:
+            raise ValueError("SpatialAttention3D kernel_size must be odd (e.g., 3, 5).")
+        pad = kernel_size // 2
+        self.conv = nn.Conv3d(2, 1, kernel_size=kernel_size, padding=pad, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+        # Identity-preserving init (no-op at step 0):
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, D, H, W]
+        avg_map = x.mean(dim=1, keepdim=True)          # [B, 1, D, H, W]
+        max_map, _ = x.max(dim=1, keepdim=True)        # [B, 1, D, H, W]
+        u = torch.cat([avg_map, max_map], dim=1)       # [B, 2, D, H, W]
+        m = self.sigmoid(self.conv(u))                 # [B, 1, D, H, W] in (0,1)
+
+        # Scale so that at init: m=0.5 -> 2*m = 1.0 (identity)
+        return 2.0 * m
+
+
 class PyramidConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch_each: int, kernel_sizes=(3, 5, 7)):
         super().__init__()
@@ -43,6 +77,7 @@ class PyramidConvBlock(nn.Module):
         outs = [p(x) for p in self.paths]
         return torch.cat(outs, dim=1)
 
+
 def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
     return nn.Sequential(
         nn.Conv3d(in_ch, out_ch, kernel_size=3, padding=1, bias=True),
@@ -50,6 +85,7 @@ def _double_conv(in_ch: int, out_ch: int) -> nn.Sequential:
         nn.Conv3d(out_ch, out_ch, kernel_size=3, padding=1, bias=True),
         nn.ReLU(inplace=True),
     )
+
 
 class ResidualBlock3D(nn.Module):
     def __init__(self, channels: int):
@@ -62,6 +98,7 @@ class ResidualBlock3D(nn.Module):
         out = self.relu(self.conv1(x))
         out = self.conv2(out)
         return self.relu(out + x)
+
 
 class Generator(nn.Module):
     def __init__(self, in_ch: int = 1, out_ch: int = 1):
@@ -92,7 +129,12 @@ class Generator(nn.Module):
         self.up3_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
         self.up3_conv = _double_conv(128 + ch1, 64)
 
+        # Existing channel-wise gate (unchanged)
         self.att = SelfAttention3D(64)
+
+        # New spatial gate (identity-preserving init)
+        self.satt = SpatialAttention3D(kernel_size=3)
+
         self.out_conv = nn.Conv3d(64, out_ch, kernel_size=3, padding=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -107,8 +149,16 @@ class Generator(nn.Module):
         u2 = self.up2_ups(u1); u2 = _pad_or_crop_to(u2, x2); u2 = torch.cat([u2, x2], dim=1); u2 = self.up2_conv(u2)
         u3 = self.up3_ups(u2); u3 = _pad_or_crop_to(u3, x1); u3 = torch.cat([u3, x1], dim=1); u3 = self.up3_conv(u3)
 
-        gate = self.att(u3)
-        return self.out_conv(gate * u3)
+        # ---- Last decoder attention: channel + spatial ----
+        gate_c = self.att(u3)         # [B, 64, 1, 1, 1] in (0,1)
+        u3 = gate_c * u3
+
+        gate_s = self.satt(u3)        # [B, 1, D, H, W], starts as 1 everywhere
+        u3 = gate_s * u3
+        # -----------------------------------------------
+
+        return self.out_conv(u3)
+
 
 class CondPatchDiscriminator3D(nn.Module):
     """
@@ -139,3 +189,4 @@ class CondPatchDiscriminator3D(nn.Module):
         f = self.features(x)          # [B, C, d, h, w]
         s = self.head(f)              # [B, 1, d, h, w]
         return s                      # logits (no sigmoid)
+
