@@ -2,7 +2,7 @@
 #SBATCH --job-name=copy_aris_project
 #SBATCH --mem=10G
 #SBATCH --time=23:50:00
-#SBATCH --partition=tier1_gpu
+#SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --output=slurm-%A_copy.out
 #SBATCH --error=slurm-%A_copy.err
