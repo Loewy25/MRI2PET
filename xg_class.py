@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+#Solving the previous classification problem with XGBoost
 
 import os, sys, argparse, glob
 import numpy as np
