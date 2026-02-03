@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# This code was used to modificate the csv file to add RAW PET column 
 import os, glob, pandas as pd, argparse
 
 def resolve_strict(subject, pup_root):
