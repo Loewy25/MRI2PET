@@ -224,12 +224,16 @@ def main():
     thr = 1.2
 
     df = pd.read_csv(args.csv)
-    needed = ["subject","mri","pet_gt","pet_fake","pet_raw","Braak1_2","Braak3_4","Braak5_6"]
+    # Checks for metadata. We do NOT check for all image columns (pet_raw/gt/fake)
+    # because the user might only have one of them in the CSV.
+    needed = ["subject", "Braak1_2", "Braak3_4", "Braak5_6"]
     for c in needed:
         if c not in df.columns:
             raise ValueError(f"missing column: {c}")
 
     path_col = args.modality
+    if path_col not in df.columns:
+        raise ValueError(f"The selected modality column '{path_col}' is missing from the CSV.")
     df = df[df[path_col].apply(lambda p: isinstance(p, str) and os.path.exists(p))].reset_index(drop=True)
     if len(df) == 0:
         print("[fatal] No valid volumes found for selected modality.")
