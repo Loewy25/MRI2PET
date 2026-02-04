@@ -51,15 +51,15 @@ pip install torch
 
 python Classification_csv.py \
   --fake_dirs \
-      /home/l.peiwang/MRI2PET/spatial_nohierachy_fold1_os5_aug_5 \
-      /home/l.peiwang/MRI2PET/spatial_nohierachy_fold2_os5_aug_5 \
-      /home/l.peiwang/MRI2PET/spatial_nohierachy_fold3_os5_aug_5 \
-      /home/l.peiwang/MRI2PET/spatial_nohierachy_fold4_os5_aug_5 \
-      /home/l.peiwang/MRI2PET/spatial_nohierachy_fold5_os5_aug_5 \
+      /home/l.peiwang/MRI2PET/nohierachy_fold1_os65_aug_7 \
+      /home/l.peiwang/MRI2PET/nohierachy_fold2_os65_aug_7 \
+      /home/l.peiwang/MRI2PET/nohierachy_fold3_os65_aug_7 \
+      /home/l.peiwang/MRI2PET/nohierachy_fold4_os65_aug_7 \
+      /home/l.peiwang/MRI2PET/nohierachy_fold5_os65_aug_7 \
   --orig_root /scratch/l.peiwang/kari_brainv33_top300 \
   --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session_col TAU_PET_Session \
-  --out_csv /scratch/l.peiwang/MRI2PET_classfication/spatial_nohierachy_fold1_os5_aug_5_amy_dataset_manifest.csv
+  --out_csv /scratch/l.peiwang/MRI2PET_classfication/nohierachy_fold1_os65_aug_7_amy_dataset_manifest.csv
 
 
 
