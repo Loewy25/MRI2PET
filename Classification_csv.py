@@ -3,7 +3,7 @@
 """
 Build dataset_manifest.csv for MRI→PET synthesis experiments.
 
-- Find PET_fake in:   <fake_base>_FOLD/volumes/<SUBJECT>/PET_fake.nii.gz   (FOLD in --folds)
+- Find PET_fake in:   <fake_dir>/volumes/<SUBJECT>/PET_fake.nii.gz   (dirs passed in --fake_dirs)
 - For each SUBJECT, set real MRI/PET from original dataset:
       <orig_root>/<SUBJECT>/T1_masked.nii.gz            -> mri
       <orig_root>/<SUBJECT>/PET_in_T1_masked.nii.gz     -> pet_gt
@@ -20,12 +20,15 @@ LABEL_COLS = ["Centiloid","MTL","NEO","Braak1_2","Braak3_4","Braak5_6","cdr"]
 def norm_key(x: str) -> str:
     return str(x).strip().lower()
 
-def find_pet_fake(fake_base: str, folds):
+def find_pet_fake(fake_dirs):
     """Return dict: subject -> {'pet_fake': path, 'fake_fold': fold} (first hit wins)."""
     found = {}
     dups = []
-    for f in folds:
-        vol_dir = f"{fake_base}_{f}/volumes"
+    # fake_dirs is a list of full paths
+    for i, fd in enumerate(fake_dirs):
+        # fold index 1-based (i+1)
+        current_fold = i + 1
+        vol_dir = os.path.join(fd, "volumes")
         if not os.path.isdir(vol_dir):
             print(f"[WARN] missing volumes dir: {vol_dir}")
             continue
@@ -38,7 +41,7 @@ def find_pet_fake(fake_base: str, folds):
                 if subj in found:
                     dups.append(subj)
                     continue
-                found[subj] = {"pet_fake": pet_fake, "fake_fold": int(f)}
+                found[subj] = {"pet_fake": pet_fake, "fake_fold": current_fold}
     if dups:
         print(f"[INFO] duplicate subjects across folds (kept first): {len(set(dups))}")
     print(f"[DISCOVER] subjects with PET_fake: {len(found)}")
@@ -84,10 +87,8 @@ def load_meta(meta_csv: str, session_col: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fake_base", required=True,
-                    help="Base path to fake PET folds, e.g. /home/.../ab_MGDA_UB_v33_500")
-    ap.add_argument("--folds", nargs="+", default=["1","2","3","4","5"],
-                    help="Fold suffixes to scan (default 1..5)")
+    ap.add_argument("--fake_dirs", nargs="+", required=True,
+                    help="List of fake PET fold directories, e.g. path/to/fold1 path/to/fold2 ...")
     ap.add_argument("--orig_root", required=True,
                     help="Original dataset root with <SUBJECT>/T1_masked.nii.gz and PET_in_T1_masked.nii.gz")
     ap.add_argument("--meta_csv", required=True, help="Meta CSV with labels")
@@ -97,7 +98,7 @@ def main():
     args = ap.parse_args()
 
     # 1) gather fake PETs
-    rows = find_pet_fake(args.fake_base, args.folds)
+    rows = find_pet_fake(args.fake_dirs)
 
     # 2) attach real MRI/PET
     rows = attach_real_modalities(rows, args.orig_root)
