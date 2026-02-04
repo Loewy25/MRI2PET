@@ -10,8 +10,7 @@ OUT_DIR    = "/home/l.peiwang/MRI2PET"
 RUN_NAME = os.environ.get("RUN_NAME", "roi_recon_patch_lse_mgda_ub_1")
 
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
-CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
-VOL_DIR    = os.path.join(OUT_RUN, "volumes")
+CKPT_DIR   = os.path.join(OUT_RUN, "checkpes")
 os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
@@ -39,7 +38,8 @@ SPLITS_DIR = os.path.join(ROOT_DIR, "CV5_braak_strat")
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
-
+oints")
+VOL_DIR    = os.path.join(OUT_RUN, "volum
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
 
 # =========================
