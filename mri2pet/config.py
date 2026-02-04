@@ -2,8 +2,13 @@ import os
 from typing import Optional, Tuple
 import torch
 
-ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
-OUT_DIR    = "/home/l.peiwang/MRI2PET"
+# Auto-detect project root or use current directory
+# Assuming this config.py is in <project>/mri2pet/config.py
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Use project root for data/output if not specified otherwise
+ROOT_DIR   = os.environ.get("MRI2PET_DATA_DIR", os.path.join(_PROJECT_ROOT, "data"))
+OUT_DIR    = os.environ.get("MRI2PET_OUT_DIR", os.path.join(_PROJECT_ROOT, "results"))
 
 # ---- NEW: allow override via environment variables ----
 # default name if env not set
