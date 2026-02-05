@@ -6,8 +6,8 @@
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --output=43_fake.out
-#SBATCH --error=43_fake.out
+#SBATCH --output=55_fake.out
+#SBATCH --error=55_fake.out
 
 
 
