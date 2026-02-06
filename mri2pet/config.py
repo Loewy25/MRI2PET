@@ -2,13 +2,8 @@ import os
 from typing import Optional, Tuple
 import torch
 
-# Auto-detect project root or use current directory
-# Assuming this config.py is in <project>/mri2pet/config.py
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# Use project root for data/output if not specified otherwise
-ROOT_DIR   = os.environ.get("MRI2PET_DATA_DIR", os.path.join(_PROJECT_ROOT, "data"))
-OUT_DIR    = os.environ.get("MRI2PET_OUT_DIR", os.path.join(_PROJECT_ROOT, "results"))
+ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
+OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
 # ---- NEW: allow override via environment variables ----
 # default name if env not set
@@ -88,4 +83,5 @@ AUG_SCALE_MIN = _env_float("AUG_SCALE_MIN", 0.9)       # multiplicative scale
 AUG_SCALE_MAX = _env_float("AUG_SCALE_MAX", 1.1)
 AUG_SHIFT_MIN = _env_float("AUG_SHIFT_MIN", -0.1)      # additive shift
 AUG_SHIFT_MAX = _env_float("AUG_SHIFT_MAX", 0.1)
+
 
