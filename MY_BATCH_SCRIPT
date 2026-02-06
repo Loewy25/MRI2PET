@@ -2,12 +2,14 @@
 
 #SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
-#SBATCH -t 23:50:00
+#SBATCH --time=23:50:00
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
+#SBATCH --nodelist=gpu01
 #SBATCH --output=43_fake.out
 #SBATCH --error=43_fake.out
+
 
 
 
