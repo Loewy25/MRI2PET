@@ -7,8 +7,8 @@
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --nodelist=gpu01
-#SBATCH --output=47_fake.out
-#SBATCH --error=47_fake.out
+#SBATCH --output=spa55_fake.out
+#SBATCH --error=spa55_fake.out
 
 
 
@@ -50,7 +50,7 @@ pip install torch
 
 #python add_label.py
 
-python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/fold1_os4_aug_7_amy_dataset_manifest.csv --modality pet_fake
+python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/spatial_nohierachy_fold1_os5_aug_5_amy_dataset_manifest.csv --modality pet_fake
 
 
 #python Classification_csv.py \
