@@ -191,3 +191,4 @@ class CondPatchDiscriminator3D(nn.Module):
         return s                      # logits (no sigmoid)
 
 
+
