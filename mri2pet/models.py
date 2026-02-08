@@ -190,3 +190,4 @@ class CondPatchDiscriminator3D(nn.Module):
         s = self.head(f)              # [B, 1, d, h, w]
         return s                      # logits (no sigmoid)
 
+
