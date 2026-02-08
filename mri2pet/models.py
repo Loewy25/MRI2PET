@@ -1,4 +1,6 @@
+# model.py
 from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +9,11 @@ from .utils import _pad_or_crop_to
 
 
 class SelfAttention3D(nn.Module):
+    """
+    NOTE: Despite the name, this is effectively a per-channel global gating
+    (spatial softmax -> weighted sum -> 1x1x1 conv -> sigmoid), not Transformer-style
+    non-local self-attention.
+    """
     def __init__(self, channels: int):
         super().__init__()
         self.Wf = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
@@ -18,13 +25,15 @@ class SelfAttention3D(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, D, H, W = x.shape
         N = D * H * W
-        f = self.Wf(x).view(B, C, N)
-        phi = self.Wphi(x).view(B, C, N)
-        eta = self.softmax(f)
-        weighted_phi = eta * phi
-        summed = weighted_phi.sum(dim=-1, keepdim=True)
-        a = self.Wv(summed.view(B, C, 1, 1, 1))
-        return self.sigmoid(a)
+        f = self.Wf(x).view(B, C, N)        # [B, C, N]
+        phi = self.Wphi(x).view(B, C, N)    # [B, C, N]
+
+        eta = self.softmax(f)               # [B, C, N]
+        weighted_phi = eta * phi            # [B, C, N]
+        summed = weighted_phi.sum(dim=-1, keepdim=True)  # [B, C, 1]
+
+        a = self.Wv(summed.view(B, C, 1, 1, 1))          # [B, C, 1, 1, 1]
+        return self.sigmoid(a)                            # (0,1)
 
 
 class SpatialAttention3D(nn.Module):
@@ -32,6 +41,7 @@ class SpatialAttention3D(nn.Module):
     Lightweight 3D spatial attention (CBAM-style):
       - compress channels with (mean, max) -> [B, 2, D, H, W]
       - conv 2->1 -> sigmoid -> [B, 1, D, H, W]
+
     Identity-preserving init:
       - conv weights = 0, bias = 0 => conv output = 0
       - sigmoid(0)=0.5; we return (2 * mask) so initial gate == 1 everywhere.
@@ -44,7 +54,7 @@ class SpatialAttention3D(nn.Module):
         self.conv = nn.Conv3d(2, 1, kernel_size=kernel_size, padding=pad, bias=True)
         self.sigmoid = nn.Sigmoid()
 
-        # Identity-preserving init (no-op at step 0):
+        # Identity-preserving init (no-op at step 0)
         nn.init.zeros_(self.conv.weight)
         nn.init.zeros_(self.conv.bias)
 
@@ -57,6 +67,32 @@ class SpatialAttention3D(nn.Module):
 
         # Scale so that at init: m=0.5 -> 2*m = 1.0 (identity)
         return 2.0 * m
+
+
+class SkipGate3D(nn.Module):
+    """
+    Conditioned spatial gate for U-Net skip connections.
+
+    mask = sigmoid(Conv1x1([skip, gate])) -> [B, 1, D, H, W]
+    return skip * (2*mask) so init is identity (mask starts at 0.5 => 2*0.5=1).
+
+    This is the simplest high-value “attention on skip connections”:
+    it lets the decoder decide *where* skip details should pass through.
+    """
+    def __init__(self, skip_ch: int, gate_ch: int):
+        super().__init__()
+        self.conv = nn.Conv3d(skip_ch + gate_ch, 1, kernel_size=1, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+        # Identity-preserving init
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+
+    def forward(self, skip: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        # skip: [B, skip_ch, D, H, W]
+        # gate: [B, gate_ch, D, H, W] (must match spatial dims)
+        m = self.sigmoid(self.conv(torch.cat([skip, gate], dim=1)))  # [B,1,D,H,W]
+        return skip * (2.0 * m)
 
 
 class PyramidConvBlock(nn.Module):
@@ -105,55 +141,91 @@ class Generator(nn.Module):
         super().__init__()
         self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
 
+        # Encoder
         self.down1 = PyramidConvBlock(in_ch, out_ch_each=64, kernel_sizes=(3, 5, 7))
-        ch1 = 64 * 3
+        ch1 = 64 * 3  # 192
 
         self.down2 = PyramidConvBlock(ch1, out_ch_each=128, kernel_sizes=(3, 5))
-        ch2 = 128 * 2
+        ch2 = 128 * 2  # 256
 
         self.down3 = _double_conv(ch2, 512)
         ch3 = 512
 
+        # Bottleneck
         self.bottleneck = _double_conv(ch3, ch3)
         self.bottleneck_res6 = nn.Sequential(
             ResidualBlock3D(ch3), ResidualBlock3D(ch3), ResidualBlock3D(ch3),
             ResidualBlock3D(ch3), ResidualBlock3D(ch3), ResidualBlock3D(ch3),
         )
 
+        # Decoder
         self.up1_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.up1_conv = _double_conv(ch3 + ch3, 256)
+        self.up1_conv = _double_conv(ch3 + ch3, 256)        # cat([u1_up(512), x3(512)]) -> 1024
 
         self.up2_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.up2_conv = _double_conv(256 + ch2, 128)
+        self.up2_conv = _double_conv(256 + ch2, 128)        # cat([u2_up(256), x2(256)]) -> 512
 
         self.up3_ups = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.up3_conv = _double_conv(128 + ch1, 64)
+        self.up3_conv = _double_conv(128 + ch1, 64)         # cat([u3_up(128), x1(192)]) -> 320
 
-        # Existing channel-wise gate (unchanged)
+        # --- NEW: Skip connection gates (conditioned spatial) ---
+        # x3 is gated by u1_up (both 512)
+        self.gate_x3 = SkipGate3D(skip_ch=ch3, gate_ch=ch3)     # 512 + 512
+        # x2 is gated by u2_up (both 256)
+        self.gate_x2 = SkipGate3D(skip_ch=ch2, gate_ch=256)     # 256 + 256
+        # x1 is gated by u3_up (192 + 128)
+        self.gate_x1 = SkipGate3D(skip_ch=ch1, gate_ch=128)     # 192 + 128
+        # -------------------------------------------------------
+
+        # Existing last-stage channel gate
         self.att = SelfAttention3D(64)
 
-        # New spatial gate (identity-preserving init)
+        # Existing last-stage spatial gate (identity-preserving init)
         self.satt = SpatialAttention3D(kernel_size=3)
 
         self.out_conv = nn.Conv3d(64, out_ch, kernel_size=3, padding=1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = self.down1(x); p1 = self.pool(x1)
-        x2 = self.down2(p1); p2 = self.pool(x2)
-        x3 = self.down3(p2); p3 = self.pool(x3)
+        # Encoder
+        x1 = self.down1(x)          # [B, 192, D, H, W]
+        p1 = self.pool(x1)
 
+        x2 = self.down2(p1)         # [B, 256, D/2, H/2, W/2]
+        p2 = self.pool(x2)
+
+        x3 = self.down3(p2)         # [B, 512, D/4, H/4, W/4]
+        p3 = self.pool(x3)
+
+        # Bottleneck
         b = self.bottleneck(p3)
         b = self.bottleneck_res6(b)
 
-        u1 = self.up1_ups(b); u1 = _pad_or_crop_to(u1, x3); u1 = torch.cat([u1, x3], dim=1); u1 = self.up1_conv(u1)
-        u2 = self.up2_ups(u1); u2 = _pad_or_crop_to(u2, x2); u2 = torch.cat([u2, x2], dim=1); u2 = self.up2_conv(u2)
-        u3 = self.up3_ups(u2); u3 = _pad_or_crop_to(u3, x1); u3 = torch.cat([u3, x1], dim=1); u3 = self.up3_conv(u3)
+        # Decoder stage 1 (gate x3)
+        u1_up = self.up1_ups(b)
+        u1_up = _pad_or_crop_to(u1_up, x3)          # match x3 spatial size
+        x3_g  = self.gate_x3(x3, u1_up)             # gated skip
+        u1 = torch.cat([u1_up, x3_g], dim=1)
+        u1 = self.up1_conv(u1)                      # -> [B, 256, ...]
+
+        # Decoder stage 2 (gate x2)
+        u2_up = self.up2_ups(u1)
+        u2_up = _pad_or_crop_to(u2_up, x2)
+        x2_g  = self.gate_x2(x2, u2_up)
+        u2 = torch.cat([u2_up, x2_g], dim=1)
+        u2 = self.up2_conv(u2)                      # -> [B, 128, ...]
+
+        # Decoder stage 3 (gate x1)
+        u3_up = self.up3_ups(u2)
+        u3_up = _pad_or_crop_to(u3_up, x1)
+        x1_g  = self.gate_x1(x1, u3_up)
+        u3 = torch.cat([u3_up, x1_g], dim=1)
+        u3 = self.up3_conv(u3)                      # -> [B, 64, ...]
 
         # ---- Last decoder attention: channel + spatial ----
-        gate_c = self.att(u3)         # [B, 64, 1, 1, 1] in (0,1)
+        gate_c = self.att(u3)                       # [B, 64, 1, 1, 1] in (0,1)
         u3 = gate_c * u3
 
-        gate_s = self.satt(u3)        # [B, 1, D, H, W], starts as 1 everywhere
+        gate_s = self.satt(u3)                      # [B, 1, D, H, W], starts ~1 everywhere
         u3 = gate_s * u3
         # -----------------------------------------------
 
@@ -189,5 +261,4 @@ class CondPatchDiscriminator3D(nn.Module):
         f = self.features(x)          # [B, C, d, h, w]
         s = self.head(f)              # [B, 1, d, h, w]
         return s                      # logits (no sigmoid)
-
 
