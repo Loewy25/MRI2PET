@@ -25,7 +25,7 @@ export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 
 # ---- NEW: per-job config ----
 export RUN_NAME="kernel3_skip_spatial_nohierachy_fold4_os4_aug_7"
-export FOLD_INDEX3
+export FOLD_INDEX=3
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
