@@ -3,7 +3,8 @@
 #SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
 #SBATCH --time=23:50:00
-#SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --nodelist=gpu01
@@ -50,7 +51,7 @@ pip install torch
 
 #python add_label.py
 
-python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/nohierachy_fold1_os65_aug_7_amy_dataset_manifest.csv --modality pet_fake
+#python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/nohierachy_fold1_os65_aug_7_amy_dataset_manifest.csv --modality pet_fake
 
 
 #python Classification_csv.py \
@@ -125,36 +126,21 @@ python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/nohi
 #  --session_col TAU_PET_Session \
 #  --out_csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest.csv
 
-#python dataset_merge.py
-
-#python ROI_eval_cv_split.py \
-#  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-#  --vols-roots \
-#    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_1_1/volumes \
-#    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_2/volumes \
-#    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_3/volumes \
-#    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_4/volumes \
-#    /home/l.peiwang/MRI2PET/tau_MGDA_UB_v33_500_5/volumes \
-#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --session-col TAU_PET_Session \
-#  --split-by centiloid \
-#  --thr 18.4\
-#  --out /scratch/l.peiwang/tau_MGDA_UB_v33_500_amyloid
 
 
-#python ROI_eval_cv_split.py \
-#  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-#  --vols-roots \
-#    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold1_os65_aug_3/volumes \
-#    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold2_os65_aug_3/volumes \
-#    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold3_os65_aug_3/volumes \
-#    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold4_os65_aug_3/volumes \
-#    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold5_os65_aug_3/volumes \
-#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --session-col TAU_PET_Session \
-#  --split-by braak \
-#  --thr-braak 1.2 \
-#  --out /scratch/l.peiwang/spatial_nohierachy_fold1_os65_aug_3
+python ROI_eval_cv_split.py \
+  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+  --vols-roots \
+    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold1_os4_aug_3/volumes \
+    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold2_os4_aug_3/volumes \
+    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold3_os4_aug_3/volumes \
+    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold4_os4_aug_3/volumes \
+    /home/l.peiwang/MRI2PET/spatial_nohierachy_fold5_os4_aug_3/volumes \
+  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --session-col TAU_PET_Session \
+  --split-by braak \
+  --thr-braak 1.2 \
+  --out /scratch/l.peiwang/spatial_nohierachy_fold1_os4_aug_3
 
 
 #python new_class.py \
