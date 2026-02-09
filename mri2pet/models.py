@@ -73,15 +73,22 @@ class SkipGate3D(nn.Module):
     """
     Conditioned spatial gate for U-Net skip connections.
 
-    mask = sigmoid(Conv1x1([skip, gate])) -> [B, 1, D, H, W]
+    mask = sigmoid(Conv([skip, gate])) -> [B, 1, D, H, W]
     return skip * (2*mask) so init is identity (mask starts at 0.5 => 2*0.5=1).
-
-    This is the simplest high-value “attention on skip connections”:
-    it lets the decoder decide *where* skip details should pass through.
     """
-    def __init__(self, skip_ch: int, gate_ch: int):
+    def __init__(self, skip_ch: int, gate_ch: int, kernel_size: int = 3):
         super().__init__()
-        self.conv = nn.Conv3d(skip_ch + gate_ch, 1, kernel_size=3, bias=True)
+        if kernel_size % 2 != 1:
+            raise ValueError("SkipGate3D kernel_size must be odd (e.g., 1, 3, 5).")
+        pad = kernel_size // 2
+
+        self.conv = nn.Conv3d(
+            skip_ch + gate_ch,
+            1,
+            kernel_size=kernel_size,
+            padding=pad,     # <-- THIS is what you were missing
+            bias=True
+        )
         self.sigmoid = nn.Sigmoid()
 
         # Identity-preserving init
@@ -89,10 +96,13 @@ class SkipGate3D(nn.Module):
         nn.init.zeros_(self.conv.bias)
 
     def forward(self, skip: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # skip: [B, skip_ch, D, H, W]
-        # gate: [B, gate_ch, D, H, W] (must match spatial dims)
+        # Make sure spatial sizes match (extra safety)
+        if gate.shape[2:] != skip.shape[2:]:
+            gate = _pad_or_crop_to(gate, skip)
+
         m = self.sigmoid(self.conv(torch.cat([skip, gate], dim=1)))  # [B,1,D,H,W]
         return skip * (2.0 * m)
+
 
 
 class PyramidConvBlock(nn.Module):
