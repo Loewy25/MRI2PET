@@ -81,7 +81,7 @@ class SkipGate3D(nn.Module):
     """
     def __init__(self, skip_ch: int, gate_ch: int):
         super().__init__()
-        self.conv = nn.Conv3d(skip_ch + gate_ch, 1, kernel_size=1, bias=True)
+        self.conv = nn.Conv3d(skip_ch + gate_ch, 1, kernel_size=3, bias=True)
         self.sigmoid = nn.Sigmoid()
 
         # Identity-preserving init
