@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import (
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    EPOCHS, GAMMA, DATA_RANGE,
     LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
@@ -28,7 +28,6 @@ def train_paggan(
     device: torch.device,
     epochs: int = EPOCHS,
     gamma: float = GAMMA,
-    lambda_gan: float = LAMBDA_GAN,
     data_range: float = DATA_RANGE,
     verbose: bool = True,
     log_to_wandb: bool = False,
@@ -41,9 +40,6 @@ def train_paggan(
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
-
-    # === Global Gradient‑Ratio Controller (dynamic lambda_g) ===
-    lambda_g = float(lambda_gan)  # (kept as-is; not used in MGDA path, but left unchanged)
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
@@ -708,5 +704,4 @@ def evaluate_and_save(
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
     }
-
 

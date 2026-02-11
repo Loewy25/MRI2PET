@@ -5,7 +5,7 @@ import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, LAMBDA_GAN, DATA_RANGE,
+    EPOCHS, GAMMA, DATA_RANGE,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
@@ -38,7 +38,6 @@ if __name__ == "__main__":
             "run_name": RUN_NAME,
             "epochs": EPOCHS,
             "gamma": GAMMA,
-            "lambda_gan": LAMBDA_GAN,
             "data_range": DATA_RANGE,
             "batch_size": 1,
             "resize_to": (128, 128, 128),
@@ -86,7 +85,7 @@ if __name__ == "__main__":
     out = train_paggan(
         G, D, train_loader, val_loader,
         device=device, epochs=EPOCHS, gamma=GAMMA,
-        lambda_gan=LAMBDA_GAN, data_range=DATA_RANGE,
+        data_range=DATA_RANGE,
         verbose=True,
         log_to_wandb=True,              
     )

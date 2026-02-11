@@ -29,7 +29,6 @@ EPOCHS      = 150
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
-LAMBDA_GAN  = 0.5
 
 DATA_RANGE  = 3.5
 
@@ -83,5 +82,4 @@ AUG_SCALE_MIN = _env_float("AUG_SCALE_MIN", 0.9)       # multiplicative scale
 AUG_SCALE_MAX = _env_float("AUG_SCALE_MAX", 1.1)
 AUG_SHIFT_MIN = _env_float("AUG_SHIFT_MIN", -0.1)      # additive shift
 AUG_SHIFT_MAX = _env_float("AUG_SHIFT_MAX", 0.1)
-
 
