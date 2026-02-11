@@ -54,6 +54,10 @@ def _env_float(name: str, default: float) -> float:
     v = os.environ.get(name, None)
     return float(v) if v is not None else float(default)
 
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name, None)
+    return int(v) if v is not None else int(default)
+
 # Train-only oversampling (used only when fold CSV is used)
 OVERSAMPLE_ENABLE = _env_bool("OVERSAMPLE_ENABLE", True)
 # target fraction of label==3 in *training draws* (e.g. 0.35 => ~35%)
@@ -83,3 +87,11 @@ AUG_SCALE_MAX = _env_float("AUG_SCALE_MAX", 1.1)
 AUG_SHIFT_MIN = _env_float("AUG_SHIFT_MIN", -0.1)      # additive shift
 AUG_SHIFT_MAX = _env_float("AUG_SHIFT_MAX", 0.1)
 
+# =========================
+# ROI High-Uptake Loss
+# =========================
+# PET quantile threshold computed inside cortex mask (ground truth PET).
+# Voxels above this threshold receive extra L1 emphasis.
+ROI_HI_Q = _env_float("ROI_HI_Q", 0.85)
+ROI_HI_LAMBDA = _env_float("ROI_HI_LAMBDA", 2.0)
+ROI_HI_MIN_VOXELS = _env_int("ROI_HI_MIN_VOXELS", 32)

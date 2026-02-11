@@ -13,6 +13,7 @@ from .config import (
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
+    ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
@@ -90,15 +91,48 @@ def train_paggan(
 
         return None
 
-    def _masked_l1(fake5: torch.Tensor, pet5: torch.Tensor, mask5: torch.Tensor) -> torch.Tensor:
+    def _masked_l1_high_uptake(
+        fake5: torch.Tensor,
+        pet5: torch.Tensor,
+        mask5: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Masked mean absolute error over mask voxels.
+        Cortex ROI loss with high-uptake emphasis:
+          L = L1(cortex) + ROI_HI_LAMBDA * L1(top-quantile uptake in cortex)
+        Quantile is computed from ground-truth PET within cortex mask, per sample.
         fake5, pet5, mask5: [B,1,D,H,W]
         """
-        diff = (fake5 - pet5).abs() * mask5
-        num = diff.sum(dim=(1, 2, 3, 4))
-        den = mask5.sum(dim=(1, 2, 3, 4)) + 1e-6
-        return (num / den).mean()
+        diff = (fake5 - pet5).abs()
+        losses = []
+        q = float(min(max(ROI_HI_Q, 0.0), 1.0))
+        lambda_hi = float(ROI_HI_LAMBDA)
+        min_vox = max(1, int(ROI_HI_MIN_VOXELS))
+
+        for b in range(diff.size(0)):
+            cortex = (mask5[b, 0] > 0.5)
+            n_cortex = int(cortex.sum().item())
+            if n_cortex == 0:
+                losses.append(torch.zeros((), device=diff.device, dtype=diff.dtype))
+                continue
+
+            d_b = diff[b, 0]
+            p_b = pet5[b, 0]
+
+            l1_cortex = d_b[cortex].mean()
+
+            if n_cortex < min_vox:
+                hi_mask = cortex
+            else:
+                p_roi = p_b[cortex]
+                thr = torch.quantile(p_roi, q)
+                hi_mask = cortex & (p_b >= thr)
+                if int(hi_mask.sum().item()) == 0:
+                    hi_mask = cortex
+
+            l1_high = d_b[hi_mask].mean()
+            losses.append(l1_cortex + lambda_hi * l1_high)
+
+        return torch.stack(losses).mean()
 
     def _maybe_augment_pair(
         mri5: torch.Tensor,
@@ -308,10 +342,10 @@ def train_paggan(
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # ROI/cortex recon objective (masked L1)
+            # ROI/cortex recon objective (masked L1 + high-uptake weighted L1)
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
             if use_roi:
-                loss_recon_roi = _masked_l1(fake, pet5, cortex5)
+                loss_recon_roi = _masked_l1_high_uptake(fake, pet5, cortex5)
             else:
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
@@ -704,4 +738,3 @@ def evaluate_and_save(
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
     }
-

@@ -11,6 +11,7 @@ from mri2pet.config import (
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
+    ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
 )
 
 from mri2pet.data import build_loaders
@@ -52,6 +53,9 @@ if __name__ == "__main__":
             "aug_scale_max": AUG_SCALE_MAX,
             "aug_shift_min": AUG_SHIFT_MIN,
             "aug_shift_max": AUG_SHIFT_MAX,
+            "roi_hi_q": ROI_HI_Q,
+            "roi_hi_lambda": ROI_HI_LAMBDA,
+            "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
 
         },
     )
