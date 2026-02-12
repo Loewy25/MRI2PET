@@ -43,7 +43,7 @@ export AUG_SHIFT_MIN=-0.05
 export AUG_SHIFT_MAX=0.05
 
 # High-uptake ROI loss (inside cortex mask)
-export ROI_HI_Q=0.8
+export ROI_HI_Q=0.85
 export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
