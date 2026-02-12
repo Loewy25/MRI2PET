@@ -481,7 +481,7 @@ def train_paggan(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                    f"| best {best_val:.4f}  | λ_g={lambda_g:.4f}  | {dt:.1f}s"
+                    f"| best {best_val:.4f}  | {dt:.1f}s"
                 )
                 print(
                     f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
