@@ -131,16 +131,16 @@ pip install torch
 python ROI_eval_cv_split.py \
   --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
   --vols-roots \
-    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold2_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold3_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold4_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold5_os65_aug_7/volumes \
+    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold2_os65_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold3_os65_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold4_os65_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/uptake_kernel3_skip_spatial_nohierachy_fold5_os65_aug_5/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7
+  --out /scratch/l.peiwang/uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_5
 
 
 #python new_class.py \
