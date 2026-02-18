@@ -140,7 +140,7 @@ python eval_taupet_comprehensive.py \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7
+  --out /scratch/l.peiwang/deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7_RESULT
 
 
 #python new_class.py \
