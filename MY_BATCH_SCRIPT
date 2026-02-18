@@ -128,7 +128,7 @@ pip install torch
 
 
 
-python ROI_eval_cv_split.py \
+python eval_taupet_comprehensive.py \
   --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
   --vols-roots \
     /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7/volumes \
