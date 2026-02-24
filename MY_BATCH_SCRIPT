@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-##SBATCH --nodelist=gpu01
+#SBATCH --nodelist=gpu01
 #SBATCH --output=dataset.out
 #SBATCH --error=dataset.err
 
