@@ -8,8 +8,8 @@
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 ##SBATCH --nodelist=gpu01
-#SBATCH --output=nohier657_fake.out
-#SBATCH --error=nohier657_fake.out
+#SBATCH --output=dataset.out
+#SBATCH --error=dataset.err
 
 
 
