@@ -4,8 +4,7 @@
 #SBATCH --mem=20G
 #SBATCH --cpus-per-task=8
 #SBATCH --account=shinjini_kundu
-#SBATCH --partition=tier1
-#SBATCH --array=1-4
+#SBATCH --partition=tier1_cpu
 #SBATCH --output=tau_%A_%a.out
 #SBATCH --error=tau_%A_%a.err
 
