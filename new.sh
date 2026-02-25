@@ -1,22 +1,21 @@
 #!/bin/bash -l
 #SBATCH --job-name=TAU_ALL
-#SBATCH --time=23:50:00
 #SBATCH --mem=20G
+#SBATCH --time=23:50:00
 #SBATCH --cpus-per-task=8
-#SBATCH --account=shinjini_kundu
 #SBATCH --partition=tier1_cpu
-#SBATCH --output=tau_%A_%a.out
-#SBATCH --error=tau_%A_%a.err
+#SBATCH --account=shinjini_kundu
+#SBATCH --output=dataset.out
+#SBATCH --error=dataset.err
 
 set -euo pipefail
 
 echo "HOST=$(hostname)"
-echo "JOBID=${SLURM_JOB_ID}  ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}"
+echo "JOBID=${SLURM_JOB_ID}"
 echo "PWD=$(pwd)"
 
-# --- modules (login shell usually gives 'module', but keep this robust) ---
+# ---- Make 'module' available even in non-login batch contexts (belt+suspenders) ----
 if ! command -v module >/dev/null 2>&1; then
-  # Try the common init locations
   [ -f /etc/profile ] && source /etc/profile
   [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh
   [ -f /usr/share/Modules/init/bash ] && source /usr/share/Modules/init/bash
@@ -24,33 +23,35 @@ if ! command -v module >/dev/null 2>&1; then
 fi
 
 module purge
+
+# ---- Load FreeSurfer + FSL (order matters: FS first) ----
 module load freesurfer
 module load fsl
 
-# --- FreeSurfer setup ---
+# ---- Initialize FreeSurfer environment (ensures mri_vol2vol, mri_robust_register in PATH) ----
 echo "FREESURFER_HOME=${FREESURFER_HOME:-<unset>}"
 if [ -n "${FREESURFER_HOME:-}" ] && [ -f "${FREESURFER_HOME}/SetUpFreeSurfer.sh" ]; then
+  # shellcheck disable=SC1090
   source "${FREESURFER_HOME}/SetUpFreeSurfer.sh"
 fi
-# Belt + suspenders: ensure FS binaries are in PATH
+# extra safety
 if [ -n "${FREESURFER_HOME:-}" ]; then
   export PATH="${FREESURFER_HOME}/bin:${PATH}"
 fi
 
 export FSLOUTPUTTYPE=NIFTI_GZ
 
-# --- Conda env ---
+# ---- Conda env ----
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate pasta
 
-# --- Required filesystem sanity checks (fail early) ---
-mkdir -p /scratch/l.peiwang/kari_brainv33
-
-echo "=== Sanity checks ==="
+# ---- Sanity checks (fail early with useful logs) ----
+echo "=== Sanity: binaries ==="
 command -v mri_vol2vol
 command -v mri_robust_register
 command -v flirt
 
+echo "=== Sanity: data mounts ==="
 ls -ld /ceph/chpc/mapped/benz04_kari || true
 ls -ld /ceph/chpc/mapped/benz04_kari/pup
 ls -ld /ceph/chpc/mapped/benz04_kari/freesurfers
@@ -58,5 +59,5 @@ ls -ld /ceph/chpc/mapped/benz04_kari/freesurfers
 echo "=== module list ==="
 module list
 
-echo "=== Running pipeline part ${SLURM_ARRAY_TASK_ID} ==="
-python -u Data_TAU_ALL.py --part "${SLURM_ARRAY_TASK_ID}"
+# ---- Run (single job, no arrays) ----
+python -u Data_TAU_ALL.py
