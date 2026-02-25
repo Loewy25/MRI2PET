@@ -33,7 +33,7 @@ import numpy as np
 import nibabel as nib
 
 # =================== CONFIG ===================
-BASE_ROOT = "/ceph/chpc/unmapped/benz04_kari"
+BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
