@@ -47,8 +47,11 @@ export ROI_HI_Q=0.85
 export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
-python main.py
+# CAGrad fusion hyperparameters
+export CAGRAD_ALPHA=0.5
+export CAGRAD_RESCALE=1
 
+python main.py
 
 
 
