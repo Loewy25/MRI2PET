@@ -49,17 +49,19 @@ def train_paggan(
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
     # =========================================================================
-    # [MGDA-UB STANDARDIZATION INIT]
-    # We now have:
+    # [CAGrad STANDARDIZATION INIT]
+    # Objectives:
     #   - global recon gradient (v_global)
     #   - ROI/cortex recon gradient (v_roi)
     #   - GAN gradient (v_gan)
-    # and we do a single-stage 3-way MGDA on these three.
+    # We standardize each objective gradient with EMA norm, then apply CAGrad.
     # =========================================================================
     avg_norm_recon_global = 0.0
     avg_norm_recon_roi = 0.0
     avg_norm_gan = 0.0
     norm_decay = 0.9
+    cagrad_alpha = float(os.environ.get("CAGRAD_ALPHA", "0.5"))
+    cagrad_rescale = int(os.environ.get("CAGRAD_RESCALE", "1"))
 
     def _meta_to_mask(meta_any, key: str, B_expected: int) -> Optional[torch.Tensor]:
         """
@@ -182,110 +184,155 @@ def train_paggan(
         return mri5, pet5, brain5, cortex5
 
     # -----------------------------
-    # MGDA-UB (3-way) utilities
+    # CAGrad utilities
     # -----------------------------
-    def _mgda_weights_from_gram_3(Gm: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    def _project_simplex(v: torch.Tensor) -> torch.Tensor:
+        """Project a vector onto the probability simplex."""
+        n = int(v.numel())
+        if n == 1:
+            return torch.ones_like(v)
+        u = torch.sort(v, descending=True).values
+        cssv = torch.cumsum(u, dim=0) - 1.0
+        ind = torch.arange(1, n + 1, device=v.device, dtype=v.dtype)
+        cond = (u - cssv / ind) > 0
+        if not bool(cond.any()):
+            return torch.full_like(v, 1.0 / float(n))
+        rho = int(cond.nonzero(as_tuple=False)[-1].item()) + 1
+        theta = cssv[rho - 1] / float(rho)
+        w = torch.clamp(v - theta, min=0.0)
+        s = w.sum()
+        if float(s.item()) <= 0.0:
+            return torch.full_like(v, 1.0 / float(n))
+        return w / s
+
+    def _cagrad_coeffs_from_gram(
+        Gm: torch.Tensor,
+        calpha: float,
+        rescale: int = 1,
+        steps: int = 50,
+        eps: float = 1e-12,
+    ):
         """
-        Solve min || sum_i w_i g_i ||^2 s.t. w_i >= 0, sum w_i = 1 for 3 objectives,
-        given Gram matrix Gm[i,j] = <g_i, g_j>.
-        Active-set enumeration: interior + edges + vertices.
-        Returns: w tensor shape [3] (global, roi, gan).
+        Solve CAGrad on simplex:
+          min_x x^T G b + c * sqrt(x^T G x),  s.t. x in simplex,
+        where b is uniform and c = calpha * ||g0||.
+
+        Returns:
+          x_simplex: simplex solution x
+          coeff: effective coefficients for final direction
+          lam: lambda term in CAGrad
         """
         dev, dtype = Gm.device, Gm.dtype
-        one = torch.ones(3, device=dev, dtype=dtype)
+        T = int(Gm.size(0))
+        b = torch.full((T,), 1.0 / float(T), device=dev, dtype=dtype)
 
-        def _obj(w: torch.Tensor) -> torch.Tensor:
-            return torch.dot(w, Gm @ w)
+        g0_norm = torch.sqrt(torch.clamp(Gm.mean(), min=0.0) + eps)
+        c = float(calpha) * g0_norm
 
-        candidates = []
+        # If c is effectively zero, fall back to average-gradient direction.
+        if float(c.item()) <= 1e-12:
+            x = b.clone()
+            coeff = b.clone()
+            lam = torch.tensor(0.0, device=dev, dtype=dtype)
+            return x, coeff, lam
 
-        # Interior candidate (if feasible)
-        try:
-            try:
-                pinv = torch.linalg.pinv(Gm)
-            except Exception:
-                pinv = torch.pinverse(Gm)
-            w_int = pinv @ one
-            denom = torch.dot(one, w_int)
-            if torch.isfinite(denom) and float(denom.abs().item()) > eps:
-                w_int = w_int / denom
-                if torch.all(w_int >= -1e-6):
-                    w_int = torch.clamp(w_int, min=0.0)
-                    w_int = w_int / (w_int.sum() + eps)
-                    candidates.append(w_int)
-        except Exception:
-            pass
+        Gb = Gm @ b
 
-        # Edge candidates (two objectives active)
-        def _edge(i: int, j: int) -> torch.Tensor:
-            Gii = Gm[i, i]
-            Gjj = Gm[j, j]
-            Gij = Gm[i, j]
-            num = (Gjj - Gij)
-            den = (Gii + Gjj - 2.0 * Gij) + eps
-            a = torch.clamp(num / den, 0.0, 1.0)
-            w = torch.zeros(3, device=dev, dtype=dtype)
-            w[i] = a
-            w[j] = 1.0 - a
-            return w
+        def _obj(x: torch.Tensor) -> torch.Tensor:
+            xGx = torch.dot(x, Gm @ x)
+            return torch.dot(x, Gb) + c * torch.sqrt(torch.clamp(xGx, min=0.0) + eps)
 
-        candidates += [_edge(0, 1), _edge(0, 2), _edge(1, 2)]
+        x = b.clone()
+        lr = 0.2
+        best_x = x
+        best_obj = _obj(x)
 
-        # Vertices
-        candidates += [
-            torch.tensor([1.0, 0.0, 0.0], device=dev, dtype=dtype),
-            torch.tensor([0.0, 1.0, 0.0], device=dev, dtype=dtype),
-            torch.tensor([0.0, 0.0, 1.0], device=dev, dtype=dtype),
-        ]
+        for _ in range(steps):
+            Gx = Gm @ x
+            xGx = torch.dot(x, Gx)
+            grad = Gb + c * Gx / torch.sqrt(torch.clamp(xGx, min=0.0) + eps)
 
-        best_w = candidates[0]
-        best_val = _obj(best_w)
-        for w in candidates[1:]:
-            v = _obj(w)
-            if float(v.item()) < float(best_val.item()):
-                best_val = v
-                best_w = w
+            x_try = _project_simplex(x - lr * grad)
+            obj_try = _obj(x_try)
 
-        best_w = torch.clamp(best_w, min=0.0)
-        best_w = best_w / (best_w.sum() + eps)
-        return best_w
+            if float(obj_try.item()) <= float(best_obj.item()):
+                x = x_try
+                best_x = x_try
+                best_obj = obj_try
+                lr = min(lr * 1.05, 1.0)
+            else:
+                lr = max(lr * 0.5, 1e-4)
 
-    def _mgda_weights_3(Vg: torch.Tensor, Vr: torch.Tensor, Vgan: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        x = _project_simplex(best_x)
+        xGx = torch.dot(x, Gm @ x)
+        gw_norm = torch.sqrt(torch.clamp(xGx, min=0.0) + eps)
+        lam = c / (gw_norm + eps)
+
+        coeff = b + lam * x
+        if rescale == 1:
+            coeff = coeff / (1.0 + calpha ** 2)
+        elif rescale == 2:
+            coeff = coeff / (1.0 + calpha)
+        return x, coeff, lam
+
+    def _cagrad_weights(
+        grad_views,
+        calpha: float,
+        rescale: int = 1,
+        eps: float = 1e-12,
+    ):
         """
-        Vg, Vr, Vgan: [B, N] flattened standardized gradients.
-        Returns: weights per-sample [B, 3] = (w_global, w_roi, w_gan)
+        grad_views: list of flattened standardized gradients, each [B, N].
+        Returns:
+          simplex_batch: [B, T]
+          coeff_batch:   [B, T] effective coefficients for final direction
+          lambda_batch:  [B]
         """
-        B = Vg.size(0)
-        ws = []
+        T = len(grad_views)
+        B = grad_views[0].size(0)
+        simplex_list = []
+        coeff_list = []
+        lambda_list = []
+
         for b in range(B):
-            g0 = Vg[b]
-            g1 = Vr[b]
-            g2 = Vgan[b]
+            Gm = torch.empty((T, T), device=grad_views[0].device, dtype=grad_views[0].dtype)
+            for i in range(T):
+                gi = grad_views[i][b]
+                for j in range(i, T):
+                    gj = grad_views[j][b]
+                    dot_ij = torch.dot(gi, gj)
+                    Gm[i, j] = dot_ij
+                    Gm[j, i] = dot_ij
 
-            Gm = torch.empty((3, 3), device=Vg.device, dtype=Vg.dtype)
-            Gm[0, 0] = torch.dot(g0, g0)
-            Gm[0, 1] = torch.dot(g0, g1)
-            Gm[0, 2] = torch.dot(g0, g2)
-            Gm[1, 0] = Gm[0, 1]
-            Gm[1, 1] = torch.dot(g1, g1)
-            Gm[1, 2] = torch.dot(g1, g2)
-            Gm[2, 0] = Gm[0, 2]
-            Gm[2, 1] = Gm[1, 2]
-            Gm[2, 2] = torch.dot(g2, g2)
+            x, coeff, lam = _cagrad_coeffs_from_gram(
+                Gm, calpha=calpha, rescale=rescale, eps=eps
+            )
+            simplex_list.append(x)
+            coeff_list.append(coeff)
+            lambda_list.append(lam)
 
-            ws.append(_mgda_weights_from_gram_3(Gm, eps=eps))
-
-        return torch.stack(ws, dim=0)
+        return (
+            torch.stack(simplex_list, dim=0),
+            torch.stack(coeff_list, dim=0),
+            torch.stack(lambda_list, dim=0),
+        )
 
     for epoch in range(1, epochs + 1):
-        # --- MGDA monitoring accumulators (per epoch) ---
-        w_global_running = 0.0
-        w_roi_running = 0.0
-        w_gan_running = 0.0
+        # --- CAGrad monitoring accumulators (per epoch) ---
+        coeff_global_running = 0.0
+        coeff_roi_running = 0.0
+        coeff_gan_running = 0.0
+        simplex_global_running = 0.0
+        simplex_roi_running = 0.0
+        simplex_gan_running = 0.0
+        lambda_running = 0.0
 
         grad_recon_running = 0.0          # raw ||grad_global||
         grad_roi_running = 0.0            # raw ||grad_roi||
         grad_gan_running = 0.0            # raw ||grad_gan||
+        loss_recon_global_running = 0.0
+        loss_recon_roi_running = 0.0
+        loss_gan_running = 0.0
 
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
@@ -349,7 +396,7 @@ def train_paggan(
             else:
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # ========================= MGDA-UB (3-way, single stage) =========================
+            # ========================= CAGrad (single stage) =========================
 
             # ---- global recon grad ----
             v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
@@ -388,31 +435,47 @@ def train_paggan(
             Vgan = v_gan_s.reshape(v_gan_s.size(0), -1)
 
             if use_roi:
-                # 3-way MGDA weights (per-sample), then robust median across batch
-                w_batch = _mgda_weights_3(Vg, Vr, Vgan)         # [B,3]
-                w_med = w_batch.median(dim=0).values            # [3]
-                w_sum = (w_med.sum() + 1e-12)
-                w_med = w_med / w_sum
-                w_global, w_roi, w_gan_w = w_med[0], w_med[1], w_med[2]
+                simplex_batch, coeff_batch, lambda_batch = _cagrad_weights(
+                    [Vg, Vr, Vgan], calpha=cagrad_alpha, rescale=cagrad_rescale
+                )
+                simplex_med = simplex_batch.median(dim=0).values
+                coeff_med = coeff_batch.median(dim=0).values
+                lambda_med = lambda_batch.median()
+
+                w_global, w_roi, w_gan_w = coeff_med[0], coeff_med[1], coeff_med[2]
+                simplex_global, simplex_roi, simplex_gan = (
+                    simplex_med[0], simplex_med[1], simplex_med[2]
+                )
             else:
-                # fallback: 2-way MGDA between global recon and GAN
-                diff = Vgan - Vg
-                num = (diff * Vgan).sum(dim=1)
-                den = (diff * diff).sum(dim=1) + 1e-12
-                a_batch = torch.clamp(num / den, 0.0, 1.0)
-                a = a_batch.median()
-                w_global = a
+                simplex_batch, coeff_batch, lambda_batch = _cagrad_weights(
+                    [Vg, Vgan], calpha=cagrad_alpha, rescale=cagrad_rescale
+                )
+                simplex_med = simplex_batch.median(dim=0).values
+                coeff_med = coeff_batch.median(dim=0).values
+                lambda_med = lambda_batch.median()
+
+                w_global = coeff_med[0]
                 w_roi = torch.tensor(0.0, device=device, dtype=fake.dtype)
-                w_gan_w = 1.0 - a
+                w_gan_w = coeff_med[1]
+                simplex_global = simplex_med[0]
+                simplex_roi = torch.tensor(0.0, device=device, dtype=fake.dtype)
+                simplex_gan = simplex_med[1]
 
             # Monitoring
-            w_global_running += float(w_global.item())
-            w_roi_running += float(w_roi.item())
-            w_gan_running += float(w_gan_w.item())
+            coeff_global_running += float(w_global.item())
+            coeff_roi_running += float(w_roi.item())
+            coeff_gan_running += float(w_gan_w.item())
+            simplex_global_running += float(simplex_global.item())
+            simplex_roi_running += float(simplex_roi.item())
+            simplex_gan_running += float(simplex_gan.item())
+            lambda_running += float(lambda_med.item())
 
             grad_recon_running += current_nglobal
             grad_roi_running += current_nroi
             grad_gan_running += current_ngan
+            loss_recon_global_running += float(loss_recon_global.detach().item())
+            loss_recon_roi_running += float(loss_recon_roi.detach().item())
+            loss_gan_running += float(loss_gan.detach().item())
 
             # Final direction
             v_final = (w_global * v_global_s) + (w_roi * v_roi_s) + (w_gan_w * v_gan_s)
@@ -433,13 +496,21 @@ def train_paggan(
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
 
-        avg_w_global = w_global_running / max(1, n_batches)
-        avg_w_roi = w_roi_running / max(1, n_batches)
-        avg_w_gan = w_gan_running / max(1, n_batches)
+        avg_coeff_global = coeff_global_running / max(1, n_batches)
+        avg_coeff_roi = coeff_roi_running / max(1, n_batches)
+        avg_coeff_gan = coeff_gan_running / max(1, n_batches)
+
+        avg_simplex_global = simplex_global_running / max(1, n_batches)
+        avg_simplex_roi = simplex_roi_running / max(1, n_batches)
+        avg_simplex_gan = simplex_gan_running / max(1, n_batches)
+        avg_lambda = lambda_running / max(1, n_batches)
 
         avg_grad_recon = grad_recon_running / max(1, n_batches)
         avg_grad_roi = grad_roi_running / max(1, n_batches)
         avg_grad_gan = grad_gan_running / max(1, n_batches)
+        avg_loss_recon_global = loss_recon_global_running / max(1, n_batches)
+        avg_loss_recon_roi = loss_recon_roi_running / max(1, n_batches)
+        avg_loss_gan = loss_gan_running / max(1, n_batches)
 
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
@@ -484,8 +555,10 @@ def train_paggan(
                     f"| best {best_val:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
-                    f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
+                    f"      [CAGrad] coeff_global={avg_coeff_global:.3f}  "
+                    f"coeff_roi={avg_coeff_roi:.3f}  coeff_gan={avg_coeff_gan:.3f}  "
+                    f"| simplex=({avg_simplex_global:.3f},{avg_simplex_roi:.3f},{avg_simplex_gan:.3f})  "
+                    f"| lambda={avg_lambda:.3f}  "
                     f"||grad_global||={avg_grad_recon:.3e}  "
                     f"||grad_roi||={avg_grad_roi:.3e}  "
                     f"||grad_gan||={avg_grad_gan:.3e}"
@@ -499,8 +572,10 @@ def train_paggan(
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
             )
             print(
-                f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
-                f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
+                f"      [CAGrad] coeff_global={avg_coeff_global:.3f}  "
+                f"coeff_roi={avg_coeff_roi:.3f}  coeff_gan={avg_coeff_gan:.3f}  "
+                f"| simplex=({avg_simplex_global:.3f},{avg_simplex_roi:.3f},{avg_simplex_gan:.3f})  "
+                f"| lambda={avg_lambda:.3f}  "
                 f"||grad_global||={avg_grad_recon:.3e}  "
                 f"||grad_roi||={avg_grad_roi:.3e}  "
                 f"||grad_gan||={avg_grad_gan:.3e}"
@@ -512,16 +587,27 @@ def train_paggan(
                 "epoch": epoch,
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
+                "train/loss_recon_global": avg_loss_recon_global,
+                "train/loss_recon_roi": avg_loss_recon_roi,
+                "train/loss_gan": avg_loss_gan,
 
-                # --- NEW: 3-way MGDA weights ---
-                "mgda/w_recon_global": avg_w_global,
-                "mgda/w_recon_roi": avg_w_roi,
-                "mgda/w_gan": avg_w_gan,
+                # --- CAGrad effective coefficients used in final direction ---
+                "cagrad/coeff_recon_global": avg_coeff_global,
+                "cagrad/coeff_recon_roi": avg_coeff_roi,
+                "cagrad/coeff_gan": avg_coeff_gan,
 
-                # keep grad norm tracking
-                "mgda/grad_recon_global_norm": avg_grad_recon,
-                "mgda/grad_recon_roi_norm": avg_grad_roi,
-                "mgda/grad_gan_norm": avg_grad_gan,
+                # --- CAGrad simplex solution x ---
+                "cagrad/simplex_recon_global": avg_simplex_global,
+                "cagrad/simplex_recon_roi": avg_simplex_roi,
+                "cagrad/simplex_gan": avg_simplex_gan,
+                "cagrad/lambda": avg_lambda,
+                "cagrad/alpha": cagrad_alpha,
+                "cagrad/rescale_mode": float(cagrad_rescale),
+
+                # keep gradient norm tracking
+                "cagrad/grad_recon_global_norm": avg_grad_recon,
+                "cagrad/grad_recon_roi_norm": avg_grad_roi,
+                "cagrad/grad_gan_norm": avg_grad_gan,
             }
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
