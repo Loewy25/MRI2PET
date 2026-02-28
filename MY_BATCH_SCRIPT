@@ -3,11 +3,11 @@
 #SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
 #SBATCH --time=23:50:00
-#SBATCH --gres=gpu:tesla_a100:1
-#SBATCH --gres=gpu:1
-#SBATCH --partition=tier1_gpu
+##SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_Cpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --nodelist=gpu01
+##SBATCH --nodelist=gpu01
 #SBATCH --output=dataset.out
 #SBATCH --error=dataset.err
 
@@ -47,7 +47,7 @@ module load fsl
 pip install torch
 # 5) Run script
 
-python Data_T807.py
+python Data_TAU_ALL.py
 
 #python summary.py
 
