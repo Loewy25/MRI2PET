@@ -37,7 +37,7 @@ BASE_ROOT = "/ceph/chpc/mapped/benz04_kari"
 PUP_ROOT  = os.path.join(BASE_ROOT, "pup")
 FS_ROOT   = os.path.join(BASE_ROOT, "freesurfers")
 
-OUT_ROOT  = "/scratch/l.peiwang/kari_brainv33"
+OUT_ROOT  = "/scratch/l.peiwang/kari_all"
 LUT_PATH  = "/scratch/l.peiwang/FreeSurferColorLUT.txt"
 
 CSV_PATH  = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"  # <--- EDIT THIS
