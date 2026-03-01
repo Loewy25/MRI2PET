@@ -186,11 +186,27 @@ def choose_t1001_strict(nifti_dir):
 
 
 def choose_pet_strict(nifti_dir):
+    """
+    Priority:
+    1) *_msum_SUVR.nii.gz
+    2) *_SUVR.nii.gz
+    3) return None if nothing found
+    """
+
+    # 1) strict primary pattern
     matches = glob.glob(os.path.join(nifti_dir, "*_msum_SUVR.nii.gz"))
-    if not matches:
-        return None
-    matches.sort()
-    return matches[0]
+    if matches:
+        matches.sort()
+        return matches[0]
+
+    # 2) fallback pattern
+    matches = glob.glob(os.path.join(nifti_dir, "*_SUVR.nii.gz"))
+    if matches:
+        matches.sort()
+        return matches[0]
+
+    # 3) nothing found
+    return None
 
 
 # ---------- FreeSurfer discovery by MR_Session ----------
