@@ -7,43 +7,78 @@
 #SBATCH --output=dataset.out
 #SBATCH --error=dataset.err
 
-set -u  # avoid -e so debug can print even if something fails
+set -euo pipefail
 
 module purge
 module load fsl
-module load freesurfer
 
-# Core Unix tools for FSL wrapper scripts
+# Ensure core Unix tools exist (FSL wrapper scripts need basename/tr/etc.)
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 hash -r
 
-# FreeSurfer license (cluster-provided)
-export FS_LICENSE="/export/freesurfer/freesurfer-7.4.1/.license"
+# ---- Discover FreeSurfer from the binary that EXISTS on the compute node ----
+# (Do NOT trust FREESURFER_HOME from module if the FS tree isn't mounted.)
+FS_VOL2VOL="$(command -v mri_vol2vol || true)"
+FS_RR="$(command -v mri_robust_register || true)"
 
 echo "=== BASIC ENV ==="
 echo "HOST=$(hostname)"
-echo "FREESURFER_HOME=${FREESURFER_HOME:-<unset>}"
-echo "FS_LICENSE=$FS_LICENSE"
 echo "PATH=$PATH"
+echo "mri_vol2vol=$FS_VOL2VOL"
+echo "mri_robust_register=$FS_RR"
+echo "flirt=$(command -v flirt || true)"
 
-# Debug FreeSurfer home visibility (DO NOT FAIL the job on errors)
-echo "=== CHECK FREESURFER_HOME ACCESS ==="
-ls -la "${FREESURFER_HOME:-/nope}" 2>&1 || true
-ls -la "${FREESURFER_HOME:-/nope}/bin" 2>&1 || true
-
-# If bin exists, force it to the front (prevents stray 8.1.0)
-if [ -n "${FREESURFER_HOME:-}" ] && [ -d "$FREESURFER_HOME/bin" ]; then
-  export PATH="$FREESURFER_HOME/bin:$PATH"
-  hash -r
-fi
-
-# Fail fast ONLY on license file (this must exist)
-if [ ! -f "$FS_LICENSE" ]; then
-  echo "ERROR: FreeSurfer license missing at $FS_LICENSE"
+if [ -z "$FS_VOL2VOL" ]; then
+  echo "ERROR: mri_vol2vol not found on PATH on this node."
   exit 2
 fi
 
-# Conda last
+FS_BIN_DIR="$(dirname "$FS_VOL2VOL")"
+# Common layouts:
+#  /export/freesurfer/8.1.0/mri_vol2vol  -> FS_ROOT=/export/freesurfer/8.1.0
+#  /something/.../bin/mri_vol2vol        -> FS_ROOT=/something/...
+FS_ROOT="$(cd "$FS_BIN_DIR" && pwd)"
+
+echo "FS_BIN_DIR=$FS_BIN_DIR"
+echo "FS_ROOT(guessed)=$FS_ROOT"
+
+# ---- Find a license file that exists on THIS node ----
+# Check a few common locations relative to the binary location.
+CAND_LICENSES=(
+  "$FS_ROOT/.license"
+  "$FS_ROOT/license.txt"
+  "$FS_ROOT/../.license"
+  "$FS_ROOT/../license.txt"
+  "$FS_ROOT/../../.license"
+  "$FS_ROOT/../../license.txt"
+)
+
+FS_LICENSE_FOUND=""
+for p in "${CAND_LICENSES[@]}"; do
+  if [ -f "$p" ]; then
+    FS_LICENSE_FOUND="$p"
+    break
+  fi
+done
+
+if [ -z "$FS_LICENSE_FOUND" ]; then
+  echo "ERROR: Could not find a FreeSurfer license near $FS_ROOT"
+  echo "Tried:"
+  printf '  %s\n' "${CAND_LICENSES[@]}"
+  echo "Directory listings:"
+  ls -la "$FS_ROOT" 2>&1 || true
+  ls -la "$(dirname "$FS_ROOT")" 2>&1 || true
+  exit 3
+fi
+
+export FS_LICENSE="$FS_LICENSE_FOUND"
+echo "FS_LICENSE=$FS_LICENSE"
+
+# Optional: set FREESURFER_HOME for tools that care (not strictly required)
+export FREESURFER_HOME="$FS_ROOT"
+echo "FREESURFER_HOME=$FREESURFER_HOME"
+
+# ---- Conda last ----
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate pasta
 export PYTHONNOUSERSITE=1
@@ -51,22 +86,9 @@ export FSLOUTPUTTYPE=NIFTI_GZ
 
 echo "=== TOOL CHECK ==="
 for x in basename tr ls python pip flirt mri_vol2vol mri_robust_register; do
-  printf "%-20s" "$x"; command -v "$x" 2>&1 || echo "MISSING"
+  printf "%-20s" "$x"
+  command -v "$x" 2>&1 || echo "MISSING"
 done
 
-echo "=== which -a FreeSurfer tools ==="
-which -a mri_vol2vol 2>&1 || true
-which -a mri_robust_register 2>&1 || true
-
-python - <<'PY'
-import os, sys, shutil
-print("sys.executable =", sys.executable)
-print("FREESURFER_HOME =", os.environ.get("FREESURFER_HOME"))
-print("FS_LICENSE =", os.environ.get("FS_LICENSE"))
-for x in ["flirt","mri_vol2vol","mri_robust_register"]:
-    print(f"{x:18s} -> {shutil.which(x)}")
-PY
-
-# Now run (turn on -e only for the actual workload)
-set -e
+echo "=== RUN ==="
 python Data_TAU_ALL.py
