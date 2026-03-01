@@ -44,4 +44,4 @@ for x in ["flirt", "mri_vol2vol", "mri_robust_register"]:
 PY
 
 # Do NOT pip install torch inside the job
-python Data_TAU_ALL.py
+python DATA_TAU_ALL.py
