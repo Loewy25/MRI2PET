@@ -77,4 +77,4 @@ PART="${PART:-${SLURM_ARRAY_TASK_ID:-1}}"
 
 echo "Running chunk ${PART}/${NUM_PARTS}"
 
-python DATA_ALL_DATA.py --part "$PART" --num-parts "$NUM_PARTS"
+python DATA_TAU_ALL.py --part "$PART" --num-parts "$NUM_PARTS"
