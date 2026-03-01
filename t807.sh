@@ -10,47 +10,46 @@
 set -euo pipefail
 
 module purge
-module load fsl
 
-# Ensure core Unix tools exist (FSL wrapper scripts need basename/tr/etc.)
+# Always keep core Unix tools available (FSL wrapper scripts need basename/tr/etc.)
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 hash -r
 
-# ---- Discover FreeSurfer from the binary that EXISTS on the compute node ----
-# (Do NOT trust FREESURFER_HOME from module if the FS tree isn't mounted.)
-FS_VOL2VOL="$(command -v mri_vol2vol || true)"
-FS_RR="$(command -v mri_robust_register || true)"
+# Load FSL first
+module load fsl
 
-echo "=== BASIC ENV ==="
-echo "HOST=$(hostname)"
-echo "PATH=$PATH"
-echo "mri_vol2vol=$FS_VOL2VOL"
-echo "mri_robust_register=$FS_RR"
-echo "flirt=$(command -v flirt || true)"
+# Load FreeSurfer module (even if FREESURFER_HOME is misleading on compute nodes)
+module load freesurfer || true
 
-if [ -z "$FS_VOL2VOL" ]; then
-  echo "ERROR: mri_vol2vol not found on PATH on this node."
-  exit 2
-fi
+# ---- Force-add likely FreeSurfer binary locations (compute-node reality) ----
+# Put these FIRST so `which mri_vol2vol` finds them if they exist.
+CAND_FS_BIN_DIRS=(
+  "/export/freesurfer/8.1.0"
+  "/export/freesurfer/freesurfer-7.4.1/bin"
+  "/export/freesurfer/freesurfer-7.2.0/bin"
+  "/export/freesurfer/freesurfer-7.1.1/bin"
+  "/export/freesurfer/freesurfer-6.0.0/bin"
+  "/export/freesurfer/freesurfer-5.3.0/bin"
+  "/export/freesurfer/freesurfer-5.3.0-HCP/bin"
+)
 
-FS_BIN_DIR="$(dirname "$FS_VOL2VOL")"
-# Common layouts:
-#  /export/freesurfer/8.1.0/mri_vol2vol  -> FS_ROOT=/export/freesurfer/8.1.0
-#  /something/.../bin/mri_vol2vol        -> FS_ROOT=/something/...
-FS_ROOT="$(cd "$FS_BIN_DIR" && pwd)"
+for d in "${CAND_FS_BIN_DIRS[@]}"; do
+  if [ -d "$d" ]; then
+    export PATH="$d:$PATH"
+  fi
+done
+hash -r
 
-echo "FS_BIN_DIR=$FS_BIN_DIR"
-echo "FS_ROOT(guessed)=$FS_ROOT"
-
-# ---- Find a license file that exists on THIS node ----
-# Check a few common locations relative to the binary location.
+# ---- Pick a license file that exists ON THIS NODE ----
 CAND_LICENSES=(
-  "$FS_ROOT/.license"
-  "$FS_ROOT/license.txt"
-  "$FS_ROOT/../.license"
-  "$FS_ROOT/../license.txt"
-  "$FS_ROOT/../../.license"
-  "$FS_ROOT/../../license.txt"
+  "/export/freesurfer/8.1.0/.license"
+  "/export/freesurfer/8.1.0/license.txt"
+  "/export/freesurfer/freesurfer-7.4.1/.license"
+  "/export/freesurfer/freesurfer-7.2.0/.license"
+  "/export/freesurfer/freesurfer-7.1.1/.license"
+  "/export/freesurfer/freesurfer-6.0.0/.license"
+  "/export/freesurfer/freesurfer-5.3.0/.license"
+  "/export/freesurfer/freesurfer-5.3.0-HCP/.license"
 )
 
 FS_LICENSE_FOUND=""
@@ -62,21 +61,14 @@ for p in "${CAND_LICENSES[@]}"; do
 done
 
 if [ -z "$FS_LICENSE_FOUND" ]; then
-  echo "ERROR: Could not find a FreeSurfer license near $FS_ROOT"
+  echo "ERROR: No FreeSurfer license file found on this node."
   echo "Tried:"
-  printf '  %s\n' "${CAND_LICENSES[@]}"
-  echo "Directory listings:"
-  ls -la "$FS_ROOT" 2>&1 || true
-  ls -la "$(dirname "$FS_ROOT")" 2>&1 || true
+  printf "  %s\n" "${CAND_LICENSES[@]}"
+  echo "Debug: listing /export/freesurfer (if accessible)"
+  ls -la /export/freesurfer 2>&1 || true
   exit 3
 fi
-
 export FS_LICENSE="$FS_LICENSE_FOUND"
-echo "FS_LICENSE=$FS_LICENSE"
-
-# Optional: set FREESURFER_HOME for tools that care (not strictly required)
-export FREESURFER_HOME="$FS_ROOT"
-echo "FREESURFER_HOME=$FREESURFER_HOME"
 
 # ---- Conda last ----
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -84,11 +76,35 @@ conda activate pasta
 export PYTHONNOUSERSITE=1
 export FSLOUTPUTTYPE=NIFTI_GZ
 
-echo "=== TOOL CHECK ==="
-for x in basename tr ls python pip flirt mri_vol2vol mri_robust_register; do
-  printf "%-20s" "$x"
-  command -v "$x" 2>&1 || echo "MISSING"
+# ---- Preflight ----
+echo "=== BASIC ENV ==="
+echo "HOST=$(hostname)"
+echo "FREESURFER_HOME=${FREESURFER_HOME:-<unset>}"
+echo "FS_LICENSE=$FS_LICENSE"
+echo "PATH=$PATH"
+
+echo "=== coreutils check ==="
+for x in basename tr ls; do
+  printf "%-10s" "$x"; command -v "$x" 2>&1 || echo "MISSING"
 done
 
-echo "=== RUN ==="
+echo "=== tool check ==="
+for x in flirt mri_vol2vol mri_robust_register; do
+  printf "%-18s" "$x"; command -v "$x" 2>&1 || echo "MISSING"
+done
+
+# Hard fail if FS tools still missing
+command -v mri_vol2vol >/dev/null 2>&1 || { echo "ERROR: mri_vol2vol still not found after PATH fixes."; exit 4; }
+command -v mri_robust_register >/dev/null 2>&1 || { echo "ERROR: mri_robust_register still not found after PATH fixes."; exit 5; }
+
+python - <<'PY'
+import os, sys, shutil
+print("sys.executable =", sys.executable)
+print("FREESURFER_HOME =", os.environ.get("FREESURFER_HOME"))
+print("FS_LICENSE =", os.environ.get("FS_LICENSE"))
+for x in ["flirt","mri_vol2vol","mri_robust_register"]:
+    print(f"{x:18s} -> {shutil.which(x)}")
+PY
+
+# ---- Run ----
 python Data_TAU_ALL.py
