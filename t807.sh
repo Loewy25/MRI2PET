@@ -64,4 +64,4 @@ for x in ["flirt","mri_vol2vol","mri_robust_register"]:
     print(f"{x:18s} -> {shutil.which(x)}")
 PY
 
-python Data_TAU_ALL.py
+python DATA_TAU_ALL.py
