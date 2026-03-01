@@ -1,47 +1,60 @@
 #!/bin/bash
-#SBATCH --job-name=MGDA_UB
-#SBATCH --mem=10G
-#SBATCH --time=23:50:00
+#SBATCH --job-name=KARI_TAU_ALL
 #SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
+#SBATCH --mem=10G
+#SBATCH --time=23:50:00
 #SBATCH --output=dataset.out
 #SBATCH --error=dataset.err
 
+set -euo pipefail
+
 module purge
 
-# Load tool modules first
+# --- Load tools (order matters less now, but keep it clean) ---
 module load fsl
 module load freesurfer
 
-# Probably unnecessary on a CPU partition unless you truly need them
-# module load cuda/12.9
-# module load cudnn/9.11.0.98-cuda12
+# --- FreeSurfer environment + license (use the cluster-provided .license) ---
+# freesurfer module sets this:
+echo "FREESURFER_HOME=$FREESURFER_HOME"
 
-# Re-apply FreeSurfer environment after all module loads
-if [ -n "$FREESURFER_HOME" ] && [ -f "$FREESURFER_HOME/SetUpFreeSurfer.sh" ]; then
-  source "$FREESURFER_HOME/SetUpFreeSurfer.sh"
-fi
+# Source FreeSurfer setup unconditionally
+source "$FREESURFER_HOME/SetUpFreeSurfer.sh"
 
-# Activate conda LAST so python/pip come from your env, not FSL
+# Point to the license that EXISTS on this cluster
+export FS_LICENSE="/export/freesurfer/freesurfer-7.4.1/.license"
+
+# --- Conda env (activate AFTER modules) ---
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate pasta
 
+# --- FSL output type for your FLIRT outputs ---
 export FSLOUTPUTTYPE=NIFTI_GZ
+
+# Avoid accidentally picking up ~/.local site-packages
 export PYTHONNOUSERSITE=1
 
-echo "=== final tool check ==="
+# --- Sanity checks (fail fast) ---
+echo "=== FINAL TOOL CHECK ==="
 for x in python pip flirt mri_vol2vol mri_robust_register; do
-  printf "%-22s" "$x"
+  printf "%-20s" "$x"
   which "$x" || echo "MISSING"
 done
+
+echo "=== ENV CHECK ==="
+echo "FREESURFER_HOME=$FREESURFER_HOME"
+echo "FS_LICENSE=$FS_LICENSE"
+test -f "$FS_LICENSE" || { echo "ERROR: FS license missing: $FS_LICENSE"; exit 1; }
 
 python - <<'PY'
 import os, sys, shutil
 print("sys.executable =", sys.executable)
 print("FREESURFER_HOME =", os.environ.get("FREESURFER_HOME"))
-for x in ["flirt", "mri_vol2vol", "mri_robust_register"]:
+print("FS_LICENSE =", os.environ.get("FS_LICENSE"))
+for x in ["flirt","mri_vol2vol","mri_robust_register"]:
     print(f"{x} -> {shutil.which(x)}")
 PY
 
-# Do NOT pip install torch inside the job
-python DATA_TAU_ALL.py
+# --- Run your pipeline ---
+python Data_TAU_ALL.py
