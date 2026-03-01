@@ -10,52 +10,70 @@
 set -euo pipefail
 
 module purge
-
-# --- Modules ---
 module load fsl
 module load freesurfer
 
-# --- Make sure core Unix tools exist (basename/tr/etc) ---
-# (FSL wrapper scripts call these; some environments end up with a stripped PATH)
+# Ensure core Unix tools exist (FSL wrappers need basename/tr/etc.)
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 hash -r
 
-# --- FreeSurfer setup + license (cluster-provided license exists) ---
-# Module sets FREESURFER_HOME; always source SetUpFreeSurfer.sh
-echo "FREESURFER_HOME(from module)=$FREESURFER_HOME"
-source "$FREESURFER_HOME/SetUpFreeSurfer.sh"
+# ---------------- FreeSurfer setup ----------------
+echo "FREESURFER_HOME(from module)=${FREESURFER_HOME:-<unset>}"
 
+# Find a usable SetUpFreeSurfer script (cluster layouts vary)
+FS_SETUP=""
+for cand in \
+  "$FREESURFER_HOME/SetUpFreeSurfer.sh" \
+  "$FREESURFER_HOME/SetUpFreeSurfer.bash" \
+  "$FREESURFER_HOME/SetUpFreeSurfer" \
+  "$FREESURFER_HOME/bin/SetUpFreeSurfer.sh" \
+  "$FREESURFER_HOME/bin/SetUpFreeSurfer.bash" \
+  "$FREESURFER_HOME/bin/SetUpFreeSurfer"
+do
+  if [ -f "$cand" ]; then
+    FS_SETUP="$cand"
+    break
+  fi
+done
+
+if [ -z "$FS_SETUP" ]; then
+  echo "ERROR: Could not find SetUpFreeSurfer.sh/.bash under $FREESURFER_HOME"
+  echo "Top-level listing:"
+  ls -la "$FREESURFER_HOME" || true
+  echo "Bin listing:"
+  ls -la "$FREESURFER_HOME/bin" || true
+  exit 2
+fi
+
+echo "Using FreeSurfer setup: $FS_SETUP"
+# shellcheck disable=SC1090
+source "$FS_SETUP"
+
+# Use the cluster-provided license you found
 export FS_LICENSE="/export/freesurfer/freesurfer-7.4.1/.license"
-test -f "$FS_LICENSE" || { echo "ERROR: FS_LICENSE missing: $FS_LICENSE"; exit 1; }
+test -f "$FS_LICENSE" || { echo "ERROR: FS_LICENSE missing: $FS_LICENSE"; exit 3; }
 
-# --- Force FreeSurfer 7.4.1 binaries to the FRONT (avoid accidental 8.1.0 on PATH) ---
-# After sourcing SetUpFreeSurfer.sh, FS usually defines $FREESURFER_HOME/bin; make it first anyway.
+# Force THIS FreeSurfer version's bin first (avoid accidental /export/freesurfer/8.1.0)
 if [ -d "$FREESURFER_HOME/bin" ]; then
   export PATH="$FREESURFER_HOME/bin:$PATH"
 fi
 hash -r
 
-# --- Conda last ---
+# ---------------- Conda last ----------------
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate pasta
-
-# Avoid accidental ~/.local pollution
 export PYTHONNOUSERSITE=1
-
-# FSL output type used by FLIRT
 export FSLOUTPUTTYPE=NIFTI_GZ
 
-# --- Preflight checks ---
+# ---------------- Preflight ----------------
 echo "=== coreutils check ==="
 for x in basename tr awk sed; do
-  printf "%-10s" "$x"
-  which "$x" || echo "MISSING"
+  printf "%-10s" "$x"; which "$x" || echo "MISSING"
 done
 
 echo "=== tool check ==="
 for x in python pip flirt mri_vol2vol mri_robust_register; do
-  printf "%-20s" "$x"
-  which "$x" || echo "MISSING"
+  printf "%-20s" "$x"; which "$x" || echo "MISSING"
 done
 
 echo "=== which -a (FS tools) ==="
@@ -77,5 +95,5 @@ for x in ["basename","tr","flirt","mri_vol2vol","mri_robust_register"]:
     print(f"{x:18s} -> {shutil.which(x)}")
 PY
 
-# --- Run ---
+# ---------------- Run ----------------
 python Data_TAU_ALL.py
