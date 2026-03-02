@@ -1,291 +1,151 @@
 #!/bin/bash
-#SBATCH --job-name=DIAN_FastSurfer
+#SBATCH --job-name=fastsurfer_seg
 #SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --time=08:00:00
-#SBATCH --mem=24G
+#SBATCH --time=24:00:00
+#SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-# Default broad array so plain "sbatch DIAN_fastsurfer.sh" works.
-# Tasks beyond available inputs auto-exit in-script.
-#SBATCH --array=1-5000%10
-#SBATCH --output=slurm-%A_%a_fastsurfer.out
-#SBATCH --error=slurm-%A_%a_fastsurfer.out
+#SBATCH --output=fs.out
+#SBATCH --error=fs.err
 
 set -euo pipefail
 
-# ---------------- Robust module init ----------------
+# =========================
+# edit these 4 lines only
+# =========================
+IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"
+OUT_ROOT="${OUT_ROOT:-/scratch/l.peiwang/fastsurfer_simple_out}"
+SIF_IMAGE="${SIF_IMAGE:-/scratch/l.peiwang/fastsurfer-gpu.sif}"
+FASTSURFER_IMAGE_SOURCE="${FASTSURFER_IMAGE_SOURCE:-docker://deepmi/fastsurfer:cuda-v2.5.0}"
+
+# optional
+THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-8}}"
+SKIP_DONE="${SKIP_DONE:-1}"
+EXTRA_ARGS="${EXTRA_ARGS:---native_image --no_cereb --no_hypothal --no_cc}"
+
+mkdir -p "$OUT_ROOT"
+
+# -------- load apptainer / singularity --------
 set +u
 for f in /etc/profile.d/modules.sh \
          /usr/share/Modules/init/bash \
          /usr/share/lmod/lmod/init/bash; do
-  [[ -r "$f" ]] && source "$f" || true
+    [[ -r "$f" ]] && source "$f" || true
 done
 set -u
 
-# ---------------- Configurable paths ----------------
-IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"  # input candidates folder
-LIST="${LIST:-}"                                     # optional TSV (helper_DIAN format)
-SUBJECTS_DIR="${SUBJECTS_DIR:-/scratch/l.peiwang/fastsurfer_DIAN}"
-FINAL_ROOT="${FINAL_ROOT:-${EXPORT_ROOT:-/scratch/l.peiwang/DIAN_fastsurfer_final}}"
-EXPORT_ROOT="$FINAL_ROOT"
-FS_LICENSE="${FS_LICENSE:-/ceph/chpc/mapped/brier/software/freesurfer/license.txt}"
-
-# ---------------- Optional module names ----------------
-FASTSURFER_MODULE="${FASTSURFER_MODULE:-fastsurfer}"
-FREESURFER_MODULE="${FREESURFER_MODULE:-freesurfer/7.4.1}"
-
-# ---------------- FastSurfer behavior ----------------
-FASTSURFER_RUNNER="${FASTSURFER_RUNNER:-run_fastsurfer.sh}"
-FASTSURFER_DEVICE="${FASTSURFER_DEVICE:-cuda}"   # cuda or cpu
-FASTSURFER_MODE="${FASTSURFER_MODE:-seg_only}"   # seg_only or full
-FASTSURFER_EXTRA_ARGS="${FASTSURFER_EXTRA_ARGS:-}"
-FASTSURFER_PY="${FASTSURFER_PY:-}"               # optional python executable passed via --py
-SKIP_IF_DONE="${SKIP_IF_DONE:-1}"
-
-die() {
-  echo "[FATAL] $*" >&2
-  exit 2
-}
-
-warn() {
-  echo "[WARN] $*" >&2
-}
-
-cleanup() {
-  [[ -n "${TMP_LIST:-}" && -f "${TMP_LIST:-}" ]] && rm -f "$TMP_LIST"
-}
-
-pick_first_existing() {
-  local p
-  for p in "$@"; do
-    [[ -f "$p" ]] && { echo "$p"; return 0; }
-  done
-  return 1
-}
-
-resolve_runner() {
-  local cand
-  cand="$FASTSURFER_RUNNER"
-  if [[ -x "$cand" ]]; then
-    echo "$cand"
-    return 0
-  fi
-  if command -v "$cand" >/dev/null 2>&1; then
-    command -v "$cand"
-    return 0
-  fi
-  if [[ -n "${FASTSURFER_HOME:-}" && -x "$FASTSURFER_HOME/run_fastsurfer.sh" ]]; then
-    echo "$FASTSURFER_HOME/run_fastsurfer.sh"
-    return 0
-  fi
-  return 1
-}
-
-is_truthy() {
-  case "${1:-}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-need_fs_license() {
-  # Surface pipeline requires a FreeSurfer license.
-  if [[ "$FASTSURFER_MODE" == "full" ]]; then
-    return 0
-  fi
-  # Segmentation-only may still need license for talairach or T1/T2 registration.
-  if [[ "$FASTSURFER_EXTRA_ARGS" == *"--tal_reg"* ]]; then
-    return 0
-  fi
-  if [[ "$FASTSURFER_EXTRA_ARGS" == *"--t2 "* ]] && [[ "$FASTSURFER_EXTRA_ARGS" != *"--reg_mode none"* ]]; then
-    return 0
-  fi
-  return 1
-}
-
-build_list_from_in_root() {
-  local in_root="$1"
-  local out_list="$2"
-  local nii_link series sess_id target
-
-  echo -e "sess_id\tseries\tnii_link\ttarget" > "$out_list"
-
-  while IFS= read -r nii_link; do
-    [[ -n "$nii_link" ]] || continue
-    series="$(basename "$(dirname "$nii_link")")"
-    sess_id="$(basename "$(dirname "$(dirname "$nii_link")")")"
-    target="$(readlink -f "$nii_link" 2>/dev/null || true)"
-    [[ -n "$target" ]] || target="$nii_link"
-    echo -e "${sess_id}\t${series}\t${nii_link}\t${target}" >> "$out_list"
-  done < <(find -L "$in_root" -type f -name "T1.nii.gz" | sort)
-}
-
 if command -v module >/dev/null 2>&1; then
-  module purge >/dev/null 2>&1 || true
-  module load "$FASTSURFER_MODULE" >/dev/null 2>&1 || true
-  module load "$FREESURFER_MODULE" >/dev/null 2>&1 || true
+    module purge >/dev/null 2>&1 || true
+    module load apptainer/1.4.0 >/dev/null 2>&1 || true
+    module load singularity/1.4.0 >/dev/null 2>&1 || true
 fi
 
-RUNNER="$(resolve_runner || true)"
-[[ -n "$RUNNER" ]] || die "cannot find FastSurfer runner. Set FASTSURFER_RUNNER or FASTSURFER_HOME."
-
-if [[ -z "$FASTSURFER_PY" ]]; then
-  if [[ -n "${FASTSURFER_HOME:-}" && -x "$FASTSURFER_HOME/.venv/bin/python3" ]]; then
-    FASTSURFER_PY="$FASTSURFER_HOME/.venv/bin/python3"
-  elif [[ -n "${FASTSURFER_HOME:-}" && -x "$FASTSURFER_HOME/.venv/bin/python" ]]; then
-    FASTSURFER_PY="$FASTSURFER_HOME/.venv/bin/python"
-  fi
-fi
-
-TMP_LIST=""
-trap cleanup EXIT
-
-if [[ -n "$LIST" ]]; then
-  [[ -f "$LIST" ]] || die "LIST is set but file does not exist: $LIST"
-  INPUT_LIST="$LIST"
+if command -v apptainer >/dev/null 2>&1; then
+    CTR=apptainer
+elif command -v singularity >/dev/null 2>&1; then
+    CTR=singularity
 else
-  [[ -d "$IN_ROOT" ]] || die "IN_ROOT does not exist: $IN_ROOT"
-  TMP_LIST="$(mktemp /tmp/dian_geom_all_t1_list.XXXXXX.tsv)"
-  build_list_from_in_root "$IN_ROOT" "$TMP_LIST"
-  INPUT_LIST="$TMP_LIST"
+    echo "[FATAL] apptainer/singularity not found" >&2
+    exit 1
 fi
 
-[[ -f "$INPUT_LIST" ]] || die "missing input list: $INPUT_LIST"
+echo "[INFO] container runtime: $CTR"
+echo "[INFO] input root:        $IN_ROOT"
+echo "[INFO] output root:       $OUT_ROOT"
+echo "[INFO] sif image:         $SIF_IMAGE"
+echo "[INFO] extra args:        $EXTRA_ARGS"
 
-task_id="${SLURM_ARRAY_TASK_ID:-${TASK_ID:-}}"
-[[ -n "${task_id}" ]] || die "SLURM_ARRAY_TASK_ID is not set (or provide TASK_ID)."
-
-line="$(awk -v n="$task_id" 'NR==n+1{print}' "$INPUT_LIST")"
-[[ -n "$line" ]] || { echo "[INFO] no list entry for task_id=$task_id"; exit 0; }
-
-sess_id="$(echo "$line" | cut -f1)"
-series="$(echo "$line" | cut -f2)"
-nii="$(echo "$line" | cut -f4)"
-[[ -f "$nii" ]] || die "input T1 does not exist: $nii"
-
-series_safe="$(echo "$series" | sed -E 's/[^A-Za-z0-9._-]+/_/g')"
-FSID="${sess_id}__${series_safe}"
-OUT="$EXPORT_ROOT/$FSID"
-
-mkdir -p "$SUBJECTS_DIR" "$OUT"
-export SUBJECTS_DIR
-license_required=0
-if need_fs_license; then
-  license_required=1
+# -------- build image once if missing --------
+if [[ ! -f "$SIF_IMAGE" ]]; then
+    echo "[INFO] building FastSurfer image: $SIF_IMAGE"
+    "$CTR" build "$SIF_IMAGE" "$FASTSURFER_IMAGE_SOURCE"
 fi
 
-if (( license_required )); then
-  [[ -f "$FS_LICENSE" ]] || die "FreeSurfer license required but missing: $FS_LICENSE"
-  export FS_LICENSE
-else
-  if [[ -f "$FS_LICENSE" ]]; then
-    export FS_LICENSE
-  else
-    warn "FS_LICENSE not found at $FS_LICENSE; proceeding in seg_only mode."
-  fi
+# -------- bind only what we need --------
+BIND_PATHS="$IN_ROOT:$IN_ROOT,$OUT_ROOT:$OUT_ROOT"
+
+# -------- collect all T1 files --------
+mapfile -t T1S < <(find "$IN_ROOT" -type f -name 'T1.nii.gz' | sort)
+N=${#T1S[@]}
+
+echo "[INFO] found $N T1 files"
+if [[ "$N" -eq 0 ]]; then
+    echo "[FATAL] no T1.nii.gz found under $IN_ROOT" >&2
+    exit 1
 fi
 
-if [[ "$SKIP_IF_DONE" == "1" ]] \
-  && [[ -s "$OUT/T1_fs_orig.nii.gz" ]] \
-  && [[ -s "$OUT/brainmask.nii.gz" ]] \
-  && [[ -s "$OUT/aseg.nii.gz" ]] \
-  && [[ -s "$OUT/aparc_aseg.nii.gz" ]]; then
-  echo "[SKIP] FSID=$FSID already exported."
-  exit 0
-fi
+# -------- loop subjects --------
+DONE=0
+SKIPPED=0
+FAILED=0
 
-echo "[INFO] FSID=$FSID"
-echo "[INFO] T1=$nii"
-echo "[INFO] FASTSURFER_MODE=$FASTSURFER_MODE FASTSURFER_DEVICE=$FASTSURFER_DEVICE"
-echo "[INFO] Runner=$RUNNER"
-echo "[INFO] INPUT_LIST=$INPUT_LIST"
-echo "[INFO] EXPORT_ROOT=$EXPORT_ROOT"
-echo "[INFO] Start: $(date)"
+for T1 in "${T1S[@]}"; do
+    REL_DIR="${T1#$IN_ROOT/}"
+    REL_DIR="$(dirname "$REL_DIR")"
+    SID="$(echo "$REL_DIR" | sed 's#/#__#g')"
 
-cmd=(
-  "$RUNNER"
-  --t1 "$nii"
-  --sid "$FSID"
-  --sd "$SUBJECTS_DIR"
-  --device "$FASTSURFER_DEVICE"
-  --threads "${SLURM_CPUS_PER_TASK:-4}"
-)
+    SUBJECT_DIR="$OUT_ROOT/$SID"
+    MRI_DIR="$SUBJECT_DIR/mri"
 
-if [[ -f "$FS_LICENSE" ]]; then
-  cmd+=(--fs_license "$FS_LICENSE")
-fi
+    echo ""
+    echo "============================================================"
+    echo "[INFO] subject: $SID"
+    echo "[INFO] T1:      $T1"
+    echo "[INFO] out:     $SUBJECT_DIR"
+    echo "============================================================"
 
-if [[ -n "$FASTSURFER_PY" ]]; then
-  cmd+=(--py "$FASTSURFER_PY")
-fi
+    if [[ "$SKIP_DONE" == "1" && -f "$SUBJECT_DIR/aparc_aseg.nii.gz" && -f "$SUBJECT_DIR/aseg.nii.gz" ]]; then
+        echo "[SKIP] outputs already exist"
+        SKIPPED=$((SKIPPED+1))
+        continue
+    fi
 
-case "$FASTSURFER_MODE" in
-  seg_only) cmd+=(--seg_only) ;;
-  full) ;;
-  *) die "FASTSURFER_MODE must be seg_only or full (got: $FASTSURFER_MODE)" ;;
-esac
+    mkdir -p "$SUBJECT_DIR"
 
-if [[ -n "$FASTSURFER_EXTRA_ARGS" ]]; then
-  # Intentionally split FASTSURFER_EXTRA_ARGS on spaces (e.g., "--3T --no_hypothal").
-  # shellcheck disable=SC2206
-  extra=( $FASTSURFER_EXTRA_ARGS )
-  cmd+=("${extra[@]}")
-fi
+    if "$CTR" exec --nv --no-mount home,cwd -e \
+        -B "$BIND_PATHS" \
+        "$SIF_IMAGE" \
+        /fastsurfer/run_fastsurfer.sh \
+        --t1 "$T1" \
+        --sid "$SID" \
+        --sd "$OUT_ROOT" \
+        --device cuda \
+        --threads "$THREADS" \
+        --seg_only \
+        $EXTRA_ARGS
+    then
+        echo "[INFO] segmentation finished for $SID"
+    else
+        echo "[ERROR] FastSurfer failed for $SID" >&2
+        FAILED=$((FAILED+1))
+        continue
+    fi
 
-echo "[INFO] Running FastSurfer command:"
-echo "       ${cmd[*]}"
-"${cmd[@]}"
+    if [[ ! -d "$MRI_DIR" ]]; then
+        echo "[ERROR] missing mri dir: $MRI_DIR" >&2
+        FAILED=$((FAILED+1))
+        continue
+    fi
 
-mri_dir="$SUBJECTS_DIR/$FSID/mri"
-[[ -d "$mri_dir" ]] || die "missing output dir: $mri_dir"
+    # export the main outputs to nii.gz
+    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MRI_DIR/orig.mgz" "$SUBJECT_DIR/T1_fs_orig.nii.gz"
+    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MRI_DIR/mask.mgz" "$SUBJECT_DIR/brainmask.nii.gz"
+    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MRI_DIR/aseg.auto_noCCseg.mgz" "$SUBJECT_DIR/aseg.nii.gz"
+    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MRI_DIR/aparc.DKTatlas+aseg.deep.mgz" "$SUBJECT_DIR/aparc_aseg.nii.gz"
 
-orig_src="$(pick_first_existing "$mri_dir/orig.mgz")" \
-  || die "missing orig mgz in $mri_dir"
-brainmask_src="$(pick_first_existing "$mri_dir/brainmask.mgz" "$mri_dir/mask.mgz")" \
-  || die "missing brainmask output in $mri_dir"
-aseg_src="$(pick_first_existing "$mri_dir/aseg.mgz" "$mri_dir/aseg.auto_noCCseg.mgz")" \
-  || die "missing aseg output in $mri_dir"
-aparc_src="$(pick_first_existing \
-  "$mri_dir/aparc+aseg.mgz" \
-  "$mri_dir/aparc.DKTatlas+aseg.mgz" \
-  "$mri_dir/aparc.DKTatlas+aseg.mapped.mgz" \
-  "$mri_dir/aparc.DKTatlas+aseg.deep.withCC.mgz" \
-  "$mri_dir/aparc.DKTatlas+aseg.deep.mgz")" \
-  || die "missing aparc+aseg output in $mri_dir"
+    DONE=$((DONE+1))
+    echo "[OK] exported NIfTI files for $SID"
+done
 
-convert_mgz_to_nii() {
-  local src="$1"
-  local dst="$2"
-  if command -v mri_convert >/dev/null 2>&1; then
-    mri_convert "$src" "$dst"
-    return 0
-  fi
-  python3 - "$src" "$dst" <<'PY'
-import sys
-try:
-    import nibabel as nib
-except Exception as e:
-    print(f"[FATAL] nibabel import failed: {e}", file=sys.stderr)
-    sys.exit(3)
-src, dst = sys.argv[1], sys.argv[2]
-img = nib.load(src)
-nib.save(img, dst)
-PY
-}
+echo ""
+echo "==================== SUMMARY ===================="
+echo "[INFO] done:    $DONE"
+echo "[INFO] skipped: $SKIPPED"
+echo "[INFO] failed:  $FAILED"
+echo "[INFO] finished at: $(date)"
+echo "================================================="
 
-convert_mgz_to_nii "$orig_src"      "$OUT/T1_fs_orig.nii.gz"
-convert_mgz_to_nii "$brainmask_src" "$OUT/brainmask.nii.gz"
-convert_mgz_to_nii "$aseg_src"      "$OUT/aseg.nii.gz"
-convert_mgz_to_nii "$aparc_src"     "$OUT/aparc_aseg.nii.gz"
-
-{
-  echo -e "output\tinput"
-  echo -e "T1_fs_orig.nii.gz\t$orig_src"
-  echo -e "brainmask.nii.gz\t$brainmask_src"
-  echo -e "aseg.nii.gz\t$aseg_src"
-  echo -e "aparc_aseg.nii.gz\t$aparc_src"
-} > "$OUT/export_sources.tsv"
 
 echo "[OK] Exported: $OUT"
 echo "[INFO] Finished: $(date)"
