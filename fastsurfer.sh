@@ -17,7 +17,7 @@ set -euo pipefail
 IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"
 OUT_ROOT="${OUT_ROOT:-/scratch/l.peiwang/fastsurfer_simple_out}"
 SIF_IMAGE="${SIF_IMAGE:-/scratch/l.peiwang/fastsurfer-gpu.sif}"
-FASTSURFER_IMAGE_SOURCE="${FASTSURFER_IMAGE_SOURCE:-docker://deepmi/fastsurfer:cuda-v2.5.0}"
+FASTSURFER_IMAGE_SOURCE="${FASTSURFER_IMAGE_SOURCE:-docker://deepmi/fastsurfer:latest}"
 
 # optional
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-8}}"
