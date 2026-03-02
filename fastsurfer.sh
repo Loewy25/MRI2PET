@@ -11,18 +11,22 @@
 
 set -euo pipefail
 
-# =========================
-# edit these lines if needed
-# =========================
+# ============================================================
+# Required paths (can be overridden with sbatch --export=ALL,...)
+# ============================================================
 IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"
 OUT_ROOT="${OUT_ROOT:-/scratch/l.peiwang/fastsurfer_simple_out}"
 SIF_IMAGE="${SIF_IMAGE:-/scratch/l.peiwang/fastsurfer-gpu.sif}"
 IMAGE_SRC="${IMAGE_SRC:-docker://deepmi/fastsurfer:latest}"
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-8}}"
 SKIP_DONE="${SKIP_DONE:-1}"
+ONLY_SUBJECT="${ONLY_SUBJECT:-}"
 
-# FastSurfer args kept intentionally simple
-FS_EXTRA_ARGS=(--native_image --no_cereb --no_hypothal --no_cc)
+# Bind broad scratch/ceph roots so symlinks do not become invisible in-container.
+BIND_PATHS="${BIND_PATHS:-/scratch:/scratch}"
+if [[ -d /ceph ]]; then
+    BIND_PATHS="${BIND_PATHS},/ceph:/ceph"
+fi
 
 pick_first_existing() {
     local p
@@ -35,9 +39,33 @@ pick_first_existing() {
     return 1
 }
 
-# -------------------------
-# load apptainer/singularity
-# -------------------------
+# Prefer non-repeat scans if several T1s exist, otherwise use first sorted.
+choose_t1() {
+    local -n arr_ref=$1
+    local f low
+    local preferred=()
+
+    if [[ ${#arr_ref[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for f in "${arr_ref[@]}"; do
+        low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$low" != *repeat* ]]; then
+            preferred+=("$f")
+        fi
+    done
+
+    if [[ ${#preferred[@]} -gt 0 ]]; then
+        echo "${preferred[0]}"
+    else
+        echo "${arr_ref[0]}"
+    fi
+}
+
+# ------------------------------------------------------------
+# Load Apptainer / Singularity
+# ------------------------------------------------------------
 set +u
 for f in /etc/profile.d/modules.sh \
          /usr/share/Modules/init/bash \
@@ -63,27 +91,32 @@ fi
 
 mkdir -p "$OUT_ROOT"
 
-# build container once if missing
 if [[ ! -f "$SIF_IMAGE" ]]; then
     echo "[INFO] SIF not found, building: $SIF_IMAGE"
     echo "[INFO] source image: $IMAGE_SRC"
     "$CTR" build "$SIF_IMAGE" "$IMAGE_SRC"
 fi
 
-# bind only what the container needs to see
-BIND_PATHS="$IN_ROOT:$IN_ROOT,$OUT_ROOT:$OUT_ROOT"
+# Prevent container startup from trying to chdir into a missing home path.
+cd /tmp
 
-echo "[INFO] runtime:   $CTR"
-echo "[INFO] IN_ROOT:   $IN_ROOT"
-echo "[INFO] OUT_ROOT:  $OUT_ROOT"
-echo "[INFO] SIF_IMAGE: $SIF_IMAGE"
-echo "[INFO] THREADS:   $THREADS"
-echo "[INFO] starting:  $(date)"
+echo "[INFO] runtime:      $CTR"
+echo "[INFO] IN_ROOT:      $IN_ROOT"
+echo "[INFO] OUT_ROOT:     $OUT_ROOT"
+echo "[INFO] SIF_IMAGE:    $SIF_IMAGE"
+echo "[INFO] IMAGE_SRC:    $IMAGE_SRC"
+echo "[INFO] THREADS:      $THREADS"
+echo "[INFO] BIND_PATHS:   $BIND_PATHS"
+echo "[INFO] ONLY_SUBJECT: ${ONLY_SUBJECT:-<all>}"
+echo "[INFO] starting:     $(date)"
 
 declare -a SUBJECT_DIRS=()
 shopt -s nullglob
 for d in "$IN_ROOT"/*; do
     [[ -d "$d" ]] || continue
+    if [[ -n "$ONLY_SUBJECT" && "$(basename "$d")" != "$ONLY_SUBJECT" ]]; then
+        continue
+    fi
     SUBJECT_DIRS+=("$d")
 done
 shopt -u nullglob
@@ -124,10 +157,10 @@ for SUB in "${SUBJECT_DIRS[@]}"; do
     if [[ ${#T1S[@]} -gt 1 ]]; then
         echo "[WARN] multiple T1.nii.gz files found under $SUB"
         printf '       %s\n' "${T1S[@]}"
-        echo "[WARN] using the first one only"
+        echo "[WARN] preferring first non-repeat path, otherwise first sorted path"
     fi
 
-    T1="${T1S[0]}"
+    T1="$(choose_t1 T1S)"
 
     echo "[INFO] chosen T1:      $T1"
     echo "[INFO] output folder:  $OUT_SUB"
@@ -141,7 +174,7 @@ for SUB in "${SUBJECT_DIRS[@]}"; do
     mkdir -p "$OUT_SUB"
 
     echo "[INFO] running FastSurfer..."
-    if ! "$CTR" exec --nv --no-mount home,cwd -e \
+    if ! "$CTR" exec --nv --no-home -e \
         -B "$BIND_PATHS" \
         "$SIF_IMAGE" \
         /fastsurfer/run_fastsurfer.sh \
@@ -151,7 +184,8 @@ for SUB in "${SUBJECT_DIRS[@]}"; do
         --device cuda \
         --threads "$THREADS" \
         --seg_only \
-        "${FS_EXTRA_ARGS[@]}"; then
+        --no_cereb \
+        --no_hypothal; then
         echo "[ERROR] FastSurfer failed for $SID" >&2
         FAILED=$((FAILED + 1))
         continue
@@ -173,22 +207,25 @@ for SUB in "${SUBJECT_DIRS[@]}"; do
         FAILED=$((FAILED + 1))
         continue
     }
-    ASEG_MGZ="$(pick_first_existing "$MRI_DIR/aseg.auto_noCCseg.mgz" "$MRI_DIR/aseg.mgz")" || {
+    ASEG_MGZ="$(pick_first_existing "$MRI_DIR/aseg.mgz" "$MRI_DIR/aseg.auto_noCCseg.mgz")" || {
         echo "[ERROR] missing aseg mgz for $SID" >&2
         FAILED=$((FAILED + 1))
         continue
     }
-    APARC_MGZ="$(pick_first_existing "$MRI_DIR/aparc.DKTatlas+aseg.deep.mgz" "$MRI_DIR/aparc.DKTatlas+aseg.mapped.mgz" "$MRI_DIR/aparc+aseg.mgz")" || {
+    APARC_MGZ="$(pick_first_existing \
+        "$MRI_DIR/aparc.DKTatlas+aseg.deep.mgz" \
+        "$MRI_DIR/aparc.DKTatlas+aseg.mapped.mgz" \
+        "$MRI_DIR/aparc+aseg.mgz")" || {
         echo "[ERROR] missing aparc+aseg mgz for $SID" >&2
         FAILED=$((FAILED + 1))
         continue
     }
 
     echo "[INFO] exporting NIfTI files..."
-    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$ORIG_MGZ"  "$OUT_SUB/T1_fs_orig.nii.gz"
-    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MASK_MGZ"  "$OUT_SUB/brainmask.nii.gz"
-    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$ASEG_MGZ"  "$OUT_SUB/aseg.nii.gz"
-    "$CTR" exec -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$APARC_MGZ" "$OUT_SUB/aparc_aseg.nii.gz"
+    "$CTR" exec --no-home -e -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$ORIG_MGZ"  "$OUT_SUB/T1_fs_orig.nii.gz"
+    "$CTR" exec --no-home -e -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$MASK_MGZ"  "$OUT_SUB/brainmask.nii.gz"
+    "$CTR" exec --no-home -e -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$ASEG_MGZ"  "$OUT_SUB/aseg.nii.gz"
+    "$CTR" exec --no-home -e -B "$BIND_PATHS" "$SIF_IMAGE" mri_convert "$APARC_MGZ" "$OUT_SUB/aparc_aseg.nii.gz"
 
     DONE=$((DONE + 1))
     echo "[OK] finished $SID"
