@@ -6,21 +6,29 @@
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --output=slurm-%j_fastsurfer.out
-#SBATCH --error=slurm-%j_fastsurfer.out
+#SBATCH --array=0-9
+#SBATCH --output=slurm-%A_%a_fastsurfer.out
+#SBATCH --error=slurm-%A_%a_fastsurfer.out
 
 set -euo pipefail
 
 # ============================================================
-# Config (override with: sbatch --export=ALL,IN_ROOT=...,OUT_ROOT=... script.sh)
+# Config
 # ============================================================
-IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"                  # contains subject folders
-OUT_ROOT="${OUT_ROOT:-/scratch/l.peiwang/fastsurfer_simple_out}"     # FastSurfer --sd
-SIF_IMAGE="${SIF_IMAGE:-/scratch/l.peiwang/fastsurfer-gpu.sif}"      # built .sif
-IMAGE_SRC="${IMAGE_SRC:-docker://deepmi/fastsurfer:latest}"          # for building sif if missing
+IN_ROOT="${IN_ROOT:-/scratch/l.peiwang/DIAN_geom}"                   # contains top-level subject folders
+OUT_ROOT="${OUT_ROOT:-/scratch/l.peiwang/fastsurfer_simple_out}"     # output root (will mirror IN_ROOT hierarchy)
+SIF_IMAGE="${SIF_IMAGE:-/scratch/l.peiwang/fastsurfer-gpu.sif}"      # prebuilt .sif (must exist)
+IMAGE_SRC="${IMAGE_SRC:-docker://deepmi/fastsurfer:latest}"          # only for manual one-time build outside array jobs
 THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-8}}"
 SKIP_DONE="${SKIP_DONE:-1}"
-ONLY_SUBJECT="${ONLY_SUBJECT:-}"                                    # optional: run only one folder name
+ONLY_SUBJECT="${ONLY_SUBJECT:-}"                                     # optional: restrict to one top-level folder
+
+# Constant sid INSIDE each mirrored folder (safe because --sd is unique per scan folder)
+FS_SID="${FS_SID:-fastsurfer}"
+
+# Split across 10 array tasks
+N_SPLITS=10
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 
 # FreeSurfer license on HOST (must exist). We bind it into container at /fs_license.txt
 FS_LICENSE_HOST="${FS_LICENSE_HOST:-/ceph/chpc/mapped/brier/software/freesurfer/license.txt}"
@@ -41,22 +49,6 @@ pick_first_existing() {
     [[ -f "$p" ]] && { echo "$p"; return 0; }
   done
   return 1
-}
-
-# Prefer a non-"repeat" T1 if multiple; else first sorted.
-choose_t1() {
-  local -n arr_ref=$1
-  local f low
-  local preferred=()
-  for f in "${arr_ref[@]}"; do
-    low="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"
-    [[ "$low" == *repeat* ]] || preferred+=("$f")
-  done
-  if [[ ${#preferred[@]} -gt 0 ]]; then
-    echo "${preferred[0]}"
-  else
-    echo "${arr_ref[0]}"
-  fi
 }
 
 convert_mgz_to_nii() {
@@ -108,28 +100,36 @@ mkdir -p "$OUT_ROOT"
   exit 2
 }
 
-# Build SIF once if missing
+# For an array job, require the image to already exist.
 if [[ ! -f "$SIF_IMAGE" ]]; then
-  echo "[INFO] SIF missing, building: $SIF_IMAGE"
-  echo "[INFO] from: $IMAGE_SRC"
-  "$CTR" build "$SIF_IMAGE" "$IMAGE_SRC"
+  echo "[FATAL] SIF missing: $SIF_IMAGE" >&2
+  echo "        Build it once before submitting the 10-task array." >&2
+  echo "        Example: $CTR build $SIF_IMAGE $IMAGE_SRC" >&2
+  exit 2
+fi
+
+if ! [[ "$TASK_ID" =~ ^[0-9]+$ ]] || (( TASK_ID < 0 || TASK_ID >= N_SPLITS )); then
+  echo "[FATAL] TASK_ID must be in 0..$((N_SPLITS - 1)); got: $TASK_ID" >&2
+  exit 2
 fi
 
 # Avoid container warning about missing /home/...
 cd /tmp
 
-echo "[INFO] runtime:        $CTR"
-echo "[INFO] IN_ROOT:        $IN_ROOT"
-echo "[INFO] OUT_ROOT:       $OUT_ROOT"
-echo "[INFO] SIF_IMAGE:      $SIF_IMAGE"
-echo "[INFO] THREADS:        $THREADS"
-echo "[INFO] BIND_PATHS:     $BIND_PATHS"
-echo "[INFO] FS_LICENSE_HOST $FS_LICENSE_HOST -> $FS_LICENSE_IN (in container)"
-echo "[INFO] ONLY_SUBJECT:   ${ONLY_SUBJECT:-<all>}"
-echo "[INFO] start:          $(date)"
+echo "[INFO] runtime:         $CTR"
+echo "[INFO] IN_ROOT:         $IN_ROOT"
+echo "[INFO] OUT_ROOT:        $OUT_ROOT"
+echo "[INFO] SIF_IMAGE:       $SIF_IMAGE"
+echo "[INFO] THREADS:         $THREADS"
+echo "[INFO] BIND_PATHS:      $BIND_PATHS"
+echo "[INFO] FS_LICENSE_HOST: $FS_LICENSE_HOST -> $FS_LICENSE_IN (in container)"
+echo "[INFO] ONLY_SUBJECT:    ${ONLY_SUBJECT:-<all>}"
+echo "[INFO] task:            $((TASK_ID + 1))/$N_SPLITS"
+echo "[INFO] FS_SID:          $FS_SID"
+echo "[INFO] start:           $(date)"
 
 # ============================================================
-# Enumerate subject folders (immediate children)
+# Enumerate top-level subject folders (immediate children)
 # ============================================================
 declare -a SUBJECT_DIRS=()
 shopt -s nullglob
@@ -147,28 +147,31 @@ if [[ ${#SUBJECT_DIRS[@]} -eq 0 ]]; then
   exit 3
 fi
 
-echo "[INFO] found ${#SUBJECT_DIRS[@]} subject folders."
+echo "[INFO] total matching subject folders: ${#SUBJECT_DIRS[@]}"
 
 DONE=0
 SKIPPED_DONE=0
 SKIPPED_NO_T1=0
 FAILED=0
+ASSIGNED_SUBJECTS=0
+DISCOVERED_T1=0
 
 # ============================================================
 # Main loop
+# Split top-level subject folders across 10 tasks by index % 10
 # ============================================================
-for SUB in "${SUBJECT_DIRS[@]}"; do
-  SUB_NAME="$(basename "$SUB")"
-  SID="$(echo "$SUB_NAME" | sed -E 's/[^A-Za-z0-9._-]+/_/g')"
-  OUT_SUB="$OUT_ROOT/$SID"
-  MRI_DIR="$OUT_SUB/mri"
+for i in "${!SUBJECT_DIRS[@]}"; do
+  (( i % N_SPLITS == TASK_ID )) || continue
+  ASSIGNED_SUBJECTS=$((ASSIGNED_SUBJECTS + 1))
+
+  SUB="${SUBJECT_DIRS[$i]}"
 
   echo ""
   echo "============================================================"
   echo "[INFO] subject folder: $SUB"
-  echo "[INFO] subject id:     $SID"
   echo "============================================================"
 
+  # Process ALL T1.nii.gz files found anywhere under this subject folder
   mapfile -t T1S < <(find -L "$SUB" -type f -name 'T1.nii.gz' | sort)
 
   if [[ ${#T1S[@]} -eq 0 ]]; then
@@ -177,68 +180,94 @@ for SUB in "${SUBJECT_DIRS[@]}"; do
     continue
   fi
 
+  DISCOVERED_T1=$((DISCOVERED_T1 + ${#T1S[@]}))
+
+  echo "[INFO] found ${#T1S[@]} T1.nii.gz file(s) under this subject folder."
   if [[ ${#T1S[@]} -gt 1 ]]; then
-    echo "[WARN] multiple T1.nii.gz found:"
     printf '       %s\n' "${T1S[@]}"
-    echo "[WARN] choosing first non-repeat (else first sorted)"
   fi
 
-  T1="$(choose_t1 T1S)"
-  echo "[INFO] chosen T1:      $T1"
-  echo "[INFO] output folder:  $OUT_SUB"
+  for T1 in "${T1S[@]}"; do
+    # --------- CHANGED LOGIC STARTS HERE ----------
+    # Mirror hierarchy: OUT_ROOT/<relative path to folder containing T1>
+    if [[ "$T1" != "$IN_ROOT/"* ]]; then
+      echo "[ERROR] T1 is not under IN_ROOT; skip: $T1" >&2
+      FAILED=$((FAILED + 1))
+      continue
+    fi
 
-  if [[ "$SKIP_DONE" == "1" && -f "$OUT_SUB/aseg.nii.gz" && -f "$OUT_SUB/aparc_aseg.nii.gz" ]]; then
-    echo "[SKIP] outputs already exist"
-    SKIPPED_DONE=$((SKIPPED_DONE + 1))
-    continue
-  fi
+    REL_PATH="${T1#$IN_ROOT/}"          # e.g., subject001/scan2/T1.nii.gz
+    REL_DIR="$(dirname "$REL_PATH")"    # e.g., subject001/scan2
+    SD="$OUT_ROOT/$REL_DIR"             # mirrored output directory for this scan
+    SID="$FS_SID"                       # constant inside each SD
+    OUT_SUB="$SD"                       # where we place exported .nii.gz
+    MRI_DIR="$SD/$SID/mri"              # FastSurfer writes into --sd/--sid/mri
+    # --------- CHANGED LOGIC ENDS HERE ----------
 
-  mkdir -p "$OUT_SUB"
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "[INFO] T1 path:        $T1"
+    echo "[INFO] mirrored OUT:   $OUT_SUB"
+    echo "[INFO] fastsurfer sd:  $SD"
+    echo "[INFO] fastsurfer sid: $SID"
+    echo "------------------------------------------------------------"
 
-  echo "[INFO] running FastSurfer (seg_only, GPU)..."
-  if ! "$CTR" exec --nv --no-home -e \
-      -B "$BIND_PATHS" \
-      "$SIF_IMAGE" \
-      /fastsurfer/run_fastsurfer.sh \
-      --t1 "$T1" \
-      --sid "$SID" \
-      --sd "$OUT_ROOT" \
-      --device cuda \
-      --threads "$THREADS" \
-      --seg_only \
-      --no_cereb \
-      --no_hypothal; then
-    echo "[ERROR] FastSurfer failed for $SID" >&2
-    FAILED=$((FAILED + 1))
-    continue
-  fi
+    if [[ "$SKIP_DONE" == "1" && -f "$OUT_SUB/aseg.nii.gz" && -f "$OUT_SUB/aparc_aseg.nii.gz" ]]; then
+      echo "[SKIP] outputs already exist"
+      SKIPPED_DONE=$((SKIPPED_DONE + 1))
+      continue
+    fi
 
-  [[ -d "$MRI_DIR" ]] || { echo "[ERROR] missing MRI dir: $MRI_DIR" >&2; FAILED=$((FAILED + 1)); continue; }
+    mkdir -p "$SD"
 
-  # FastSurfer seg_only outputs
-  ORIG_MGZ="$(pick_first_existing "$MRI_DIR/orig.mgz")" || { echo "[ERROR] missing orig.mgz" >&2; FAILED=$((FAILED + 1)); continue; }
-  MASK_MGZ="$(pick_first_existing "$MRI_DIR/mask.mgz" "$MRI_DIR/brainmask.mgz")" || { echo "[ERROR] missing mask/brainmask mgz" >&2; FAILED=$((FAILED + 1)); continue; }
-  ASEG_MGZ="$(pick_first_existing "$MRI_DIR/aseg.auto_noCCseg.mgz" "$MRI_DIR/aseg.mgz")" || { echo "[ERROR] missing aseg mgz" >&2; FAILED=$((FAILED + 1)); continue; }
-  APARC_MGZ="$(pick_first_existing \
-      "$MRI_DIR/aparc.DKTatlas+aseg.deep.mgz" \
-      "$MRI_DIR/aparc.DKTatlas+aseg.mapped.mgz" \
-      "$MRI_DIR/aparc+aseg.mgz")" || { echo "[ERROR] missing aparc+aseg mgz" >&2; FAILED=$((FAILED + 1)); continue; }
+    echo "[INFO] running FastSurfer (seg_only, GPU)..."
+    if ! "$CTR" exec --nv --no-home -e \
+        -B "$BIND_PATHS" \
+        "$SIF_IMAGE" \
+        /fastsurfer/run_fastsurfer.sh \
+        --t1 "$T1" \
+        --sid "$SID" \
+        --sd "$SD" \
+        --device cuda \
+        --threads "$THREADS" \
+        --seg_only \
+        --no_cereb \
+        --no_hypothal; then
+      echo "[ERROR] FastSurfer failed for $SD (T1=$T1)" >&2
+      FAILED=$((FAILED + 1))
+      continue
+    fi
 
-  echo "[INFO] exporting NIfTI (.nii.gz) via mri_convert (license bound into container)..."
-  convert_mgz_to_nii "$ORIG_MGZ"  "$OUT_SUB/T1_fs_orig.nii.gz"
-  convert_mgz_to_nii "$MASK_MGZ"  "$OUT_SUB/brainmask.nii.gz"
-  convert_mgz_to_nii "$ASEG_MGZ"  "$OUT_SUB/aseg.nii.gz"
-  convert_mgz_to_nii "$APARC_MGZ" "$OUT_SUB/aparc_aseg.nii.gz"
+    [[ -d "$MRI_DIR" ]] || { echo "[ERROR] missing MRI dir: $MRI_DIR" >&2; FAILED=$((FAILED + 1)); continue; }
 
-  DONE=$((DONE + 1))
-  echo "[OK] finished $SID"
+    # FastSurfer seg_only outputs (under SD/SID/mri)
+    ORIG_MGZ="$(pick_first_existing "$MRI_DIR/orig.mgz")" || { echo "[ERROR] missing orig.mgz" >&2; FAILED=$((FAILED + 1)); continue; }
+    MASK_MGZ="$(pick_first_existing "$MRI_DIR/mask.mgz" "$MRI_DIR/brainmask.mgz")" || { echo "[ERROR] missing mask/brainmask mgz" >&2; FAILED=$((FAILED + 1)); continue; }
+    ASEG_MGZ="$(pick_first_existing "$MRI_DIR/aseg.auto_noCCseg.mgz" "$MRI_DIR/aseg.mgz")" || { echo "[ERROR] missing aseg mgz" >&2; FAILED=$((FAILED + 1)); continue; }
+    APARC_MGZ="$(pick_first_existing \
+        "$MRI_DIR/aparc.DKTatlas+aseg.deep.mgz" \
+        "$MRI_DIR/aparc.DKTatlas+aseg.mapped.mgz" \
+        "$MRI_DIR/aparc+aseg.mgz")" || { echo "[ERROR] missing aparc+aseg mgz" >&2; FAILED=$((FAILED + 1)); continue; }
+
+    echo "[INFO] exporting NIfTI (.nii.gz) via mri_convert (license bound into container)..."
+    convert_mgz_to_nii "$ORIG_MGZ"  "$OUT_SUB/T1_fs_orig.nii.gz"
+    convert_mgz_to_nii "$MASK_MGZ"  "$OUT_SUB/brainmask.nii.gz"
+    convert_mgz_to_nii "$ASEG_MGZ"  "$OUT_SUB/aseg.nii.gz"
+    convert_mgz_to_nii "$APARC_MGZ" "$OUT_SUB/aparc_aseg.nii.gz"
+
+    DONE=$((DONE + 1))
+    echo "[OK] finished $OUT_SUB"
+  done
 done
 
 echo ""
 echo "==================== SUMMARY ===================="
-echo "[INFO] done:            $DONE"
-echo "[INFO] skipped done:    $SKIPPED_DONE"
-echo "[INFO] skipped no T1:   $SKIPPED_NO_T1"
-echo "[INFO] failed:          $FAILED"
-echo "[INFO] finished at:     $(date)"
+echo "[INFO] task:             $((TASK_ID + 1))/$N_SPLITS"
+echo "[INFO] assigned folders: $ASSIGNED_SUBJECTS"
+echo "[INFO] discovered T1s:   $DISCOVERED_T1"
+echo "[INFO] done:             $DONE"
+echo "[INFO] skipped done:     $SKIPPED_DONE"
+echo "[INFO] skipped no T1:    $SKIPPED_NO_T1"
+echo "[INFO] failed:           $FAILED"
+echo "[INFO] finished at:      $(date)"
 echo "================================================="
