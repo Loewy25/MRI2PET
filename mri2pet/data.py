@@ -1,4 +1,4 @@
-import os, glob
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import nibabel as nib
@@ -53,14 +53,9 @@ class KariAV1451Dataset(Dataset):
         self.root_dir = root_dir
         self.resize_to = resize_to
 
-        patterns = [
-            os.path.join(root_dir, "*_av1451_*"),
-            os.path.join(root_dir, "*_AV1451_*"),
-        ]
-        subjects: List[str] = []
-        for p in patterns:
-            subjects.extend(glob.glob(p))
-        subjects = sorted([d for d in subjects if os.path.isdir(d)])
+        subjects = sorted(
+            entry.path for entry in os.scandir(root_dir) if entry.is_dir()
+        )
 
         self.items: List[Tuple[str,str,Optional[str]]] = []
         for d in subjects:
