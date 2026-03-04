@@ -10,7 +10,6 @@ Split logic and label logic are intentionally unchanged.
 """
 
 import os
-import glob
 import csv
 import argparse
 import random
@@ -75,21 +74,29 @@ def find_dataset_root() -> str:
 
 
 def list_subject_dirs(root: str, require_mask: bool = True) -> List[str]:
-    patterns = [os.path.join(root, "*T807*"), os.path.join(root, "**")]
-    cand_dirs = []
-    for p in patterns:
-        cand_dirs.extend(glob.glob(p))
-    cand_dirs = sorted([d for d in cand_dirs if os.path.isdir(d)])
-
+    """
+    Scan all folders under root (no naming constraints).
+    Keep folders that contain:
+      - T1_masked.nii.gz
+      - PET_in_T1_masked.nii.gz
+      - aseg_brainmask.nii.gz (if require_mask=True)
+    """
     sids = []
-    for d in cand_dirs:
-        t1 = os.path.join(d, "T1_masked.nii.gz")
-        pet = os.path.join(d, "PET_in_T1_masked.nii.gz")
-        msk = os.path.join(d, "aseg_brainmask.nii.gz")
-        if os.path.exists(t1) and os.path.exists(pet):
-            if (not require_mask) or os.path.exists(msk):
-                sids.append(os.path.basename(d))
-    return sids
+    seen = set()
+
+    for dirpath, _, filenames in os.walk(root):
+        files = set(filenames)
+        has_t1 = "T1_masked.nii.gz" in files
+        has_pet = "PET_in_T1_masked.nii.gz" in files
+        has_mask = "aseg_brainmask.nii.gz" in files
+
+        if has_t1 and has_pet and ((not require_mask) or has_mask):
+            sid = os.path.basename(dirpath.rstrip(os.sep))
+            if sid and sid not in seen:
+                sids.append(sid)
+                seen.add(sid)
+
+    return sorted(sids)
 
 
 def load_stage_labels(
