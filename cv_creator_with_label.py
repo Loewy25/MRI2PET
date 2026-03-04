@@ -77,8 +77,8 @@ def list_subject_dirs(root: str, require_mask: bool = True) -> List[str]:
     """
     Scan all folders under root (no naming constraints).
     Keep folders that contain:
-      - T1_masked.nii.gz
-      - PET_in_T1_masked.nii.gz
+      - T1_masked.nii.gz OR T1.nii.gz
+      - PET_in_T1_masked.nii.gz OR PET_in_T1.nii.gz
       - aseg_brainmask.nii.gz (if require_mask=True)
     """
     sids = []
@@ -86,8 +86,8 @@ def list_subject_dirs(root: str, require_mask: bool = True) -> List[str]:
 
     for dirpath, _, filenames in os.walk(root):
         files = set(filenames)
-        has_t1 = "T1_masked.nii.gz" in files
-        has_pet = "PET_in_T1_masked.nii.gz" in files
+        has_t1 = ("T1_masked.nii.gz" in files) or ("T1.nii.gz" in files)
+        has_pet = ("PET_in_T1_masked.nii.gz" in files) or ("PET_in_T1.nii.gz" in files)
         has_mask = "aseg_brainmask.nii.gz" in files
 
         if has_t1 and has_pet and ((not require_mask) or has_mask):
