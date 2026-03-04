@@ -2,7 +2,7 @@
 import os
 import nibabel as nib
 
-BASE_DIR = os.environ.get("BASE_DIR", "/scratch/l.peiwang/kari_brainv11")
+BASE_DIR = os.environ.get("BASE_DIR", "/scratch/l.peiwang/kari_all")
 
 ok = 0
 skipped = 0
