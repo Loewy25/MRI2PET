@@ -4,12 +4,12 @@
 #SBATCH --mem=10G
 #SBATCH --time=23:50:00
 ##SBATCH --gres=gpu:tesla_a100:1
-##SBATCH --gres=gpu:1
-#SBATCH --partition=tier1_cpu
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 ##SBATCH --nodelist=gpu01
-#SBATCH --output=dataset.out
-#SBATCH --error=dataset.err
+#SBATCH --output=nohier657_fake.out
+#SBATCH --error=nohier657_fake.out
 
 
 
@@ -46,8 +46,6 @@ mri_vol2vol --help | head -n 5
 module load fsl
 pip install torch
 # 5) Run script
-
-#python Data_TAU_ALL.py
 
 #python summary.py
 
@@ -92,10 +90,10 @@ pip install torch
 # ------------------------------------------------------------
 
 # Actual job
-#python cv_creator.py \
-#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --root /scratch/l.peiwang/braak_merged_300 \
-#  --outdir /scratch/l.peiwang/braak_merged_300/CV5_braak_strat
+python cv_creator_with_label.py \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --root /scratch/l.peiwang/kari_all \
+  --outdir /scratch/l.peiwang/braak_merged_kari_all/CV5_braak_strat
 #python summary.py
 #python Data_T807.py --part 1
 
@@ -130,19 +128,19 @@ pip install torch
 
 
 
-python eval_taupet_comprehensive.py \
-  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
-  --vols-roots \
-    /home/l.peiwang/MRI2PET/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os65_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os65_aug_7/volumes \
-  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session-col TAU_PET_Session \
-  --split-by braak \
-  --thr-braak 1.2 \
-  --out /scratch/l.peiwang/cagrad51_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7
+#python eval_taupet_comprehensive.py \
+#  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+#  --vols-roots \
+#    /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_3/volumes \
+#    /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os4_aug_3/volumes \
+#    /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os4_aug_3/volumes \
+#    /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os4_aug_3/volumes \
+#    /home/l.peiwang/MRI2PET/deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os4_aug_3/volumes \
+#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --session-col TAU_PET_Session \
+#  --split-by braak \
+#  --thr-braak 1.2 \
+#  --out /scratch/l.peiwang/deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_3_RESULT
 
 
 #python new_class.py \
