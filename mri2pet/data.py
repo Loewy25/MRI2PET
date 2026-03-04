@@ -1,4 +1,4 @@
-import os, glob
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import nibabel as nib
@@ -62,15 +62,9 @@ class KariAV1451Dataset(Dataset):
         self.root_dir = root_dir
         self.resize_to = resize_to
         self.sid_to_label = sid_to_label or {}
-        patterns = [
-            os.path.join(root_dir, "*T807*"),
-            os.path.join(root_dir, "*t807*"),
-            os.path.join(root_dir, "*1451*"),
-        ]
-        subjects: List[str] = []
-        for p in patterns:
-            subjects.extend(glob.glob(p))
-        subjects = sorted([d for d in subjects if os.path.isdir(d)])
+        subjects = sorted(
+            entry.path for entry in os.scandir(root_dir) if entry.is_dir()
+        )
 
         self.items: List[Tuple[str,str,Optional[str]]] = []
         for d in subjects:
@@ -405,4 +399,3 @@ def build_loaders_from_fold_csv(
     )
 
     return dl_train, dl_val, dl_test, N, len(idx_train), len(idx_val), len(idx_test)
-
