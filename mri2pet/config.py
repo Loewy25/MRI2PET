@@ -2,7 +2,7 @@ import os
 from typing import Optional, Tuple
 import torch
 
-ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
+ROOT_DIR   = "/scratch/l.peiwang/kari_all"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
 # ---- NEW: allow override via environment variables ----
