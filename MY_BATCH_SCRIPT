@@ -68,7 +68,7 @@ pip install torch
 
 
 
-
+python3 summary_more.py 
 #python xg_class.py \
 #  --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv \
 #  --pet-col pet_gt \
@@ -88,7 +88,7 @@ pip install torch
 #   --bins 64 \
 #   --verbose
 # ------------------------------------------------------------
-python summary_extra_modality.py
+#python summary_extra_modality.py
 # Actual job
 #python cv_creator_with_label.py \
 #  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
