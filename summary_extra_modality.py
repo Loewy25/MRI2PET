@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+
 import pandas as pd
+import SimpleITK as sitk
 
 META = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
 COL  = "MR_Session"
 ROOT = "/ceph/chpc/mapped/benz04_kari/scans"
 
-# ------------------------------------------------------------
-# Ignore obvious non-target junk
-# ------------------------------------------------------------
 IGNORE = re.compile(
     r"(mrac|petacquisition|\bpet\b|_ac\b|\bac\b|\bnac\b|ac_images|nac_images|prr|"
     r"umap|ute|uteflex|dixon|waterweighted|fatweighted|"
@@ -20,33 +19,20 @@ IGNORE = re.compile(
 )
 
 def toks(name: str):
-    name = re.sub(r"^\d+[-_ ]*", "", name.lower())  # drop leading "12-" etc
+    name = re.sub(r"^\d+[-_ ]*", "", name.lower())
     return set(t for t in re.split(r"[^a-z0-9]+", name) if t)
 
-# ============================================================
-# FLAIR subtype classifier
-# ============================================================
 def flair_subtypes(series_name: str):
-    """
-    Return a set of FLAIR subtype labels for one series.
-    Goal: group by processing-ready family, not just modality presence.
-    """
     if IGNORE.search(series_name):
         return set()
 
     t = toks(series_name)
-    s = series_name.lower()
-
     if "flair" not in t:
         return set()
 
     out = set()
 
-    # 3D FLAIR family
-    # examples:
-    #   Sagittal_3D_FLAIR
-    #   3D_FLAIR_MS_P_new
-    #   SPACE_FLAIR / CUBE_FLAIR / VISTA_FLAIR if they exist later
+    # likely 3D family by naming
     if (
         "3d" in t or
         "space" in t or
@@ -54,216 +40,232 @@ def flair_subtypes(series_name: str):
         "vista" in t or
         "sagittal" in t
     ):
-        out.add("FLAIR_3D")
+        out.add("FLAIR_3D_NAME")
 
-    # 2D axial family
-    # examples:
-    #   Axial_T2_FLAIR
-    #   Head_Axial_T2_FLAIR
-    #   Axial_FLAIR
+    # likely 2D axial family by naming
     if "axial" in t or "tra" in t or "transverse" in t:
-        out.add("FLAIR_2D_AXIAL")
+        out.add("FLAIR_2D_AXIAL_NAME")
 
-    # other 2D orientations
     if "coronal" in t or "cor" in t:
-        out.add("FLAIR_2D_CORONAL")
+        out.add("FLAIR_2D_CORONAL_NAME")
 
-    # fallback ambiguous FLAIR:
-    # examples:
-    #   FLAIR
-    #   T2_FLAIR
     if not out:
-        out.add("FLAIR_AMBIG")
+        out.add("FLAIR_AMBIG_NAME")
 
     return out
 
-# ============================================================
-# T2*/SWI subtype classifier
-# ============================================================
-def t2star_subtypes(series_name: str):
+def resolve_session_dir(root, session_name):
+    dirs = {d.lower(): d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))}
+    k = session_name.lower().replace(".zip", "")
+    return dirs.get(k) or dirs.get(k.replace("-", "_")) or dirs.get(k.replace("_", "-"))
+
+def list_series_dirs(session_dir):
+    return [
+        x for x in os.listdir(session_dir)
+        if os.path.isdir(os.path.join(session_dir, x))
+    ]
+
+def read_series_as_image(series_dir):
     """
-    Return a set of T2*/SWI subtype labels for one series.
-    Goal: distinguish different susceptibility-family acquisitions.
+    Try to read one DICOM series folder into a volume.
+    Returns (img, error_message).
     """
-    if IGNORE.search(series_name):
-        return set()
+    try:
+        reader = sitk.ImageSeriesReader()
+        series_ids = reader.GetGDCMSeriesIDs(series_dir)
+        if not series_ids:
+            return None, "no_dicom_series_id"
 
-    t = toks(series_name)
-    s = series_name.lower()
+        # usually one series per folder; if multiple exist, take the largest
+        best_files = None
+        best_sid = None
+        for sid in series_ids:
+            files = reader.GetGDCMSeriesFileNames(series_dir, sid)
+            if best_files is None or len(files) > len(best_files):
+                best_files = files
+                best_sid = sid
 
-    # need explicit susceptibility-family evidence
-    is_t2star = (
-        ("t2" in t and "star" in t) or
-        ("t2star" in t) or
-        ("swi" in t)
-    )
-    if not is_t2star:
-        return set()
+        if not best_files:
+            return None, "no_dicom_files"
 
-    out = set()
+        reader.SetFileNames(best_files)
+        img = reader.Execute()
+        return img, None
 
-    # SWI proper
-    if "swi" in t:
-        out.add("T2STAR_SWI")
+    except Exception as e:
+        return None, str(e)
 
-    # multi-echo / 3TE type
-    if "3te" in t or "multi" in t:
-        out.add("T2STAR_MULTI_ECHO")
+def geom_class_from_spacing_and_size(spacing, size):
+    """
+    spacing: (sx, sy, sz)
+    size:    (nx, ny, nz)
 
-    # EPI-based T2*
-    if "epi" in t or "ep2d" in t:
-        out.add("T2STAR_EPI")
+    Heuristic classification:
+    - near-isotropic volumetric => likely native 3D acquisition
+    - thick slice anisotropic   => likely 2D acquisition stored as 3D volume
+    """
+    sx, sy, sz = spacing
+    nx, ny, nz = size
 
-    # conventional axial T2*
-    if "axial" in t or "tra" in t or "transverse" in t:
-        out.add("T2STAR_AXIAL")
+    # protect against nonsense
+    if min(sx, sy, sz) <= 0:
+        return "BAD_GEOM"
 
-    # fallback ambiguous T2*
-    if not out:
-        out.add("T2STAR_AMBIG")
+    # ratio of thickest to thinnest voxel dimension
+    ratio = max(spacing) / min(spacing)
 
-    return out
+    # very small z count is suspicious
+    if nz < 8:
+        return "TOO_FEW_SLICES"
 
-# ============================================================
-# Helpers
-# ============================================================
-def summarize_combination(counter: Counter, total_found: int, title: str):
-    print("\n" + "=" * 80)
-    print(title)
-    print("=" * 80)
+    # near isotropic volumetric
+    if ratio <= 1.5 and sz <= 2.0:
+        return "LIKELY_3D_VOLUME"
 
-    if not counter:
-        print("No subjects found.")
-        return
+    # classic thick-slice stack
+    if sz >= 3.0 or ratio >= 2.5:
+        return "LIKELY_2D_ACQ_STORED_AS_3D"
 
-    for combo, n in sorted(counter.items(), key=lambda x: (-x[1], x[0])):
-        pct = (n / total_found * 100.0) if total_found else 0.0
-        label = combo if combo else "NONE"
-        print(f"{label:40s}: {n:6d} / {total_found}  ({pct:5.1f}%)")
+    return "INTERMEDIATE_MIXED"
 
-def summarize_presence(counter: Counter, total_found: int, all_labels, title: str):
-    print("\n" + "-" * 80)
-    print(title)
-    print("-" * 80)
+def choose_one_flair_series(series_names):
+    """
+    Pick one preferred FLAIR per session for inspection.
+    Preference:
+      1) named 3D flair
+      2) named 2D axial flair
+      3) any other flair
+    """
+    scored = []
+    for s in series_names:
+        labs = flair_subtypes(s)
+        if not labs:
+            continue
 
-    for lab in all_labels:
-        n = counter.get(lab, 0)
-        pct = (n / total_found * 100.0) if total_found else 0.0
-        print(f"{lab:40s}: {n:6d} / {total_found}  ({pct:5.1f}%)")
+        if "FLAIR_3D_NAME" in labs:
+            score = 0
+        elif "FLAIR_2D_AXIAL_NAME" in labs:
+            score = 1
+        else:
+            score = 2
+
+        scored.append((score, s))
+
+    if not scored:
+        return None
+    scored.sort()
+    return scored[0][1]
 
 def main():
     df = pd.read_csv(META)
     sessions = sorted(set(df[COL].dropna().astype(str).str.strip()))
 
-    # index session directories (case-insensitive, handle _/- mismatch)
-    dirs = {d.lower(): d for d in os.listdir(ROOT) if os.path.isdir(os.path.join(ROOT, d))}
-
-    def resolve(s):
-        k = s.lower().replace(".zip", "")
-        return dirs.get(k) or dirs.get(k.replace("-", "_")) or dirs.get(k.replace("_", "-"))
-
     found = 0
     missing = 0
+    no_flair = 0
+    unreadable = 0
 
-    # subject-level counters
-    flair_combo_counter = Counter()
-    flair_presence_counter = Counter()
+    geom_counter = Counter()
+    name_counter = Counter()
+    cross_counter = Counter()
 
-    t2_combo_counter = Counter()
-    t2_presence_counter = Counter()
+    detailed_rows = []
 
     for sess in sessions:
-        d = resolve(sess)
+        d = resolve_session_dir(ROOT, sess)
         if not d:
             missing += 1
             continue
 
         found += 1
-        p = os.path.join(ROOT, d)
+        sess_path = os.path.join(ROOT, d)
+        series_names = list_series_dirs(sess_path)
 
-        series = [
-            x for x in os.listdir(p)
-            if os.path.isdir(os.path.join(p, x))
-        ]
+        chosen = choose_one_flair_series(series_names)
+        if chosen is None:
+            no_flair += 1
+            continue
 
-        flair_hits = set()
-        t2_hits = set()
+        name_labels = flair_subtypes(chosen)
+        name_label = "|".join(sorted(name_labels))
+        name_counter[name_label] += 1
 
-        for s in series:
-            flair_hits |= flair_subtypes(s)
-            t2_hits |= t2star_subtypes(s)
+        chosen_path = os.path.join(sess_path, chosen)
+        img, err = read_series_as_image(chosen_path)
 
-        # -------- subject-level FLAIR combo --------
-        flair_combo = "|".join(sorted(flair_hits)) if flair_hits else "NONE"
-        flair_combo_counter[flair_combo] += 1
-        for lab in flair_hits:
-            flair_presence_counter[lab] += 1
+        if img is None:
+            unreadable += 1
+            geom_label = f"UNREADABLE:{err}"
+            geom_counter[geom_label] += 1
+            cross_counter[(name_label, geom_label)] += 1
+            detailed_rows.append({
+                "MR_Session": sess,
+                "series_name": chosen,
+                "name_label": name_label,
+                "geom_label": geom_label,
+                "size_x": None,
+                "size_y": None,
+                "size_z": None,
+                "spacing_x": None,
+                "spacing_y": None,
+                "spacing_z": None,
+            })
+            continue
 
-        # -------- subject-level T2* combo --------
-        t2_combo = "|".join(sorted(t2_hits)) if t2_hits else "NONE"
-        t2_combo_counter[t2_combo] += 1
-        for lab in t2_hits:
-            t2_presence_counter[lab] += 1
+        size = img.GetSize()        # (x, y, z)
+        spacing = img.GetSpacing()  # (sx, sy, sz)
 
-    print("=== Subject-level subtype summary ===")
-    print(f"Total MR_Session in CSV: {len(sessions)}")
-    print(f"Found session folders:   {found}")
-    print(f"Missing folders:         {missing}")
+        geom_label = geom_class_from_spacing_and_size(spacing, size)
+        geom_counter[geom_label] += 1
+        cross_counter[(name_label, geom_label)] += 1
 
-    # ------------------------------------------------------------
-    # FLAIR summary
-    # ------------------------------------------------------------
-    summarize_presence(
-        flair_presence_counter,
-        found,
-        [
-            "FLAIR_3D",
-            "FLAIR_2D_AXIAL",
-            "FLAIR_2D_CORONAL",
-            "FLAIR_AMBIG",
-        ],
-        "FLAIR subtype presence (subject-level)"
-    )
+        detailed_rows.append({
+            "MR_Session": sess,
+            "series_name": chosen,
+            "name_label": name_label,
+            "geom_label": geom_label,
+            "size_x": size[0],
+            "size_y": size[1],
+            "size_z": size[2],
+            "spacing_x": spacing[0],
+            "spacing_y": spacing[1],
+            "spacing_z": spacing[2],
+        })
 
-    summarize_combination(
-        flair_combo_counter,
-        found,
-        "FLAIR subtype combinations (subject-level)"
-    )
+    total = found
 
-    # handy policy-style summary
-    flair_usable = found - flair_combo_counter.get("NONE", 0)
-    flair_has_3d = flair_presence_counter.get("FLAIR_3D", 0)
-    flair_2d_fallback_only = flair_combo_counter.get("FLAIR_2D_AXIAL", 0) + flair_combo_counter.get("FLAIR_2D_CORONAL", 0)
+    print("=== FLAIR geometry sanity check ===")
+    print(f"Total sessions in CSV: {len(sessions)}")
+    print(f"Found session folders : {found}")
+    print(f"Missing folders       : {missing}")
+    print(f"No FLAIR found        : {no_flair}")
+    print(f"Unreadable FLAIR      : {unreadable}")
 
-    print("\n" + "-" * 80)
-    print("FLAIR policy-oriented summary")
-    print("-" * 80)
-    print(f"Usable FLAIR (any subtype)               : {flair_usable:6d} / {found}  ({(flair_usable/found*100 if found else 0):5.1f}%)")
-    print(f"Native 3D FLAIR available                : {flair_has_3d:6d} / {found}  ({(flair_has_3d/found*100 if found else 0):5.1f}%)")
-    print(f"Likely 2D-only fallback subjects         : {flair_2d_fallback_only:6d} / {found}  ({(flair_2d_fallback_only/found*100 if found else 0):5.1f}%)")
+    print("\n=== Name-based chosen FLAIR subtype ===")
+    for k, n in sorted(name_counter.items(), key=lambda x: (-x[1], x[0])):
+        pct = 100.0 * n / total if total else 0.0
+        print(f"{k:30s}: {n:6d} / {total} ({pct:5.1f}%)")
 
-    # ------------------------------------------------------------
-    # T2*/SWI summary
-    # ------------------------------------------------------------
-    summarize_presence(
-        t2_presence_counter,
-        found,
-        [
-            "T2STAR_SWI",
-            "T2STAR_AXIAL",
-            "T2STAR_MULTI_ECHO",
-            "T2STAR_EPI",
-            "T2STAR_AMBIG",
-        ],
-        "T2*/SWI subtype presence (subject-level)"
-    )
+    print("\n=== Geometry-based classification of chosen FLAIR ===")
+    for k, n in sorted(geom_counter.items(), key=lambda x: (-x[1], x[0])):
+        pct = 100.0 * n / total if total else 0.0
+        print(f"{k:30s}: {n:6d} / {total} ({pct:5.1f}%)")
 
-    summarize_combination(
-        t2_combo_counter,
-        found,
-        "T2*/SWI subtype combinations (subject-level)"
-    )
+    print("\n=== Cross-tab: name subtype vs actual geometry ===")
+    grouped = defaultdict(int)
+    for (name_label, geom_label), n in cross_counter.items():
+        grouped[name_label] += n
+
+    for name_label in sorted(grouped):
+        print(f"\n{name_label}")
+        pairs = [(g, n) for (nm, g), n in cross_counter.items() if nm == name_label]
+        for geom_label, n in sorted(pairs, key=lambda x: (-x[1], x[0])):
+            pct = 100.0 * n / grouped[name_label] if grouped[name_label] else 0.0
+            print(f"  {geom_label:28s}: {n:6d} ({pct:5.1f}% within this name group)")
+
+    out_csv = "flair_geometry_check.csv"
+    pd.DataFrame(detailed_rows).to_csv(out_csv, index=False)
+    print(f"\nSaved detailed per-session table to: {out_csv}")
 
 if __name__ == "__main__":
     main()
