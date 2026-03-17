@@ -48,7 +48,7 @@ pip install torch
 pip install pydicom
 # 5) Run script
 
-python multiple_visits.py
+python summary.py
 
 #python add_label.py
 
