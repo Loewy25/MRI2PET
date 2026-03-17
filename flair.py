@@ -3,6 +3,8 @@ import argparse
 import os
 import re
 import json
+import socket
+import time
 import traceback
 from collections import Counter, defaultdict
 
@@ -635,6 +637,24 @@ def parse_args():
         description="Build FLAIR_in_T1 outputs with optional task sharding."
     )
     parser.add_argument(
+        "--raw-mr-root",
+        type=str,
+        default=os.environ.get("RAW_MR_ROOT", RAW_MR_ROOT),
+        help="Raw MR root directory. Can also be set via RAW_MR_ROOT env var.",
+    )
+    parser.add_argument(
+        "--wait-for-raw-root-sec",
+        type=int,
+        default=int(os.environ.get("RAW_MR_WAIT_SEC", "90")),
+        help="Seconds to wait/retry if raw MR root is temporarily unavailable.",
+    )
+    parser.add_argument(
+        "--raw-root-poll-sec",
+        type=int,
+        default=5,
+        help="Polling interval (seconds) while waiting for raw MR root.",
+    )
+    parser.add_argument(
         "--num-tasks",
         type=int,
         default=None,
@@ -692,10 +712,35 @@ def manifest_path_for_task(task_id, num_tasks):
         f"flair_processing_manifest_v1_part{task_id:02d}of{num_tasks:02d}.csv"
     )
 
+def wait_for_directory(path, wait_sec=0, poll_sec=5):
+    """
+    Wait for a directory to exist/access in case of delayed mount visibility.
+    Returns:
+      (ok: bool, waited_sec: int, last_reason: str|None)
+    """
+    wait_sec = max(0, int(wait_sec))
+    poll_sec = max(1, int(poll_sec))
+    start = time.time()
+    deadline = start + wait_sec
+    last_reason = None
+
+    while True:
+        try:
+            if os.path.isdir(path):
+                return True, int(time.time() - start), None
+            last_reason = "not_a_directory_or_not_found"
+        except Exception as e:
+            last_reason = str(e)
+
+        if time.time() >= deadline:
+            return False, int(time.time() - start), last_reason
+
+        time.sleep(poll_sec)
+
 # ============================================================
 # MAIN SUBJECT PROCESSING
 # ============================================================
-def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map):
+def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map, raw_mr_root):
     subject_path = os.path.join(KARI_ALL_ROOT, subject_dir)
 
     out_flair = os.path.join(subject_path, "FLAIR_in_T1.nii.gz")
@@ -751,7 +796,7 @@ def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map):
         return result
 
     result["raw_MR_session_dir"] = raw_mr_dir
-    raw_mr_path = os.path.join(RAW_MR_ROOT, raw_mr_dir)
+    raw_mr_path = os.path.join(raw_mr_root, raw_mr_dir)
 
     t1_path = os.path.join(subject_path, "T1.nii.gz")
     if not os.path.exists(t1_path):
@@ -900,10 +945,24 @@ def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map):
 def main():
     args = parse_args()
     task_id, num_tasks = resolve_tasking(args)
+    host = socket.gethostname()
+
+    raw_mr_root = args.raw_mr_root
+    ok, waited_sec, last_reason = wait_for_directory(
+        raw_mr_root,
+        wait_sec=args.wait_for_raw_root_sec,
+        poll_sec=args.raw_root_poll_sec
+    )
+    if not ok:
+        raise FileNotFoundError(
+            "RAW_MR_ROOT not accessible "
+            f"(host={host}, path={raw_mr_root}, waited_sec={waited_sec}, "
+            f"last_reason={last_reason})"
+        )
 
     df = pd.read_csv(META)
     pet_to_mr, ambiguous_pet_map = build_pet_to_mr_map(df)
-    raw_dir_map = build_normalized_dir_map(RAW_MR_ROOT)
+    raw_dir_map = build_normalized_dir_map(raw_mr_root)
 
     all_subject_dirs = list_kari_subject_dirs(KARI_ALL_ROOT)
     effective_limit = LIMIT if args.limit is None else args.limit
@@ -912,8 +971,9 @@ def main():
     subject_dirs = shard_subjects(all_subject_dirs, task_id, num_tasks)
 
     print("=== FLAIR build pipeline ===")
+    print(f"Host          : {host}")
     print(f"KARI_ALL_ROOT : {KARI_ALL_ROOT}")
-    print(f"RAW_MR_ROOT   : {RAW_MR_ROOT}")
+    print(f"RAW_MR_ROOT   : {raw_mr_root}")
     print(f"CSV           : {META}")
     print(f"Subjects with T1 in kari_all (total): {len(all_subject_dirs)}")
     print(f"Tasking       : task_id={task_id} / num_tasks={num_tasks}")
@@ -933,7 +993,8 @@ def main():
                 subject_dir=subject_dir,
                 pet_to_mr=pet_to_mr,
                 ambiguous_pet_map=ambiguous_pet_map,
-                raw_dir_map=raw_dir_map
+                raw_dir_map=raw_dir_map,
+                raw_mr_root=raw_mr_root
             )
         except Exception as e:
             row = {
