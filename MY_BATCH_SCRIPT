@@ -48,7 +48,7 @@ pip install torch
 pip install pydicom
 # 5) Run script
 
-python flair.py
+python multiple_visits.py
 
 #python add_label.py
 
