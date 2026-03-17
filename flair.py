@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import re
 import json
@@ -627,6 +628,71 @@ def collect_flair_candidates(raw_mr_session_path: str):
     return candidates
 
 # ============================================================
+# CLI / SHARD HELPERS
+# ============================================================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build FLAIR_in_T1 outputs with optional task sharding."
+    )
+    parser.add_argument(
+        "--num-tasks",
+        type=int,
+        default=None,
+        help="Total parallel tasks. Defaults to SLURM_ARRAY_TASK_COUNT or 1.",
+    )
+    parser.add_argument(
+        "--task-id",
+        type=int,
+        default=None,
+        help="Zero-based task index. Defaults to SLURM_ARRAY_TASK_ID or 0.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional subject cap (applied before sharding).",
+    )
+    return parser.parse_args()
+
+def resolve_tasking(args):
+    env_num_tasks = os.environ.get("SLURM_ARRAY_TASK_COUNT")
+    env_task_id = os.environ.get("SLURM_ARRAY_TASK_ID")
+
+    if args.num_tasks is not None:
+        num_tasks = int(args.num_tasks)
+    elif env_num_tasks is not None:
+        num_tasks = int(env_num_tasks)
+    else:
+        num_tasks = 1
+
+    if args.task_id is not None:
+        task_id = int(args.task_id)
+    elif env_task_id is not None:
+        task_id = int(env_task_id)
+    else:
+        task_id = 0
+
+    if num_tasks < 1:
+        raise ValueError(f"num_tasks must be >= 1, got {num_tasks}")
+    if task_id < 0 or task_id >= num_tasks:
+        raise ValueError(f"task_id must be in [0, {num_tasks - 1}], got {task_id}")
+
+    return task_id, num_tasks
+
+def shard_subjects(subject_dirs, task_id, num_tasks):
+    if num_tasks == 1:
+        return subject_dirs
+    return subject_dirs[task_id::num_tasks]
+
+def manifest_path_for_task(task_id, num_tasks):
+    if num_tasks == 1:
+        return os.path.join(KARI_ALL_ROOT, "flair_processing_manifest_v1.csv")
+    return os.path.join(
+        KARI_ALL_ROOT,
+        f"flair_processing_manifest_v1_part{task_id:02d}of{num_tasks:02d}.csv"
+    )
+
+# ============================================================
 # MAIN SUBJECT PROCESSING
 # ============================================================
 def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map):
@@ -832,19 +898,26 @@ def process_one_subject(subject_dir, pet_to_mr, ambiguous_pet_map, raw_dir_map):
 # MAIN
 # ============================================================
 def main():
+    args = parse_args()
+    task_id, num_tasks = resolve_tasking(args)
+
     df = pd.read_csv(META)
     pet_to_mr, ambiguous_pet_map = build_pet_to_mr_map(df)
     raw_dir_map = build_normalized_dir_map(RAW_MR_ROOT)
 
-    subject_dirs = list_kari_subject_dirs(KARI_ALL_ROOT)
-    if LIMIT is not None:
-        subject_dirs = subject_dirs[:LIMIT]
+    all_subject_dirs = list_kari_subject_dirs(KARI_ALL_ROOT)
+    effective_limit = LIMIT if args.limit is None else args.limit
+    if effective_limit is not None:
+        all_subject_dirs = all_subject_dirs[:effective_limit]
+    subject_dirs = shard_subjects(all_subject_dirs, task_id, num_tasks)
 
     print("=== FLAIR build pipeline ===")
     print(f"KARI_ALL_ROOT : {KARI_ALL_ROOT}")
     print(f"RAW_MR_ROOT   : {RAW_MR_ROOT}")
     print(f"CSV           : {META}")
-    print(f"Subjects with T1 in kari_all: {len(subject_dirs)}")
+    print(f"Subjects with T1 in kari_all (total): {len(all_subject_dirs)}")
+    print(f"Tasking       : task_id={task_id} / num_tasks={num_tasks}")
+    print(f"Subjects in this task: {len(subject_dirs)}")
     print(f"Overwrite     : {OVERWRITE}")
     print(f"Save QC       : {SAVE_QC and HAS_MPL}")
     print("")
@@ -893,7 +966,7 @@ def main():
         print(f"    -> {row['status']}")
 
     manifest_df = pd.DataFrame(manifest)
-    manifest_path = os.path.join(KARI_ALL_ROOT, "flair_processing_manifest_v1.csv")
+    manifest_path = manifest_path_for_task(task_id, num_tasks)
     manifest_df.to_csv(manifest_path, index=False)
 
     print("\n=== Done ===")
