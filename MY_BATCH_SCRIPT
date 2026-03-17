@@ -48,7 +48,7 @@ pip install torch
 pip install pydicom
 # 5) Run script
 
-#python flair.py
+python flair.py
 
 #python add_label.py
 
@@ -69,7 +69,7 @@ pip install pydicom
 
 
 
-python3 summary_extra_modality.py 
+#python3 summary_extra_modality.py 
 #python xg_class.py \
 #  --csv /scratch/l.peiwang/MRI2PET_classfication/amy_dataset_manifest_with_pet_raw.csv \
 #  --pet-col pet_gt \
