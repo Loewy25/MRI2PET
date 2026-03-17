@@ -1,135 +1,101 @@
 #!/usr/bin/env python3
 import os
 import pandas as pd
-import numpy as np
-from collections import Counter
 
-# ========= EDIT THESE PATHS =========
-CSV_PATH   = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"
-TRAIN_DIR  = "/scratch/l.peiwang/kari_brainv33_top300"        # your dataset folder
-TEST_DIR   = "/home/l.peiwang/MRI2PET/MGDA_UB_c_stable_contra_2432_batch1_hierachy_ROI_NOMEMORY_nomultiview/volumes"   # your testing dataset folder (or None)
-# ========= HYPERPARAMETERS =========
-TAU_COL       = "TAU_PET_Session"  # column used to match folder names
-AMYLOID_COL   = "Centiloid"        # could also be "TSS" etc.
-AMYLOID_THR   = 20.0               # amyloid+ if value >= this (change to your rule)
-BRAAK_COLS    = [("Braak1_2","I/II"), ("Braak3_4","III/IV"), ("Braak5_6","V/VI")]
-BRAAK_THR     = 1.2                # stage is positive if >= this (adjust as needed)
-CDR_COL       = "cdr"
-# ===================================
+KARI_ROOT = "/scratch/l.peiwang/kari_all"
+CSV_PATH = "/scratch/l.peiwang/MR_AMY_TAU_merge_DF26.csv"
 
-def norm_key(x: str) -> str:
-    return str(x).strip().lower()
+TAU_COL = "TAU_PET_Session"
+BRAAK_COL = "Braak5_6"
+CDR_COL = "cdr"   # change if your column name is different
+FLAIR_FILE = "FLAIR_in_T1.nii.gz"
 
-def list_subjects(root):
-    if not root or not os.path.isdir(root):
-        return []
-    return sorted([d for d in os.listdir(root)
-                   if os.path.isdir(os.path.join(root, d))])
+def norm(s):
+    return str(s).strip().lower().replace("-", "_")
 
-def get_col(df, name):
-    # case-insensitive lookup with whitespace tolerance
-    mapping = {c.strip().lower(): c for c in df.columns}
-    key = name.strip().lower()
-    if key not in mapping:
-        raise KeyError(f"Column '{name}' not found. Available: {list(df.columns)}")
-    return mapping[key]
+# =========================
+# LOAD CSV
+# =========================
+df = pd.read_csv(CSV_PATH)
 
-def to_float(x):
+print("\nCSV columns:")
+print(df.columns.tolist())
+
+# build lookup
+braak_map = {}
+cdr_map = {}
+
+for _, r in df.iterrows():
+    key = norm(r[TAU_COL])
+    braak_map[key] = r.get(BRAAK_COL, None)
+    cdr_map[key] = r.get(CDR_COL, None)
+
+# =========================
+# SCAN DATASET
+# =========================
+folders = [f for f in os.listdir(KARI_ROOT)
+           if os.path.isdir(os.path.join(KARI_ROOT, f))]
+
+total = len(folders)
+flair_cnt = 0
+
+braak_counts = {"1_2":0, "3_4":0, "5_6":0, "missing":0}
+cdr_low = 0
+cdr_high = 0
+cdr_missing = 0
+
+for f in folders:
+    path = os.path.join(KARI_ROOT, f)
+
+    # FLAIR
+    if os.path.exists(os.path.join(path, FLAIR_FILE)):
+        flair_cnt += 1
+
+    key = norm(f)
+
+    # Braak
+    b = braak_map.get(key, None)
     try:
-        return float(x)
-    except Exception:
-        return np.nan
+        b = float(b)
+    except:
+        b = None
 
-def braak_stage_from_row(row, braak_cols, thr):
-    # assign the highest positive stage among V/VI -> III/IV -> I/II; else '0'
-    vals = {label: to_float(row[col]) for col, label in braak_cols}
-    if vals["V/VI"] >= thr:   return "V/VI"
-    if vals["III/IV"] >= thr: return "III/IV"
-    if vals["I/II"] >= thr:   return "I/II"
-    return "0"
+    if b is None:
+        braak_counts["missing"] += 1
+    elif b <= 2:
+        braak_counts["1_2"] += 1
+    elif b <= 4:
+        braak_counts["3_4"] += 1
+    else:
+        braak_counts["5_6"] += 1
 
-def summarize_folder(df, folder_path):
-    subjects = list_subjects(folder_path)
-    if not subjects:
-        return {
-            "folder": folder_path, "n_folders": 0, "n_matched": 0,
-            "unmatched": [], "amyloid": {}, "braak": {}, "cdr": {}
-        }
+    # CDR
+    c = cdr_map.get(key, None)
+    try:
+        c = float(c)
+    except:
+        c = None
 
-    # resolve column names in a tolerant way
-    tau_c  = get_col(df, TAU_COL)
-    amy_c  = get_col(df, AMYLOID_COL)
-    cdr_c  = get_col(df, CDR_COL)
-    # ensure Braak cols exist and are numeric-friendly
-    for col, _ in BRAAK_COLS:
-        bc = get_col(df, col)
-        if bc != col:
-            df.rename(columns={bc: col}, inplace=True)
+    if c is None:
+        cdr_missing += 1
+    elif c <= 1.2:
+        cdr_low += 1
+    else:
+        cdr_high += 1
 
-    # build a fast lookup for TAU_PET_Session (case-insensitive)
-    df = df.copy()
-    df["__key__"] = df[tau_c].map(norm_key)
-    subject_keys = {norm_key(s) for s in subjects}
-    matched = df[df["__key__"].isin(subject_keys)]
-    # How many CSV rows per folder key?
-    dup_counts = matched["__key__"].value_counts()
-    dups = dup_counts[dup_counts > 1]
-    print(f"\nDuplicate CSV rows per session key (>1): {int((dup_counts>1).sum())}")
-    if not dups.empty:
-        print(dups.head(20))  # peek first 20
+# =========================
+# PRINT SUMMARY
+# =========================
+print("\n=== BASIC ===")
+print(f"Total subjects: {total}")
+print(f"With FLAIR: {flair_cnt} ({flair_cnt/total:.2%})")
 
+print("\n=== BRAAK ===")
+for k,v in braak_counts.items():
+    print(f"{k}: {v} ({v/total:.2%})")
 
-    # unmatched folder names for QC
-    matched_keys = set(matched["__key__"])
-    unmatched = sorted([s for s in subjects if norm_key(s) not in matched_keys])
-
-    # amyloid counts
-    amy_vals = pd.to_numeric(matched[amy_c], errors="coerce")
-    amy_pos = (amy_vals >= AMYLOID_THR)
-    amy_counts = {"positive": int(amy_pos.sum()),
-                  "negative": int((~amy_pos).sum())}
-
-    # Braak staging
-    # coerce to numeric for each needed Braak column
-    for col, _ in BRAAK_COLS:
-        matched[col] = pd.to_numeric(matched[col], errors="coerce")
-    stages = matched.apply(lambda r: braak_stage_from_row(r, BRAAK_COLS, BRAAK_THR), axis=1)
-    braak_counts = dict(Counter(stages))
-
-    # CDR distribution
-    cdr_counts = dict(matched[cdr_c].value_counts(dropna=False).sort_index())
-
-    return {
-        "folder": folder_path,
-        "n_folders": len(subjects),
-        "n_matched": int(len(matched)),
-        "unmatched": unmatched,
-        "amyloid": amy_counts,
-        "braak": braak_counts,
-        "cdr": cdr_counts
-    }
-
-def main():
-    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-    df.columns = [c.strip() for c in df.columns]  # trim spaces in headers
-
-    results = []
-    for path in [TRAIN_DIR, TEST_DIR]:
-        if path:
-            results.append(summarize_folder(df, path))
-
-    # pretty print
-    for r in results:
-        print("\n=== SUMMARY:", r["folder"], "===")
-        print(f"Subject folders        : {r['n_folders']}")
-        print(f"Rows matched in CSV    : {r['n_matched']}")
-        print(f"Amyloid ({AMYLOID_COL} >= {AMYLOID_THR}): {r['amyloid']}")
-        print(f"Braak (thr={BRAAK_THR})               : {r['braak']}")
-        print(f"CDR counts                             : {r['cdr']}")
-        if r["unmatched"]:
-            print(f"Unmatched folder names ({len(r['unmatched'])}): {r['unmatched']}")
-
-if __name__ == "__main__":
-    main()
-
+print("\n=== CDR (threshold=1.2) ===")
+print(f"<=1.2: {cdr_low} ({cdr_low/total:.2%})")
+print(f">1.2 : {cdr_high} ({cdr_high/total:.2%})")
+print(f"missing: {cdr_missing}")
 
