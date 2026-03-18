@@ -48,7 +48,7 @@ pip install torch
 pip install pydicom
 # 5) Run script
 
-python dian_pet.py
+python debug.py
 
 #python add_label.py
 
