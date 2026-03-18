@@ -11,10 +11,10 @@ OUTPUT_ROOT = Path('/scratch/l.peiwang/DIAN_PET')
 
 TAU_TRACERS = {'t80', 'm62'}
 
-# First run with True to check folder selections only
+# First run with True to inspect series selection
 DRY_RUN = True
 
-# Set True if you want to reconvert even when pet.nii.gz already exists
+# If output exists already, skip unless this is True
 OVERWRITE = False
 
 
@@ -42,9 +42,7 @@ def read_tau_sessions(csv_path: Path):
             session_label = (row.get(session_col) or '').strip()
             tracer = (row.get(tracer_col) or '').strip().lower()
 
-            if not session_label:
-                continue
-            if tracer not in TAU_TRACERS:
+            if not session_label or tracer not in TAU_TRACERS:
                 continue
 
             key = (session_label, tracer)
@@ -65,7 +63,6 @@ def find_session_dir(session_label: str):
     if exact.is_dir():
         return exact
 
-    # fallback: sometimes weird suffix/prefix may exist
     candidates = sorted([p for p in INPUT_ROOT.glob(f'{session_label}*') if p.is_dir()])
 
     if len(candidates) == 1:
@@ -86,39 +83,66 @@ def score_series_name(name: str, tracer: str) -> int:
     n = name.lower()
     score = 0
 
-    # positive PET hints
+    # strongly reject obvious non-PET / scout / CT
+    if 'topogram' in n:
+        score -= 100
+    if 'localizer' in n:
+        score -= 100
+    if 'ct' in n:
+        score -= 80
+
+    # generic PET-ish words
     if 'pet' in n:
         score += 20
     if 'brain' in n:
         score += 2
     if 'tau' in n:
-        score += 15
+        score += 25
 
-    # tracer-specific hints
+    # tracer-specific words
     if tracer == 't80':
         if 'av1451' in n:
-            score += 20
+            score += 40
         if 't807' in n:
-            score += 20
+            score += 35
+        if 'flortaucipir' in n:
+            score += 35
         if 't80' in n:
             score += 10
-    elif tracer == 'm62':
-        if 'mk6240' in n:
-            score += 20
-        if 'm62' in n:
+
+        # preference among valid AV1451 outputs
+        if 'static' in n:
+            score += 15
+        if 'short' in n:
             score += 10
-        if 'tau' in n:
+        if 'dynamic' in n:
             score += 5
 
-    # negative hints
-    if 'ct' in n:
-        score -= 50
-    if 'ac' in n:
-        score -= 30
-    if 'localizer' in n:
-        score -= 20
-    if 'cal' in n:
-        score -= 10
+    elif tracer == 'm62':
+        if 'mk6240' in n:
+            score += 40
+        if 'm62' in n:
+            score += 15
+        if 'tau' in n:
+            score += 15
+        if 'static' in n:
+            score += 15
+        if 'short' in n:
+            score += 10
+        if 'dynamic' in n:
+            score += 5
+
+    # AC PET is usually what you want; NAC usually not first choice
+    if '__ac' in n or n.endswith('_ac_') or '_ac_' in n or ' pet_ac' in n:
+        score += 4
+    if 'nac' in n:
+        score -= 8
+
+    # other soft penalties
+    if 'gaussian' in n:
+        score -= 1
+    if 'no_filter' in n:
+        score += 1
 
     return score
 
@@ -143,7 +167,8 @@ def find_best_pet_dicom(session_dir: Path, tracer: str):
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     best_score, best_name, best_dicom = candidates[0]
 
-    if best_score <= 0:
+    # skip only if every candidate looks obviously wrong
+    if best_score < -20:
         return None, candidates
 
     return best_dicom, candidates
@@ -208,7 +233,7 @@ def main():
             if candidates:
                 print('  [INFO] candidate series:')
                 for score, name, _ in candidates:
-                    print(f'         score={score:>3}   {name}')
+                    print(f'         score={score:>4}   {name}')
             n_skip += 1
             continue
 
@@ -220,6 +245,12 @@ def main():
         print(f'  [SER] {dicom_dir.parent.name}')
         print(f'  [DIC] {dicom_dir}')
         print(f'  [OUT] {out_dir}')
+
+        # show top candidates for debugging
+        if candidates:
+            print('  [TOP]')
+            for score, name, _ in candidates[:4]:
+                print(f'         score={score:>4}   {name}')
 
         if not OVERWRITE and (nii_gz.exists() or nii.exists()):
             print('  [SKIP] output already exists')
