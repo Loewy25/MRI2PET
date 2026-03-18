@@ -12,7 +12,7 @@ OUTPUT_ROOT = Path('/scratch/l.peiwang/DIAN_PET')
 TAU_TRACERS = {'t80', 'm62'}
 
 # First run with True to inspect series selection
-DRY_RUN = True
+DRY_RUN = False
 
 # If output exists already, skip unless this is True
 OVERWRITE = False
