@@ -23,7 +23,7 @@ cases = {
     'ZL1BDX_v11_t80': '1-Dynamic_emission',
 }
 
-DRY_RUN = True   # change to False for real run
+DRY_RUN = False   # change to False for real run
 OVERWRITE = False
 
 if shutil.which('dcm2niix') is None:
