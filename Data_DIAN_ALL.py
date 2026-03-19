@@ -5,7 +5,8 @@
 DIAN PET preprocessing pipeline.
 
 Flow:
-- PET folders live under PET_ROOT; folder name is PET session_label and contains pet.nii.gz
+- PET folders live under PET_ROOT; folder name is PET session_label and contains a
+  prepared 3D pet.nii.gz
 - PET CSV maps PET session_label -> subject_label, visit_num
 - MR CSV maps (subject_label, visit_num) -> MR session_label
 - FreeSurfer exports live under FS_ROOT/<mr_session>/... and contain:
@@ -177,17 +178,19 @@ def ids_for_hemi_names(base_names, lut):
     return ids
 
 
-def _ensure_3d_nifti(in_path, out_dir, tag):
+def _require_3d_nifti(in_path, tag):
     try:
         img = nib.load(in_path)
-        if len(img.shape) == 4:
-            out_path = os.path.join(out_dir, f"_{tag}_3d_tmp.nii.gz")
-            data = np.asanyarray(img.dataobj)[..., 0]
-            nib.save(nib.Nifti1Image(data, img.affine, img.header), out_path)
-            return out_path, True
     except Exception as exc:
-        log(f"Failed to inspect {in_path}: {exc}", level="WARN")
-    return in_path, False
+        raise RuntimeError(f"Failed to inspect {tag}: {in_path}: {exc}") from exc
+
+    if len(img.shape) != 3:
+        extra = ""
+        if tag.lower() == "pet":
+            extra = " Run dian_pet.py first so pet.nii.gz is a motion-corrected static 3D PET."
+        raise RuntimeError(f"{tag} must be 3D, got shape={img.shape} at {in_path}.{extra}")
+
+    return in_path
 
 
 def make_aseg_mask_nifti(aseg_path, out_path):
@@ -433,32 +436,24 @@ def run_pet_to_t1_registration(pet_path, t1_path, out_pet, out_mat, work_dir):
     if not shutil.which("flirt"):
         raise RuntimeError("flirt not found in PATH")
 
-    pet_for_cli, pet_tmp = _ensure_3d_nifti(pet_path, work_dir, "pet")
-    t1_for_cli, t1_tmp = _ensure_3d_nifti(t1_path, work_dir, "t1")
+    pet_for_cli = _require_3d_nifti(pet_path, "PET")
+    t1_for_cli = _require_3d_nifti(t1_path, "T1")
     env = os.environ.copy()
     env.setdefault("FSLOUTPUTTYPE", "NIFTI_GZ")
 
-    try:
-        run_command(
-            [
-                "flirt",
-                "-in", pet_for_cli,
-                "-ref", t1_for_cli,
-                "-out", out_pet,
-                "-omat", out_mat,
-                "-dof", "6",
-                "-cost", "normmi",
-                "-interp", "trilinear",
-            ],
-            env=env,
-        )
-    finally:
-        for tmp_path, is_tmp in ((pet_for_cli, pet_tmp), (t1_for_cli, t1_tmp)):
-            if is_tmp and os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+    run_command(
+        [
+            "flirt",
+            "-in", pet_for_cli,
+            "-ref", t1_for_cli,
+            "-out", out_pet,
+            "-omat", out_mat,
+            "-dof", "6",
+            "-cost", "normmi",
+            "-interp", "trilinear",
+        ],
+        env=env,
+    )
 
 
 def process_job(job, args, lut):
