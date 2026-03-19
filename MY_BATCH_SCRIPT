@@ -1,23 +1,13 @@
-
-
 #!/bin/bash
-
-
 #SBATCH --job-name=test #Assign a descriptive job name
-
 #SBATCH -N 1                    # Request 1 node
 #SBATCH --mem=40G               # Request 400GB memory
 #SBATCH -t 10:30:00             # Set maximum time
-
-
 ##SBATCH --gres=gpu:1
-
 #SBATCH --gres=gpu:nvidia_a100_80:1
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
-
-
 # Output and error filenames based on job ID and task ID
 #SBATCH --output=output_adnioasis.out
 #SBATCH --error=output_adnioasis.err
