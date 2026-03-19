@@ -1,15 +1,15 @@
 #!/bin/bash
 
-#SBATCH --job-name=patch5
+#SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
-#SBATCH -t 15:50:00
-#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --time=23:50:00
+##SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --gres=gpu:1
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
-
-##SBATCH --exclude=gpua408,gpua401,gpu07,gpu09
-#SBATCH --output=slurm-%A_haha.out
-#SBATCH --error=slurm-%A_haha.err
+##SBATCH --nodelist=gpu01
+#SBATCH --output=nohier657_fake.out
+#SBATCH --error=nohier657_fake.out
 
 module load cuda/12.9
 module load cudnn/9.11.0.98-cuda12
