@@ -34,7 +34,17 @@ if ! command -v module >/dev/null 2>&1; then
 fi
 
 module purge
+module load freesurfer
 module load fsl
+
+echo "FREESURFER_HOME=${FREESURFER_HOME:-<unset>}"
+if [ -n "${FREESURFER_HOME:-}" ] && [ -f "${FREESURFER_HOME}/SetUpFreeSurfer.sh" ]; then
+  # shellcheck disable=SC1090
+  source "${FREESURFER_HOME}/SetUpFreeSurfer.sh"
+fi
+if [ -n "${FREESURFER_HOME:-}" ]; then
+  export PATH="${FREESURFER_HOME}/bin:${PATH}"
+fi
 
 export FSLOUTPUTTYPE=NIFTI_GZ
 
@@ -45,10 +55,15 @@ echo "=== Sanity: binaries ==="
 command -v python
 command -v mcflirt
 command -v dcm2niix
+command -v flirt
+command -v convert_xfm
+command -v mri_robust_register
+command -v mri_vol2vol
 
 echo "=== Sanity: data mounts ==="
 ls -ld /ceph/chpc/mapped/dian_obs_data_shared/obs_pet_scans_imagids
 ls -ld /scratch/l.peiwang/DIAN_spreadsheet
+ls -ld /scratch/l.peiwang/DIAN_fs
 mkdir -p /scratch/l.peiwang/DIAN_PET
 ls -ld /scratch/l.peiwang/DIAN_PET
 
@@ -58,6 +73,10 @@ ls -l "$PY_SCRIPT"
 echo "=== module list ==="
 module list
 
+EXTRA_ARGS=${DIAN_PET_ARGS:-}
+
+# shellcheck disable=SC2086
 python -u "$PY_SCRIPT" \
   --num-tasks "${SLURM_ARRAY_TASK_COUNT:-10}" \
-  --task-id "${SLURM_ARRAY_TASK_ID:-0}"
+  --task-id "${SLURM_ARRAY_TASK_ID:-0}" \
+  $EXTRA_ARGS
