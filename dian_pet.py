@@ -3,32 +3,19 @@
 """
 DIAN raw PET preprocessing.
 
-This is a pragmatic PUP-like flow for the DIAN raw PET series:
+This stage is intentionally limited to PET preparation only:
 1. Pick the PET DICOM series for each DIAN tau session.
 2. Convert DICOM -> NIfTI with dcm2niix.
 3. Preserve the raw dynamic PET if the series is 4D.
 4. Motion-correct the dynamic frames with MCFLIRT when available.
-5. Sum/average a selected frame window into a single 3D static PET.
-6. Build a cerebellar reference mask from FreeSurfer and compute SUVR in native PET space.
+5. Sum/average the selected frame window into a single 3D PET.
 
-The final usable image for downstream registration is always:
+The final output of this stage is a 3D msum-like PET saved as both:
+  /scratch/l.peiwang/DIAN_PET/<session_label>/pet_msum.nii.gz
   /scratch/l.peiwang/DIAN_PET/<session_label>/pet.nii.gz
 
-The folder also keeps:
-  pet_msum.nii.gz
-  pet_suvr.nii.gz
-  suvr_refmask_cerebellum_t1.nii.gz
-  suvr_refmask_cerebellum_pet.nii.gz
-
-If the source series is dynamic, the folder also keeps:
-  pet_dynamic.nii.gz
-  pet_dynamic.json
-  pet_dynamic_moco.nii.gz
-  pet_preproc.json
-
-This is intentionally PUP-like, not an exact clone of the WashU 4dfp toolchain.
-It mirrors the same core idea: convert, motion-correct, frame-sum, and normalize
-to a reference region before later MRI-space registration.
+`pet.nii.gz` is intentionally the same data as `pet_msum.nii.gz` so the later
+registration script can keep the same input convention.
 """
 
 from __future__ import annotations
@@ -40,36 +27,16 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 
 import nibabel as nib
 import numpy as np
 
-from Data_DIAN_ALL import (
-    build_mr_index,
-    build_pet_index,
-    choose_fs_ref,
-    ci_get,
-    compute_fs2t1_lta,
-    find_fs_leaf,
-    find_fs_subject_dir,
-    norm_text,
-    normalize_visit,
-    resample_label_with_lta,
-    shapes_affines_match,
-    sniff_csv_rows,
-)
-
 
 CSV_PATH = Path("/scratch/l.peiwang/DIAN_spreadsheet/DIANDF18_PET_session_details.csv")
-MR_CSV = Path("/scratch/l.peiwang/DIAN_spreadsheet/DIANDF18_MR_session_details.csv")
 INPUT_ROOT = Path("/ceph/chpc/mapped/dian_obs_data_shared/obs_pet_scans_imagids")
 OUTPUT_ROOT = Path("/scratch/l.peiwang/DIAN_PET")
-FS_ROOT = Path("/scratch/l.peiwang/DIAN_fs")
 
 TAU_TRACERS = {"t80", "m62"}
-SUVR_REF_IDS = {8, 47}
-ATOL_AFFINE = 1e-4
 
 
 def log(msg: str, level: str = "INFO") -> None:
@@ -89,15 +56,13 @@ def env_int(name: str, default: int) -> int:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=(
-            "Convert DIAN tau PET DICOMs and build a PUP-like static PET by "
-            "motion-correcting and summing the dynamic frames."
+            "Convert DIAN tau PET DICOMs and prepare a motion-corrected "
+            "3D PET volume for later MRI-space processing."
         )
     )
     ap.add_argument("--csv-path", default=str(CSV_PATH))
-    ap.add_argument("--mr-csv", default=str(MR_CSV))
     ap.add_argument("--input-root", default=str(INPUT_ROOT))
     ap.add_argument("--output-root", default=str(OUTPUT_ROOT))
-    ap.add_argument("--fs-root", default=str(FS_ROOT))
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
@@ -107,13 +72,13 @@ def parse_args() -> argparse.Namespace:
         "--start-frame",
         type=int,
         default=None,
-        help="1-based first frame to include in the static PET. Default: use all frames.",
+        help="1-based first frame to include in the msum PET. Default: use all frames.",
     )
     ap.add_argument(
         "--end-frame",
         type=int,
         default=None,
-        help="1-based last frame to include in the static PET. Default: use all frames.",
+        help="1-based last frame to include in the msum PET. Default: use all frames.",
     )
     ap.add_argument(
         "--skip-motion-correction",
@@ -163,40 +128,6 @@ def split_for_task(items: list[dict[str, str]], num_tasks: int, task_id: int) ->
     start = task_id * total // num_tasks
     end = (task_id + 1) * total // num_tasks
     return items[start:end]
-
-
-def resolve_mr_session(
-    pet_session: str,
-    pet_index: dict[str, list[dict]],
-    mr_index: dict[tuple[str, str], list[dict]],
-) -> tuple[str, str, str]:
-    pet_matches = pet_index.get(norm_text(pet_session), [])
-    if not pet_matches:
-        raise RuntimeError(f"{pet_session}: not found in PET CSV")
-    if len(pet_matches) > 1:
-        raise RuntimeError(f"{pet_session}: has {len(pet_matches)} PET CSV matches")
-
-    pet_row = pet_matches[0]
-    subject_label = str(ci_get(pet_row, "subject_label", "")).strip()
-    visit_num = str(ci_get(pet_row, "visit_num", "")).strip()
-    if not subject_label or not visit_num:
-        raise RuntimeError(f"{pet_session}: PET CSV row missing subject_label or visit_num")
-
-    mr_matches = mr_index.get((norm_text(subject_label), normalize_visit(visit_num)), [])
-    if not mr_matches:
-        raise RuntimeError(
-            f"{pet_session}: no MR CSV match for subject={subject_label} visit={visit_num}"
-        )
-    if len(mr_matches) > 1:
-        raise RuntimeError(
-            f"{pet_session}: has {len(mr_matches)} MR CSV matches for "
-            f"subject={subject_label} visit={visit_num}"
-        )
-
-    mr_session = str(ci_get(mr_matches[0], "session_label", "")).strip()
-    if not mr_session:
-        raise RuntimeError(f"{pet_session}: matched MR row with empty session_label")
-    return subject_label, visit_num, mr_session
 
 
 def find_session_dir(input_root: Path, session_label: str) -> Path | None:
@@ -299,19 +230,20 @@ def run_command(cmd: list[str], env: dict[str, str] | None = None) -> None:
 
 def run_dcm2niix(dicom_dir: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "dcm2niix",
-        "-z",
-        "y",
-        "-b",
-        "y",
-        "-f",
-        "pet",
-        "-o",
-        str(out_dir),
-        str(dicom_dir),
-    ]
-    run_command(cmd)
+    run_command(
+        [
+            "dcm2niix",
+            "-z",
+            "y",
+            "-b",
+            "y",
+            "-f",
+            "pet",
+            "-o",
+            str(out_dir),
+            str(dicom_dir),
+        ]
+    )
 
 
 def json_sidecar_for_nifti(nii_path: Path) -> Path:
@@ -438,178 +370,6 @@ def motion_correct_dynamic(dynamic_path: Path, out_path: Path, skip_motion_corre
     return out_path, True, "mcflirt"
 
 
-def write_mask_from_labels(label_path: Path, id_list: set[int], out_path: Path) -> int:
-    img = nib.load(str(label_path))
-    data = np.asanyarray(img.dataobj)
-    mask = np.isin(data, list(id_list)).astype(np.uint8)
-    nib.save(nib.Nifti1Image(mask, img.affine, img.header), str(out_path))
-    return int(mask.sum())
-
-
-def register_pet_to_t1_native(pet_path: Path, t1_path: Path, out_pet_in_t1: Path, out_mat: Path) -> None:
-    flirt = shutil.which("flirt")
-    if flirt is None:
-        raise RuntimeError("flirt not found in PATH")
-    env = os.environ.copy()
-    env.setdefault("FSLOUTPUTTYPE", "NIFTI_GZ")
-    run_command(
-        [
-            flirt,
-            "-in",
-            str(pet_path),
-            "-ref",
-            str(t1_path),
-            "-out",
-            str(out_pet_in_t1),
-            "-omat",
-            str(out_mat),
-            "-dof",
-            "6",
-            "-cost",
-            "normmi",
-            "-interp",
-            "trilinear",
-        ],
-        env=env,
-    )
-
-
-def invert_fsl_mat(in_mat: Path, out_mat: Path) -> None:
-    convert_xfm = shutil.which("convert_xfm")
-    if convert_xfm is None:
-        raise RuntimeError("convert_xfm not found in PATH")
-    run_command([convert_xfm, "-omat", str(out_mat), "-inverse", str(in_mat)])
-
-
-def resample_mask_fsl(in_mask: Path, ref_img: Path, mat_path: Path, out_mask: Path) -> None:
-    flirt = shutil.which("flirt")
-    if flirt is None:
-        raise RuntimeError("flirt not found in PATH")
-    env = os.environ.copy()
-    env.setdefault("FSLOUTPUTTYPE", "NIFTI_GZ")
-    run_command(
-        [
-            flirt,
-            "-in",
-            str(in_mask),
-            "-ref",
-            str(ref_img),
-            "-out",
-            str(out_mask),
-            "-applyxfm",
-            "-init",
-            str(mat_path),
-            "-interp",
-            "nearestneighbour",
-        ],
-        env=env,
-    )
-
-
-def prepare_aseg_in_t1(fs_leaf: Path, t1_path: Path, work_dir: Path) -> Path:
-    aseg_src = fs_leaf / "aseg.nii.gz"
-    if not aseg_src.is_file():
-        raise RuntimeError(f"Missing aseg.nii.gz in {fs_leaf}")
-
-    same_aseg, _, _, _, _, _, _ = shapes_affines_match(str(aseg_src), str(t1_path))
-    if same_aseg:
-        return aseg_src
-
-    fs_ref = choose_fs_ref(str(fs_leaf))
-    if not fs_ref:
-        raise RuntimeError(f"Could not find brainmask.nii.gz or T1_fs_orig.nii.gz in {fs_leaf}")
-
-    lta_path = work_dir / "fs_to_T1_suvr.lta"
-    aseg_t1 = work_dir / "aseg_inT1_suvr.nii.gz"
-    compute_fs2t1_lta(fs_ref, str(t1_path), str(lta_path))
-    resample_label_with_lta(str(aseg_src), str(t1_path), str(lta_path), str(aseg_t1))
-    return aseg_t1
-
-
-def compute_suvr_in_native_pet(
-    pet_session: str,
-    msum_pet_path: Path,
-    out_dir: Path,
-    fs_root: Path,
-    pet_index: dict[str, list[dict]],
-    mr_index: dict[tuple[str, str], list[dict]],
-) -> tuple[Path, dict[str, object]]:
-    subject_label, visit_num, mr_session = resolve_mr_session(pet_session, pet_index, mr_index)
-
-    fs_subject_dir = find_fs_subject_dir(str(fs_root), mr_session)
-    if not fs_subject_dir:
-        raise RuntimeError(f"{pet_session}: MR session folder not found under {fs_root}")
-
-    fs_leaf_str = find_fs_leaf(fs_subject_dir)
-    if not fs_leaf_str:
-        raise RuntimeError(
-            f"{pet_session}: no FreeSurfer leaf with T1_fs_orig.nii.gz and aseg.nii.gz for {mr_session}"
-        )
-    fs_leaf = Path(fs_leaf_str)
-    t1_path = fs_leaf / "T1_fs_orig.nii.gz"
-    if not t1_path.is_file():
-        raise RuntimeError(f"{pet_session}: missing T1_fs_orig.nii.gz in {fs_leaf}")
-
-    preview_pet_in_t1 = out_dir / "pet_msum_inT1_preview.nii.gz"
-    pet_to_t1_mat = out_dir / "PET_to_T1_preview.mat"
-    t1_to_pet_mat = out_dir / "T1_to_PET_preview.mat"
-    register_pet_to_t1_native(msum_pet_path, t1_path, preview_pet_in_t1, pet_to_t1_mat)
-    invert_fsl_mat(pet_to_t1_mat, t1_to_pet_mat)
-
-    aseg_in_t1 = prepare_aseg_in_t1(fs_leaf, t1_path, out_dir)
-    refmask_t1 = out_dir / "suvr_refmask_cerebellum_t1.nii.gz"
-    vox_ref_t1 = write_mask_from_labels(aseg_in_t1, SUVR_REF_IDS, refmask_t1)
-    if vox_ref_t1 <= 0:
-        raise RuntimeError(f"{pet_session}: cerebellar reference mask is empty in T1 space")
-
-    refmask_pet = out_dir / "suvr_refmask_cerebellum_pet.nii.gz"
-    resample_mask_fsl(refmask_t1, msum_pet_path, t1_to_pet_mat, refmask_pet)
-
-    pet_img = nib.load(str(msum_pet_path))
-    pet_data = np.asanyarray(pet_img.dataobj).astype(np.float32)
-    refmask_img = nib.load(str(refmask_pet))
-    refmask_data = np.asanyarray(refmask_img.dataobj) > 0
-
-    if pet_data.shape != refmask_data.shape or not np.allclose(
-        pet_img.affine, refmask_img.affine, atol=ATOL_AFFINE
-    ):
-        raise RuntimeError(f"{pet_session}: PET and PET-space reference mask are not on the same grid")
-
-    ref_values = pet_data[refmask_data]
-    ref_values = ref_values[np.isfinite(ref_values)]
-    ref_values = ref_values[ref_values > 0]
-    if ref_values.size == 0:
-        raise RuntimeError(f"{pet_session}: PET-space reference mask has no positive PET voxels")
-
-    ref_mean = float(np.mean(ref_values))
-    if not np.isfinite(ref_mean) or ref_mean <= 0:
-        raise RuntimeError(f"{pet_session}: invalid SUVR reference mean {ref_mean}")
-
-    suvr_named_path = out_dir / "pet_suvr.nii.gz"
-    suvr_path = out_dir / "pet.nii.gz"
-    suvr = pet_data / ref_mean
-    suvr_img = nib.Nifti1Image(suvr.astype(np.float32), pet_img.affine, pet_img.header)
-    nib.save(suvr_img, str(suvr_named_path))
-    nib.save(suvr_img, str(suvr_path))
-
-    return suvr_path, {
-        "subject_label": subject_label,
-        "visit_num": visit_num,
-        "mr_session": mr_session,
-        "fs_leaf": str(fs_leaf),
-        "reference_region": "cerebellar_cortex_aseg_8_47",
-        "reference_voxels_t1": int(vox_ref_t1),
-        "reference_voxels_pet": int(np.count_nonzero(refmask_data)),
-        "reference_mean": ref_mean,
-        "pet_suvr": str(suvr_named_path),
-        "preview_pet_in_t1": str(preview_pet_in_t1),
-        "pet_to_t1_mat": str(pet_to_t1_mat),
-        "t1_to_pet_mat": str(t1_to_pet_mat),
-        "refmask_t1": str(refmask_t1),
-        "refmask_pet": str(refmask_pet),
-    }
-
-
 def collapse_dynamic_to_static(
     dynamic_path: Path,
     out_path: Path,
@@ -649,8 +409,6 @@ def convert_and_prepare_session(
     dicom_dir: Path,
     out_dir: Path,
     args: argparse.Namespace,
-    pet_index: dict[str, list[dict]],
-    mr_index: dict[tuple[str, str], list[dict]],
 ) -> tuple[str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     final_pet = out_dir / "pet.nii.gz"
@@ -658,7 +416,6 @@ def convert_and_prepare_session(
         return "skip", "final pet.nii.gz already exists"
 
     msum_pet = out_dir / "pet_msum.nii.gz"
-
     tmp_dir = out_dir / "_dcm2niix_tmp"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
@@ -673,7 +430,6 @@ def convert_and_prepare_session(
         meta = read_json(raw_json)
         raw_img, raw_data = inspect_pet(raw_nii)
         frame_means, frame_maxes = summarize_frames(raw_data)
-
         preproc_info = {
             "session_label": session_label,
             "tracer": tracer,
@@ -687,6 +443,7 @@ def convert_and_prepare_session(
 
         if raw_data.ndim == 3:
             shutil.copy2(raw_nii, msum_pet)
+            shutil.copy2(raw_nii, final_pet)
             if raw_json and raw_json.exists():
                 shutil.copy2(raw_json, out_dir / "pet_source.json")
             preproc_info.update(
@@ -707,7 +464,9 @@ def convert_and_prepare_session(
 
             dynamic_moco = out_dir / "pet_dynamic_moco.nii.gz"
             dynamic_for_sum, did_moco, moco_note = motion_correct_dynamic(
-                raw_dynamic, dynamic_moco, args.skip_motion_correction
+                raw_dynamic,
+                dynamic_moco,
+                args.skip_motion_correction,
             )
             frame_weights = frame_weights_from_json(meta, n_frames)
             sum_info = collapse_dynamic_to_static(
@@ -717,6 +476,7 @@ def convert_and_prepare_session(
                 end_frame,
                 frame_weights,
             )
+            shutil.copy2(msum_pet, final_pet)
             preproc_info.update(
                 {
                     "mode": "dynamic_to_static",
@@ -730,25 +490,15 @@ def convert_and_prepare_session(
         else:
             raise RuntimeError(f"Unsupported PET dimensionality shape={raw_img.shape}")
 
-        suvr_path, suvr_info = compute_suvr_in_native_pet(
-            session_label,
-            msum_pet,
-            out_dir,
-            Path(args.fs_root),
-            pet_index,
-            mr_index,
-        )
         preproc_info.update(
             {
-                "final_pet": str(suvr_path),
                 "pet_msum": str(msum_pet),
-                "suvr": suvr_info,
+                "final_pet": str(final_pet),
             }
         )
-
         with (out_dir / "pet_preproc.json").open("w", encoding="utf-8") as f:
             json.dump(preproc_info, f, indent=2, sort_keys=True)
-        return "ok", f"{preproc_info['mode']}+suvr"
+        return "ok", preproc_info["mode"]
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -756,12 +506,9 @@ def convert_and_prepare_session(
 
 def main() -> None:
     args = parse_args()
-
     csv_path = Path(args.csv_path)
-    mr_csv_path = Path(args.mr_csv)
     input_root = Path(args.input_root)
     output_root = Path(args.output_root)
-    fs_root = Path(args.fs_root)
 
     if shutil.which("dcm2niix") is None:
         raise SystemExit("dcm2niix not found in PATH")
@@ -771,17 +518,10 @@ def main() -> None:
         raise SystemExit("--task-id must satisfy 0 <= task-id < num-tasks")
     if not csv_path.exists():
         raise SystemExit(f"CSV not found: {csv_path}")
-    if not mr_csv_path.exists():
-        raise SystemExit(f"MR CSV not found: {mr_csv_path}")
     if not input_root.exists():
         raise SystemExit(f"INPUT_ROOT not found: {input_root}")
-    if not fs_root.exists():
-        raise SystemExit(f"FS_ROOT not found: {fs_root}")
 
     output_root.mkdir(parents=True, exist_ok=True)
-    pet_index = build_pet_index(sniff_csv_rows(str(csv_path)))
-    mr_index = build_mr_index(sniff_csv_rows(str(mr_csv_path)))
-
     sessions = read_tau_sessions(csv_path)
     if args.limit is not None:
         sessions = sessions[: args.limit]
@@ -836,8 +576,6 @@ def main() -> None:
                 dicom_dir,
                 output_root / session_label,
                 args,
-                pet_index,
-                mr_index,
             )
             if status == "ok":
                 log(f"{session_label}: prepared PET ({note})")

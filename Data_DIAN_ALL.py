@@ -11,7 +11,8 @@ Flow:
 - MR CSV maps (subject_label, visit_num) -> MR session_label
 - FreeSurfer exports live under FS_ROOT/<mr_session>/... and contain:
   T1_fs_orig.nii.gz, aseg.nii.gz, aparc_aseg.nii.gz, optionally brainmask.nii.gz
-- PET is rigidly registered to the subject T1
+- PET is rigidly registered to the subject T1 as PET_in_T1_msum.nii.gz
+- SUVR is computed in T1 space from cerebellar cortex aseg labels and saved as PET_in_T1.nii.gz
 - aseg/aparc are checked against T1; if needed they are resampled into T1 space
 - Standard outputs are written under OUT_ROOT/<subject_label>
 
@@ -50,6 +51,7 @@ KEEP_LABELS = {
 BG_IDS_STRICT = {11, 50, 12, 51, 13, 52, 26, 58}
 BG_IDS = BG_IDS_STRICT
 CORTEX_LABELS = {3, 42}
+SUVR_REF_IDS = {8, 47}
 
 TEMPORAL_BASE = [
     "superiortemporal", "middletemporal", "inferiortemporal",
@@ -269,6 +271,29 @@ def apply_mask_to_image(image_path, mask_bool, mask_affine, out_path):
     masked = data * mask_bool.astype(data.dtype)
     nib.save(nib.Nifti1Image(masked, img.affine, img.header), out_path)
     return int(mask_bool.sum())
+
+
+def compute_suvr_from_reference_mask(pet_path, refmask_bool, ref_affine, out_path):
+    img = nib.load(pet_path)
+    data = np.asanyarray(img.dataobj).astype(np.float32)
+    if data.shape != refmask_bool.shape or not np.allclose(img.affine, ref_affine, atol=ATOL_AFFINE):
+        raise RuntimeError(
+            f"SUVR mask grid mismatch for {pet_path}: image_shape={data.shape}, mask_shape={refmask_bool.shape}"
+        )
+
+    ref_values = data[refmask_bool]
+    ref_values = ref_values[np.isfinite(ref_values)]
+    ref_values = ref_values[ref_values > 0]
+    if ref_values.size == 0:
+        raise RuntimeError(f"Reference mask has no positive PET voxels in {pet_path}")
+
+    ref_mean = float(np.mean(ref_values))
+    if not np.isfinite(ref_mean) or ref_mean <= 0:
+        raise RuntimeError(f"Invalid SUVR reference mean {ref_mean} for {pet_path}")
+
+    suvr = data / ref_mean
+    nib.save(nib.Nifti1Image(suvr.astype(np.float32), img.affine, img.header), out_path)
+    return ref_mean, int(ref_values.size)
 
 
 def discover_pet_dirs(pet_root):
@@ -528,12 +553,13 @@ def process_job(job, args, lut):
             }
 
     dst_t1 = os.path.join(out_dir, "T1.nii.gz")
+    dst_pet_msum = os.path.join(out_dir, "PET_in_T1_msum.nii.gz")
     dst_pet = os.path.join(out_dir, "PET_in_T1.nii.gz")
     pet_mat = os.path.join(out_dir, "PET_to_T1.mat")
     shutil.copy2(t1_src, dst_t1)
 
     try:
-        run_pet_to_t1_registration(job["pet_path"], dst_t1, dst_pet, pet_mat, out_dir)
+        run_pet_to_t1_registration(job["pet_path"], dst_t1, dst_pet_msum, pet_mat, out_dir)
     except Exception as exc:
         log(f"[FAIL:FLIRT] {subject_label} {exc}", level="ERROR")
         return {
@@ -600,15 +626,19 @@ def process_job(job, args, lut):
     bg_path = os.path.join(out_dir, "mask_basalganglia.nii.gz")
     nobg_path = os.path.join(out_dir, "mask_parenchyma_noBG.nii.gz")
     cortex_path = os.path.join(out_dir, "mask_cortex.nii.gz")
+    suvr_refmask_path = os.path.join(out_dir, "suvr_refmask_cerebellum.nii.gz")
 
     make_aseg_mask_nifti(aseg_in_t1, paren_path)
     vox_bg = write_mask_from_labels(aseg_in_t1, BG_IDS, bg_path)
     vox_cortex = write_mask_from_labels(aseg_in_t1, CORTEX_LABELS, cortex_path)
+    vox_suvr_ref = write_mask_from_labels(aseg_in_t1, SUVR_REF_IDS, suvr_refmask_path)
 
     paren_img = nib.load(paren_path)
     bg_img = nib.load(bg_path)
+    suvr_ref_img = nib.load(suvr_refmask_path)
     paren_np = np.asanyarray(paren_img.dataobj).astype(bool)
     bg_np = np.asanyarray(bg_img.dataobj).astype(bool)
+    suvr_ref_np = np.asanyarray(suvr_ref_img.dataobj).astype(bool)
     if paren_np.shape != bg_np.shape or not np.allclose(paren_img.affine, bg_img.affine, atol=ATOL_AFFINE):
         msg = "Parenchyma and BG masks are not on the same grid"
         log(f"[FAIL:MASK_GRID] {subject_label} {msg}", level="ERROR")
@@ -620,9 +650,49 @@ def process_job(job, args, lut):
             "status": "fail_mask_grid",
             "note": msg,
         }
+    if paren_np.shape != suvr_ref_np.shape or not np.allclose(paren_img.affine, suvr_ref_img.affine, atol=ATOL_AFFINE):
+        msg = "Parenchyma and SUVR reference masks are not on the same grid"
+        log(f"[FAIL:SUVR_MASK_GRID] {subject_label} {msg}", level="ERROR")
+        return {
+            "subject_label": subject_label,
+            "visit_num": job["visit_num"],
+            "pet_session": job["pet_session"],
+            "mr_session": job["mr_session"],
+            "status": "fail_suvr_mask_grid",
+            "note": msg,
+        }
+    if vox_suvr_ref <= 0:
+        msg = "SUVR cerebellar reference mask is empty"
+        log(f"[FAIL:SUVR_REF_EMPTY] {subject_label} {msg}", level="ERROR")
+        return {
+            "subject_label": subject_label,
+            "visit_num": job["visit_num"],
+            "pet_session": job["pet_session"],
+            "mr_session": job["mr_session"],
+            "status": "fail_suvr_ref_empty",
+            "note": msg,
+        }
 
     nobg_np = (paren_np & ~bg_np).astype(np.uint8)
     nib.save(nib.Nifti1Image(nobg_np, paren_img.affine, paren_img.header), nobg_path)
+
+    try:
+        suvr_ref_mean, suvr_ref_vox = compute_suvr_from_reference_mask(
+            dst_pet_msum,
+            suvr_ref_np.astype(bool),
+            suvr_ref_img.affine,
+            dst_pet,
+        )
+    except Exception as exc:
+        log(f"[FAIL:SUVR] {subject_label} {exc}", level="ERROR")
+        return {
+            "subject_label": subject_label,
+            "visit_num": job["visit_num"],
+            "pet_session": job["pet_session"],
+            "mr_session": job["mr_session"],
+            "status": "fail_suvr",
+            "note": str(exc),
+        }
 
     roi_counts = {}
     hip_ids = [lut.get("Left-Hippocampus", 17), lut.get("Right-Hippocampus", 53)]
@@ -671,12 +741,17 @@ def process_job(job, args, lut):
         "pet_session": job["pet_session"],
         "mr_session": job["mr_session"],
         "pet_source": job["pet_path"],
+        "pet_in_t1_msum": dst_pet_msum,
+        "pet_in_t1_suvr": dst_pet,
         "fs_subject_dir": fs_subject_dir,
         "fs_leaf": fs_leaf,
         "t1_source": t1_src,
         "aseg_source": aseg_src,
         "aparc_source": aparc_src,
         "roi_counts": roi_counts,
+        "suvr_reference_region": "cerebellar_cortex_aseg_8_47",
+        "suvr_reference_voxels": int(suvr_ref_vox),
+        "suvr_reference_mean": float(suvr_ref_mean),
         "bg_voxels": int(vox_bg),
         "cortex_voxels": int(vox_cortex),
     }

@@ -44,22 +44,7 @@ if ! command -v module >/dev/null 2>&1; then
 fi
 
 module purge
-module load freesurfer
 module load fsl
-
-echo "FREESURFER_HOME=${FREESURFER_HOME:-<unset>}"
-if [ -n "${FREESURFER_HOME:-}" ] && [ -f "${FREESURFER_HOME}/SetUpFreeSurfer.sh" ]; then
-  # shellcheck disable=SC1090
-  source "${FREESURFER_HOME}/SetUpFreeSurfer.sh"
-fi
-if [ -n "${FREESURFER_HOME:-}" ]; then
-  export PATH="${FREESURFER_HOME}/bin:${PATH}"
-fi
-for fs_fallback in /export/freesurfer/8.1.0 /export/freesurfer/8.1.0/bin; do
-  if [ -d "$fs_fallback" ] && [[ ":$PATH:" != *":$fs_fallback:"* ]]; then
-    export PATH="$fs_fallback:$PATH"
-  fi
-done
 
 export FSLOUTPUTTYPE=NIFTI_GZ
 
@@ -70,15 +55,10 @@ echo "=== Sanity: binaries ==="
 require_bin python
 require_bin mcflirt
 require_bin dcm2niix
-require_bin flirt
-require_bin convert_xfm
-require_bin mri_robust_register
-require_bin mri_vol2vol
 
 echo "=== Sanity: data mounts ==="
 ls -ld /ceph/chpc/mapped/dian_obs_data_shared/obs_pet_scans_imagids
 ls -ld /scratch/l.peiwang/DIAN_spreadsheet
-ls -ld /scratch/l.peiwang/DIAN_fs
 mkdir -p /scratch/l.peiwang/DIAN_PET
 ls -ld /scratch/l.peiwang/DIAN_PET
 
