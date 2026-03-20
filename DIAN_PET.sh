@@ -3,7 +3,7 @@
 #SBATCH --mem=16G
 #SBATCH --time=23:50:00
 #SBATCH --cpus-per-task=8
-#SBATCH --partition=tier1_cpu
+#SBATCH --partition=tier1_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --array=0-9%10
 #SBATCH --output=slurm-%A_%a_dian_pet.out
