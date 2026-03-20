@@ -5,6 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=tier1_cpu
 #SBATCH --account=shinjini_kundu
+#SBATCH --exclude=node19.cluster
 #SBATCH --array=0-9%10
 #SBATCH --output=slurm-%A_%a_dian_all.out
 #SBATCH --error=slurm-%A_%a_dian_all.out
