@@ -22,6 +22,16 @@ require_bin() {
   return 1
 }
 
+check_optional_bin() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  echo "[WARN] optional FreeSurfer binary not found in PATH: $name" >&2
+  return 0
+}
+
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 cd "$SUBMIT_DIR"
 REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -70,8 +80,8 @@ conda activate pasta
 echo "=== Sanity: binaries ==="
 require_bin python
 require_bin flirt
-require_bin mri_vol2vol
-require_bin mri_robust_register
+check_optional_bin mri_vol2vol
+check_optional_bin mri_robust_register
 
 echo "=== Sanity: data mounts ==="
 ls -ld /scratch/l.peiwang/DIAN_PET
