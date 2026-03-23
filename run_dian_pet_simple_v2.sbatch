@@ -12,7 +12,6 @@
 
 set -euo pipefail
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 module purge
 module load fsl
