@@ -11,7 +11,6 @@
 
 set -euo pipefail
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 module purge
 module load fsl
@@ -22,9 +21,9 @@ conda activate pasta
 which python
 which dcm2niix
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-python "$SCRIPT_DIR/dian_pet_simple.py" \
+
+python dian_pet_simple.py \
   --root /ceph/chpc/mapped/dian_obs_data_shared/obs_pet_scans_imagids \
   --out-root /scratch/l.peiwang/DIAN_PET \
   --num-tasks "${SLURM_ARRAY_TASK_COUNT:-10}" \
