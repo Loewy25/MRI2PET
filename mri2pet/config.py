@@ -34,7 +34,7 @@ DATA_RANGE  = 3.5
 
 torch.backends.cudnn.benchmark = True
 
-SPLITS_DIR = os.path.join(“/scratch/l.peiwang/braak_merged_kari_all”, "CV5_braak_strat")
+SPLITS_DIR = os.path.join('/scratch/l.peiwang/braak_merged_kari_all', "CV5_braak_strat")
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
