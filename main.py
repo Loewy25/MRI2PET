@@ -5,7 +5,7 @@ import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, DATA_RANGE,
+    EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, RESIZE_TO,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
@@ -21,6 +21,52 @@ from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
 
+
+def init_wandb_run():
+    service_wait = float(
+        os.environ.get("WANDB_SERVICE_WAIT", os.environ.get("WANDB__SERVICE_WAIT", "300"))
+    )
+    settings = None
+    try:
+        settings = wandb.Settings(_service_wait=service_wait)
+    except Exception:
+        settings = None
+
+    try:
+        return wandb.init(
+            project="mri2pet",
+            name=RUN_NAME,
+            dir=OUT_RUN,
+            settings=settings,
+            config={
+                "root_dir": ROOT_DIR,
+                "run_name": RUN_NAME,
+                "epochs": EPOCHS,
+                "gamma": GAMMA,
+                "data_range": DATA_RANGE,
+                "batch_size": BATCH_SIZE,
+                "resize_to": RESIZE_TO,
+                "oversample_enable": OVERSAMPLE_ENABLE,
+                "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
+                "aug_enable": AUG_ENABLE,
+                "aug_prob": AUG_PROB,
+                "aug_flip_prob": AUG_FLIP_PROB,
+                "aug_intensity_prob": AUG_INTENSITY_PROB,
+                "aug_noise_std": AUG_NOISE_STD,
+                "aug_scale_min": AUG_SCALE_MIN,
+                "aug_scale_max": AUG_SCALE_MAX,
+                "aug_shift_min": AUG_SHIFT_MIN,
+                "aug_shift_max": AUG_SHIFT_MAX,
+                "roi_hi_q": ROI_HI_Q,
+                "roi_hi_lambda": ROI_HI_LAMBDA,
+                "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
+            },
+        )
+    except Exception as exc:
+        print(f"[WARN] wandb init failed: {exc}")
+        print("[WARN] Continuing with wandb disabled.")
+        return None
+
 if __name__ == "__main__":
     print(f"Data root: {ROOT_DIR}")
     print(f"Output root: {OUT_DIR}")
@@ -29,36 +75,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # ---- NEW: wandb init ----
-    wandb.init(
-        project="mri2pet",      
-        name=RUN_NAME,          
-        dir=OUT_RUN,            
-        config={
-            "root_dir": ROOT_DIR,
-            "run_name": RUN_NAME,
-            "epochs": EPOCHS,
-            "gamma": GAMMA,
-            "data_range": DATA_RANGE,
-            "batch_size": 1,
-            "resize_to": (128, 128, 128),
-                        "oversample_enable": OVERSAMPLE_ENABLE,
-            "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
-            "aug_enable": AUG_ENABLE,
-            "aug_prob": AUG_PROB,
-            "aug_flip_prob": AUG_FLIP_PROB,
-            "aug_intensity_prob": AUG_INTENSITY_PROB,
-            "aug_noise_std": AUG_NOISE_STD,
-            "aug_scale_min": AUG_SCALE_MIN,
-            "aug_scale_max": AUG_SCALE_MAX,
-            "aug_shift_min": AUG_SHIFT_MIN,
-            "aug_shift_max": AUG_SHIFT_MAX,
-            "roi_hi_q": ROI_HI_Q,
-            "roi_hi_lambda": ROI_HI_LAMBDA,
-            "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
-
-        },
-    )
+    wandb_run = init_wandb_run()
 
     # Build loaders
     if os.path.isfile(FOLD_CSV):
@@ -82,8 +99,9 @@ if __name__ == "__main__":
     G = Generator(in_ch=1, out_ch=1)
     D = CondPatchDiscriminator3D(in_ch=2)
 
-    wandb.watch(G, log="gradients", log_freq=50)
-    wandb.watch(D, log="gradients", log_freq=50)
+    if wandb_run is not None:
+        wandb.watch(G, log="gradients", log_freq=50)
+        wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
     out = train_paggan(
@@ -91,7 +109,7 @@ if __name__ == "__main__":
         device=device, epochs=EPOCHS, gamma=GAMMA,
         data_range=DATA_RANGE,
         verbose=True,
-        log_to_wandb=True,              
+        log_to_wandb=(wandb_run is not None),
     )
 
     # Save curves & CSV (still useful)
@@ -111,13 +129,13 @@ if __name__ == "__main__":
     )
     print("Test metrics:", metrics)
 
-    # ---- NEW: log test metrics to wandb ----
-    wandb.log({
-        "test/SSIM": metrics["SSIM"],
-        "test/PSNR": metrics["PSNR"],
-        "test/MSE": metrics["MSE"],
-        "test/MMD": metrics["MMD"],
-    })
+    if wandb_run is not None:
+        wandb.log({
+            "test/SSIM": metrics["SSIM"],
+            "test/PSNR": metrics["PSNR"],
+            "test/MSE": metrics["MSE"],
+            "test/MMD": metrics["MMD"],
+        })
 
     metrics_txt = os.path.join(OUT_RUN, "test_metrics.txt")
     with open(metrics_txt, "w") as f:
@@ -125,4 +143,5 @@ if __name__ == "__main__":
             f.write(f"{k}: {v}\n")
     print(f"Saved test metrics to: {metrics_txt}")
 
-    wandb.finish()
+    if wandb_run is not None:
+        wandb.finish()

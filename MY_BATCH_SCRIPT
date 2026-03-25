@@ -24,6 +24,7 @@ conda activate pasta
 pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
+export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
@@ -51,7 +52,6 @@ export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
 python main.py
-
 
 
 
