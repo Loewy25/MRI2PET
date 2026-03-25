@@ -12,6 +12,7 @@
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
 
+set -euo pipefail
 
 
 module load cuda/12.9
@@ -25,11 +26,24 @@ pip install wandb
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 export WANDB__SERVICE_WAIT=300
+export PYTHONUNBUFFERED=1
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
-# ---- NEW: per-job config ----
-export RUN_NAME="all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7"
-export FOLD_INDEX=0
+# ---- CV run config ----
+export RUN_NAME_PREFIX="all_deeper_uptake_kernel3_skip_spatial_nohierachy"
+export RUN_NAME_SUFFIX="os65_aug_7"
+export OUT_ROOT="/home/l.peiwang/MRI2PET"
+export ROI_ROOT="/scratch/l.peiwang/kari_all"
+export META_CSV="/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"
+
+# Train/val use batch size 2; test/export stays batch size 1 to preserve per-subject outputs.
+export BATCH_SIZE=2
+export TEST_BATCH_SIZE=1
+
+# Validation-driven scheduling / stopping
+export LR_PLATEAU_FACTOR=0.5
+export LR_PLATEAU_PATIENCE=20
+export EARLY_STOP_PATIENCE=30
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
@@ -51,7 +65,29 @@ export ROI_HI_Q=0.85
 export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
-python main.py
+declare -a VOLS_ROOTS=()
 
+for FOLD_INDEX in 0 1 2 3 4; do
+  export FOLD_INDEX
+  FOLD_NUM=$((FOLD_INDEX + 1))
+  export RUN_NAME="${RUN_NAME_PREFIX}_fold${FOLD_NUM}_${RUN_NAME_SUFFIX}"
+  echo "=== [$(date)] Starting fold ${FOLD_NUM}/5: RUN_NAME=${RUN_NAME} ==="
+  python -u main.py
+  VOLS_ROOTS+=("${OUT_ROOT}/${RUN_NAME}/volumes")
+  echo "=== [$(date)] Finished fold ${FOLD_NUM}/5 ==="
+done
 
+RESULT_DIR="${OUT_ROOT}/${RUN_NAME_PREFIX}_${RUN_NAME_SUFFIX}_RESULT"
+mkdir -p "${RESULT_DIR}"
+
+echo "=== [$(date)] Starting integrated comprehensive evaluation ==="
+python -u eval_taupet_comprehensive.py \
+  --roi-root "${ROI_ROOT}" \
+  --vols-roots "${VOLS_ROOTS[@]}" \
+  --meta-csv "${META_CSV}" \
+  --session-col TAU_PET_Session \
+  --split-by braak \
+  --thr-braak 1.2 \
+  --out "${RESULT_DIR}"
+echo "=== [$(date)] Finished integrated comprehensive evaluation ==="
 

@@ -21,7 +21,8 @@ RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = 1
+BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "2"))
+TEST_BATCH_SIZE = int(os.environ.get("TEST_BATCH_SIZE", "1"))
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
@@ -29,6 +30,9 @@ EPOCHS      = 150
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
+LR_PLATEAU_FACTOR   = float(os.environ.get("LR_PLATEAU_FACTOR", "0.5"))
+LR_PLATEAU_PATIENCE = int(os.environ.get("LR_PLATEAU_PATIENCE", "20"))
+EARLY_STOP_PATIENCE = int(os.environ.get("EARLY_STOP_PATIENCE", "30"))
 
 DATA_RANGE  = 3.5
 

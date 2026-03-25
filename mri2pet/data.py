@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader, random_split, Subset, Weighted
 
 
 from .config import (
-    ROOT_DIR, RESIZE_TO, TRAIN_FRACTION, VAL_FRACTION, BATCH_SIZE,
+    ROOT_DIR, RESIZE_TO, TRAIN_FRACTION, VAL_FRACTION, BATCH_SIZE, TEST_BATCH_SIZE,
     NUM_WORKERS, PIN_MEMORY,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET, OVERSAMPLE_MAX_WEIGHT
 )
@@ -168,6 +168,7 @@ def build_loaders(
     train_fraction: float = TRAIN_FRACTION,
     val_fraction: float = VAL_FRACTION,
     batch_size: int = BATCH_SIZE,
+    test_batch_size: int = TEST_BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     pin_memory: bool = PIN_MEMORY,
     seed: int = 1999,
@@ -191,7 +192,7 @@ def build_loaders(
         collate_fn=_collate_keep_meta
     )
     dl_test = DataLoader(
-        test_set, batch_size=batch_size, shuffle=False,
+        test_set, batch_size=test_batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
         collate_fn=_collate_keep_meta
     )
@@ -260,6 +261,7 @@ def build_loaders_from_fold_csv(
     root: str = ROOT_DIR,
     resize_to: Optional[Tuple[int,int,int]] = RESIZE_TO,
     batch_size: int = BATCH_SIZE,
+    test_batch_size: int = TEST_BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     pin_memory: bool = PIN_MEMORY,
 ):
@@ -390,7 +392,7 @@ def build_loaders_from_fold_csv(
     )
     dl_test = DataLoader(
         test_set,
-        batch_size=batch_size,
+        batch_size=test_batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,

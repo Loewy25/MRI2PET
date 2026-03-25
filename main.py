@@ -5,13 +5,14 @@ import wandb  # <-- add this
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, RESIZE_TO,
+    EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, TEST_BATCH_SIZE, RESIZE_TO,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
+    LR_PLATEAU_FACTOR, LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
 )
 
 from mri2pet.data import build_loaders
@@ -45,6 +46,7 @@ def init_wandb_run():
                 "gamma": GAMMA,
                 "data_range": DATA_RANGE,
                 "batch_size": BATCH_SIZE,
+                "test_batch_size": TEST_BATCH_SIZE,
                 "resize_to": RESIZE_TO,
                 "oversample_enable": OVERSAMPLE_ENABLE,
                 "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
@@ -60,6 +62,9 @@ def init_wandb_run():
                 "roi_hi_q": ROI_HI_Q,
                 "roi_hi_lambda": ROI_HI_LAMBDA,
                 "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
+                "lr_plateau_factor": LR_PLATEAU_FACTOR,
+                "lr_plateau_patience": LR_PLATEAU_PATIENCE,
+                "early_stop_patience": EARLY_STOP_PATIENCE,
             },
         )
     except Exception as exc:
@@ -110,6 +115,10 @@ if __name__ == "__main__":
         data_range=DATA_RANGE,
         verbose=True,
         log_to_wandb=(wandb_run is not None),
+    )
+    print(
+        f"Best validation recon: {out['best_val']:.4f} at epoch {out['best_epoch']} "
+        f"(early_stopped={out['stopped_early']})"
     )
 
     # Save curves & CSV (still useful)

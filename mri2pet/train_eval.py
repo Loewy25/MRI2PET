@@ -14,6 +14,7 @@ from .config import (
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
+    LR_PLATEAU_FACTOR, LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
@@ -32,6 +33,9 @@ def train_paggan(
     data_range: float = DATA_RANGE,
     verbose: bool = True,
     log_to_wandb: bool = False,
+    plateau_factor: float = LR_PLATEAU_FACTOR,
+    plateau_patience: int = LR_PLATEAU_PATIENCE,
+    early_stop_patience: int = EARLY_STOP_PATIENCE,
 ) -> Dict[str, Any]:
     G.to(device)
     D.to(device)
@@ -40,11 +44,20 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
+    scheduler_G = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt_G,
+        mode="min",
+        factor=plateau_factor,
+        patience=plateau_patience,
+    )
     adv_criterion = nn.MSELoss()
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
+    best_epoch = 0
+    epochs_since_best = 0
+    stopped_early = False
 
     hist = {"train_G": [], "train_D": [], "val_recon": []}
 
@@ -446,6 +459,7 @@ def train_paggan(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
+        lr_g_epoch = opt_G.param_groups[0]["lr"]
 
         if val_loader is not None:
             G.eval()
@@ -470,10 +484,17 @@ def train_paggan(
 
             if val_recon < best_val:
                 best_val = val_recon
+                best_epoch = epoch
+                epochs_since_best = 0
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
+            else:
+                epochs_since_best += 1
+
+            scheduler_G.step(val_recon)
+            lr_g_epoch = opt_G.param_groups[0]["lr"]
 
             if verbose:
                 dt = time.time() - t0
@@ -481,7 +502,7 @@ def train_paggan(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                    f"| best {best_val:.4f}  | {dt:.1f}s"
+                    f"| best {best_val:.4f}  | lr_G {lr_g_epoch:.2e}  | {dt:.1f}s"
                 )
                 print(
                     f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
@@ -517,6 +538,7 @@ def train_paggan(
                 "mgda/w_recon_global": avg_w_global,
                 "mgda/w_recon_roi": avg_w_roi,
                 "mgda/w_gan": avg_w_gan,
+                "train/lr_G": lr_g_epoch,
 
                 # keep grad norm tracking
                 "mgda/grad_recon_global_norm": avg_grad_recon,
@@ -526,7 +548,18 @@ def train_paggan(
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
                 log_dict["val/best_recon_loss"] = best_val
+                log_dict["val/best_epoch"] = best_epoch
+                log_dict["train/epochs_since_best"] = epochs_since_best
             wandb.log(log_dict, step=epoch)
+
+        if val_loader is not None and early_stop_patience > 0 and epochs_since_best >= early_stop_patience:
+            stopped_early = True
+            if verbose:
+                print(
+                    f"[EARLY STOP] epoch={epoch} best_epoch={best_epoch} "
+                    f"best_val={best_val:.4f} patience={early_stop_patience}"
+                )
+            break
 
     # ---- Load best weights ----
     if best_G is not None:
@@ -534,7 +567,14 @@ def train_paggan(
     if best_D is not None:
         D.load_state_dict(best_D)
 
-    return {"history": hist, "best_G": best_G, "best_D": best_D}
+    return {
+        "history": hist,
+        "best_G": best_G,
+        "best_D": best_D,
+        "best_epoch": best_epoch,
+        "best_val": best_val,
+        "stopped_early": stopped_early,
+    }
 
 
 @torch.no_grad()
