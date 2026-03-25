@@ -48,7 +48,7 @@ pip install torch
 pip install pydicom
 # 5) Run script
 
-python summary_pet.py
+#python summary_pet.py
 
 #python add_label.py
 
@@ -91,10 +91,10 @@ python summary_pet.py
 # ------------------------------------------------------------
 #python summary_extra_modality.py
 # Actual job
-#python cv_creator_with_label.py \
-#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --root /scratch/l.peiwang/kari_all \
-#  --outdir /scratch/l.peiwang/braak_merged_kari_all/CV5_braak_strat
+python cv_creator_with_label.py \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --root /scratch/l.peiwang/kari_all \
+  --outdir /scratch/l.peiwang/braak_merged_kari_all/CV5_braak_strat
 
 #BASE_DIR=/scratch/l.peiwang/kari_all 
 #python Brain_mask.py
