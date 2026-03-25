@@ -9,9 +9,8 @@
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
 # Output and error filenames based on job ID and task ID
-#SBATCH --output=output_adnioasis.out
-#SBATCH --error=output_adnioasis.err
-
+#SBATCH --output=slurm-%A_haha.out
+#SBATCH --error=slurm-%A_haha.err
 
 
 
