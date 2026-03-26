@@ -9,8 +9,8 @@
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
 # Output and error filenames based on job ID and task ID
-#SBATCH --output=slurm-%A_haha.out
-#SBATCH --error=slurm-%A_haha.err
+#SBATCH --output=thistest.out
+#SBATCH --error=thistest.err
 
 set -euo pipefail
 
