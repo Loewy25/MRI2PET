@@ -30,7 +30,7 @@ export PYTHONUNBUFFERED=1
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- CV run config ----
-export RUN_NAME_PREFIX="all_deeper_uptake_kernel3_skip_spatial_nohierachy"
+export RUN_NAME_PREFIX="long_test"
 export RUN_NAME_SUFFIX="os65_aug_7"
 export OUT_ROOT="/home/l.peiwang/MRI2PET"
 export ROI_ROOT="/scratch/l.peiwang/kari_all"
