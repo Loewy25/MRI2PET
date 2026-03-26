@@ -13,19 +13,12 @@
 #SBATCH --error=thistest.err
 
 
-python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
-print("cuda version:", torch.version.cuda)
-print("device count:", torch.cuda.device_count())
-PY
 
 set -euo pipefail
 
+module load cuda/12.2
+module load cudnn/9.6.0.74-cuda12
 
-module load cuda/12.9
-module load cudnn/9.11.0.98-cuda12
 
 
  . ~/miniconda3/bin/activate
