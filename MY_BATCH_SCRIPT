@@ -14,17 +14,20 @@
 
 
 
+
 set -euo pipefail
 
-module load cuda/12.2
-module load cudnn/9.6.0.74-cuda12
-
-
-
- . ~/miniconda3/bin/activate
+. ~/miniconda3/bin/activate
 conda activate pasta
 
-pip install wandb
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("torch cuda:", torch.version.cuda)
+print("device count:", torch.cuda.device_count())
+PY
+
 
 export WANDB_API_KEY="b8c85c848af247ca775dabc571ae0012a4c36877"
 export WANDB__SERVICE_WAIT=300
