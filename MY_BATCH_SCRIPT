@@ -4,7 +4,7 @@
 #SBATCH --mem=20G               # Request 400GB memory
 #SBATCH -t 50:30:00             # Set maximum time
 ##SBATCH --gres=gpu:1
-#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --gres=gpu:nvidia_a100_80:1
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
@@ -28,7 +28,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os65_aug_7"
+export RUN_NAME="?"
 export FOLD_INDEX=0
 
 # Oversampling (train only)
