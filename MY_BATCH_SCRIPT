@@ -34,7 +34,7 @@ export FOLD_INDEX=4
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.65
+export OVERSAMPLE_LABEL3_TARGET=0.4
 
 # Augmentation (train only)
 export AUG_ENABLE=1
