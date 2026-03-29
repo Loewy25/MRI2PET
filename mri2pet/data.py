@@ -380,7 +380,17 @@ class KariAV1451Dataset(Dataset):
         self.sid_to_label = sid_to_label or {}
         self.clinical_stats: Optional[Dict[str, Tuple[float, float]]] = None
 
-        subject_dirs = sorted(entry.path for entry in os.scandir(root_dir) if entry.is_dir())
+        def _is_subject_dir(path: str) -> bool:
+            required = [
+                "T1_masked.nii.gz",
+                "FLAIR_in_T1_masked.nii.gz",
+                "PET_in_T1_masked.nii.gz",
+                "aseg_brainmask.nii.gz",
+                "mask_cortex.nii.gz",
+            ]
+            return all(os.path.exists(os.path.join(path, name)) for name in required)
+
+        subject_dirs = sorted(entry.path for entry in os.scandir(root_dir) if entry.is_dir() and _is_subject_dir(entry.path))
         if not subject_dirs:
             raise RuntimeError(f"No subject folders found under {root_dir}")
 

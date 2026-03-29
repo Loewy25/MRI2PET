@@ -193,7 +193,7 @@ def _alignment_supcon_loss(
 
 def _contrastive_loss(aux: Dict[str, torch.Tensor], contrast_group: torch.Tensor) -> torch.Tensor:
     return (
-        _alignment_supcon_loss(aux["z_mri"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
+        _alignment_supcon_loss(aux["z_mri_con"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
         + _alignment_supcon_loss(aux["z_flair"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
         + _alignment_supcon_loss(aux["z_clin"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
     )

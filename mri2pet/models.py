@@ -223,6 +223,7 @@ class Generator(nn.Module):
             nn.Linear(512, 256),
             nn.ReLU(inplace=True),
         )
+        self.mri_contrast_proj = nn.Linear(ch4, 256)
         self.global_proj = nn.Sequential(nn.Linear(256, 256), nn.ReLU(inplace=True))
         self.severe_proj = nn.Sequential(nn.Linear(256, 256), nn.ReLU(inplace=True))
         self.high_head = nn.Linear(256, 1)
@@ -284,6 +285,7 @@ class Generator(nn.Module):
         b = self.bottleneck_res6(b)
 
         z_mri = self.mri_pool(b).flatten(1)
+        z_mri_con = self.mri_contrast_proj(z_mri)
         z_flair = self.flair_encoder(flair)
         z_clin = self.clinical_encoder(clinical)
         z_fuse = self.fusion(torch.cat([z_mri, z_flair, z_clin], dim=1))
@@ -341,6 +343,7 @@ class Generator(nn.Module):
 
         aux: Dict[str, Any] = {
             "z_mri": z_mri,
+            "z_mri_con": z_mri_con,
             "z_flair": z_flair,
             "z_clin": z_clin,
             "z_fuse": z_fuse,
