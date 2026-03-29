@@ -40,19 +40,20 @@ def collapse(df, key, cols):
 
 def read_csv_any(path, required_cols):
     encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
-    seps = [",", None, "\t", ";", "|"]
+    seps = [",", "\t", ";", "|", None]
     last_err = None
     for enc in encodings:
         for sep in seps:
             try:
-                df = pd.read_csv(
-                    path,
-                    low_memory=False,
-                    encoding=enc,
-                    sep=sep,
-                    engine="python",
-                    on_bad_lines="skip",
-                )
+                kwargs = {
+                    "encoding": enc,
+                    "sep": sep,
+                    "on_bad_lines": "skip",
+                    "dtype": str,
+                }
+                if sep is None:
+                    kwargs["engine"] = "python"
+                df = pd.read_csv(path, **kwargs)
                 if all(col in df.columns for col in required_cols):
                     sep_name = "auto" if sep is None else repr(sep)
                     print(f"[INFO] Loaded {path.name} with encoding={enc} sep={sep_name}")
