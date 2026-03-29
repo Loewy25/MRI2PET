@@ -133,7 +133,7 @@ pip install pydicom
 
 
 python eval_taupet_comprehensive.py \
-  --roi-root /scratch/l.peiwang/kari_brainv33_top300 \
+  --roi-root /scratch/l.peiwang/kari_all\
   --vols-roots \
     /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os5_aug_5/volumes \
     /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os5_aug_5/volumes \
