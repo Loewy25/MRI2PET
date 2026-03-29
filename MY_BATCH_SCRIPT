@@ -146,7 +146,7 @@ pip install pydicom
 #  --thr-braak 1.2 \
 #  --out /scratch/l.peiwang/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os5_aug_5
 
-python summary_flair_clinical.py
+python build_kari_flair_all.py.py
 #python new_class.py \
 #  --manifest /scratch/l.peiwang/MRI2PET_svm_out_amyloid/dataset_manifest.csv \
 #  --modality mri \
