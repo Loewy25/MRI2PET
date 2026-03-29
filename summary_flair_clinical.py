@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import sys
 
 import pandas as pd
 
@@ -86,8 +87,6 @@ def main():
         rows.append(rec)
 
     out = pd.DataFrame(rows)
-    by_subject = ROOT / "kari_all_falir_clinical_summary_by_subject.csv"
-    out.to_csv(by_subject, index=False)
 
     bool_cols = [c for c in out.columns if c.startswith("has_")]
     summary = pd.DataFrame({
@@ -96,11 +95,11 @@ def main():
         "n_total": len(out),
         "pct_have": [round(100 * out[c].mean(), 2) if len(out) else 0.0 for c in bool_cols],
     })
-    summary_csv = ROOT / "kari_all_falir_clinical_summary_coverage.csv"
-    summary.to_csv(summary_csv, index=False)
-
-    print(f"Saved: {by_subject}")
-    print(f"Saved: {summary_csv}")
+    print(f"Subjects in dataset: {len(out)}")
+    print("=== BY_SUBJECT ===")
+    out.to_csv(sys.stdout, index=False)
+    print("=== COVERAGE ===")
+    summary.to_csv(sys.stdout, index=False)
 
 
 if __name__ == "__main__":
