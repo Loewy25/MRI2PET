@@ -37,14 +37,27 @@ def collapse(df, key, cols):
     return out.groupby("_key", as_index=False).agg({c: first_value for c in keep}).set_index("_key")
 
 
+def read_csv_any(path):
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+    last_err = None
+    for enc in encodings:
+        try:
+            df = pd.read_csv(path, low_memory=False, encoding=enc)
+            print(f"[INFO] Loaded {path.name} with encoding={enc}")
+            return df
+        except UnicodeDecodeError as exc:
+            last_err = exc
+    raise last_err
+
+
 def main():
     for path in [DATASET, CSV1, CSV2, CSV3]:
         if not path.exists():
             raise FileNotFoundError(path)
 
-    df1 = pd.read_csv(CSV1, low_memory=False)
-    df2 = pd.read_csv(CSV2, low_memory=False)
-    df3 = pd.read_csv(CSV3, low_memory=False)
+    df1 = read_csv_any(CSV1)
+    df2 = read_csv_any(CSV2)
+    df3 = read_csv_any(CSV3)
 
     need1 = ["TAU_PET_Session", "MR_Session"]
     need2 = ["MR_Session", "ID"] + FIELDS2
