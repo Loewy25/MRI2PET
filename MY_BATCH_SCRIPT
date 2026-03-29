@@ -3,9 +3,9 @@
 #SBATCH --job-name=MGDA_UB
 #SBATCH --mem=10G
 #SBATCH --time=23:50:00
-##SBATCH --gres=gpu:tesla_a100:1
-##SBATCH --gres=gpu:1
-#SBATCH --partition=tier1_cpu
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --gres=gpu:1
+#SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
 ##SBATCH --nodelist=gpu01
 #SBATCH --output=nohier657_fake.out
