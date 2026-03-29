@@ -3,8 +3,8 @@
 #SBATCH -N 1                    # Request 1 node
 #SBATCH --mem=10G               # Request 400GB memory
 #SBATCH -t 50:30:00             # Set maximum time
-##SBATCH --gres=gpu:1
-#SBATCH --gres=gpu:tesla_a100:1
+##SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:tesla_a100:2
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02
@@ -30,6 +30,7 @@ export WANDB__SERVICE_WAIT=300
 # ---- NEW: per-job config ----
 export RUN_NAME="flair_fold1_os5_aug_7"
 export FOLD_INDEX=0
+export NUM_WORKERS=2
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
@@ -52,6 +53,4 @@ export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
 python main.py
-
-
 

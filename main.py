@@ -90,6 +90,8 @@ if __name__ == "__main__":
     print(f"Fold CSV: {FOLD_CSV}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    print(f"Visible GPU count: {n_gpu}")
 
     wandb_run = init_wandb_run()
 
@@ -127,6 +129,11 @@ if __name__ == "__main__":
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
     D = CondPatchDiscriminator3D(in_ch=2)
+
+    if device.type == "cuda" and n_gpu > 1:
+        print(f"Using DataParallel across {n_gpu} GPUs")
+        G = torch.nn.DataParallel(G)
+        D = torch.nn.DataParallel(D)
 
     if wandb_run is not None:
         wandb.watch(G, log="gradients", log_freq=50)

@@ -42,6 +42,19 @@ from .losses import l1_loss, mmd_gaussian, psnr, ssim3d
 from .utils import _safe_name, _save_nifti
 
 
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def _clone_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    base = _unwrap_model(model)
+    return {k: v.detach().clone() for k, v in base.state_dict().items()}
+
+
+def _load_state_dict(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> None:
+    _unwrap_model(model).load_state_dict(state_dict)
+
+
 def _meta_as_list(meta_any: Any) -> List[Dict[str, Any]]:
     if isinstance(meta_any, dict):
         return [meta_any]
@@ -581,8 +594,8 @@ def train_paggan(
                 best_val_global = val_global_epoch
                 best_val_roi = val_roi_epoch
                 epochs_without_improve = 0
-                best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
-                best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
+                best_G = _clone_state_dict(G)
+                best_D = _clone_state_dict(D)
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
             else:
@@ -668,9 +681,9 @@ def train_paggan(
             break
 
     if best_G is not None:
-        G.load_state_dict(best_G)
+        _load_state_dict(G, best_G)
     if best_D is not None:
-        D.load_state_dict(best_D)
+        _load_state_dict(D, best_D)
 
     return {"history": hist, "best_G": best_G, "best_D": best_D}
 
