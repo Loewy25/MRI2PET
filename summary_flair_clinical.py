@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import csv
 from pathlib import Path
 import sys
 
@@ -37,17 +38,28 @@ def collapse(df, key, cols):
     return out.groupby("_key", as_index=False).agg({c: first_value for c in keep}).set_index("_key")
 
 
-def read_csv_any(path):
+def read_csv_any(path, required_cols):
     encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+    seps = [",", None, "\t", ";", "|"]
     last_err = None
     for enc in encodings:
-        try:
-            df = pd.read_csv(path, low_memory=False, encoding=enc)
-            print(f"[INFO] Loaded {path.name} with encoding={enc}")
-            return df
-        except UnicodeDecodeError as exc:
-            last_err = exc
-    raise last_err
+        for sep in seps:
+            try:
+                df = pd.read_csv(
+                    path,
+                    low_memory=False,
+                    encoding=enc,
+                    sep=sep,
+                    engine="python",
+                    on_bad_lines="skip",
+                )
+                if all(col in df.columns for col in required_cols):
+                    sep_name = "auto" if sep is None else repr(sep)
+                    print(f"[INFO] Loaded {path.name} with encoding={enc} sep={sep_name}")
+                    return df
+            except (UnicodeDecodeError, pd.errors.ParserError, csv.Error) as exc:
+                last_err = exc
+    raise RuntimeError(f"Could not parse {path} with expected columns {required_cols}") from last_err
 
 
 def main():
@@ -55,13 +67,12 @@ def main():
         if not path.exists():
             raise FileNotFoundError(path)
 
-    df1 = read_csv_any(CSV1)
-    df2 = read_csv_any(CSV2)
-    df3 = read_csv_any(CSV3)
-
     need1 = ["TAU_PET_Session", "MR_Session"]
     need2 = ["MR_Session", "ID"] + FIELDS2
     need3 = ["ID"] + FIELDS3
+    df1 = read_csv_any(CSV1, need1)
+    df2 = read_csv_any(CSV2, need2)
+    df3 = read_csv_any(CSV3, need3)
     for name, df, cols in [("MR_AMY_TAU_CDR_merge_DF26.csv", df1, need1), ("MR_COG_PET_rsfMRI.csv", df2, need2), ("demographics.csv", df3, need3)]:
         miss = [c for c in cols if c not in df.columns]
         if miss:
