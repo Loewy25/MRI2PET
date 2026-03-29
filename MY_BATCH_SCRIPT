@@ -2,7 +2,7 @@
 #SBATCH --job-name=test #Assign a descriptive job name
 #SBATCH -N 1                    # Request 1 node
 #SBATCH --mem=20G               # Request 400GB memory
-#SBATCH -t 50:30:00             # Set maximum time
+#SBATCH -t 70:30:00             # Set maximum time
 ##SBATCH --gres=gpu:1
 #SBATCH --gres=gpu:nvidia_a100_80:1
 #SBATCH --partition=tier2_gpu
@@ -29,12 +29,12 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="?"
+export RUN_NAME="flair_fold1_os5_aug_7"
 export FOLD_INDEX=0
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.65
+export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Augmentation (train only)
 export AUG_ENABLE=1
