@@ -92,10 +92,10 @@ pip install pydicom
 # ------------------------------------------------------------
 #python summary_extra_modality.py
 # Actual job
-#python cv_creator_with_label.py \
-#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --root /scratch/l.peiwang/kari_all \
-#  --outdir /scratch/l.peiwang/braak_merged_kari_all/CV5_braak_strat
+python cv_creator_with_label.py \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --root /scratch/l.peiwang/kari_flair_all \
+  --outdir /scratch/l.peiwang/kari_flair_all/CV5_braak_strat
 
 #BASE_DIR=/scratch/l.peiwang/kari_all 
 #python Brain_mask.py
@@ -133,19 +133,19 @@ pip install pydicom
 
 
 
-python eval_taupet_comprehensive.py \
-  --roi-root /scratch/l.peiwang/kari_all\
-  --vols-roots \
-    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os4_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os4_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os4_aug_7/volumes \
-    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os4_aug_7/volumes \
-  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session-col TAU_PET_Session \
-  --split-by braak \
-  --thr-braak 1.2 \
-  --out /scratch/l.peiwang/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_7
+#python eval_taupet_comprehensive.py \
+#  --roi-root /scratch/l.peiwang/kari_all\
+#  --vols-roots \
+#    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_7/volumes \
+#    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os4_aug_7/volumes \
+#    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os4_aug_7/volumes \
+#    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os4_aug_7/volumes \
+#    /home/l.peiwang/MRI2PET/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os4_aug_7/volumes \
+#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --session-col TAU_PET_Session \
+#  --split-by braak \
+#  --thr-braak 1.2 \
+#  --out /scratch/l.peiwang/all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_7
 
 #python build_kari_flair_all.py
 #python new_class.py \
