@@ -2,6 +2,8 @@
 import csv
 from pathlib import Path
 import sys
+import zipfile
+from xml.etree import ElementTree as ET
 
 import pandas as pd
 
@@ -38,7 +40,137 @@ def collapse(df, key, cols):
     return out.groupby("_key", as_index=False).agg({c: first_value for c in keep}).set_index("_key")
 
 
-def read_csv_any(path, required_cols):
+def _clean_cols(cols):
+    return [str(c).strip().strip('"').lstrip("\ufeff") for c in cols]
+
+
+def _xml_children(elem, suffix):
+    return [child for child in list(elem) if child.tag.endswith(suffix)]
+
+
+def _xml_first(elem, suffix):
+    for child in elem.iter():
+        if child.tag.endswith(suffix):
+            return child
+    return None
+
+
+def _xlsx_cell_value(cell, shared):
+    t = cell.attrib.get("t")
+    if t == "inlineStr":
+        return "".join((node.text or "") for node in cell.iter() if node.tag.endswith("t"))
+
+    v = _xml_first(cell, "v")
+    if v is None or v.text is None:
+        return ""
+
+    if t == "s":
+        idx = int(v.text)
+        return shared[idx] if 0 <= idx < len(shared) else ""
+    return v.text
+
+
+def _xlsx_col_index(ref):
+    letters = "".join(ch for ch in ref if ch.isalpha())
+    idx = 0
+    for ch in letters:
+        idx = idx * 26 + (ord(ch.upper()) - ord("A") + 1)
+    return max(idx - 1, 0)
+
+
+def _read_xlsx_any(path, required_cols):
+    try:
+        with zipfile.ZipFile(path) as zf:
+            sheet_names = sorted(
+                n for n in zf.namelist()
+                if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")
+            )
+            if not sheet_names:
+                return None
+
+            shared = []
+            if "xl/sharedStrings.xml" in zf.namelist():
+                root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+                shared = ["".join(node.itertext()) for node in root.iter() if node.tag.endswith("si")]
+
+            for sheet_name in sheet_names:
+                root = ET.fromstring(zf.read(sheet_name))
+                sheet_data = next((child for child in root if child.tag.endswith("sheetData")), None)
+                if sheet_data is None:
+                    continue
+                rows = []
+                for row in _xml_children(sheet_data, "row"):
+                    vals = []
+                    for cell in _xml_children(row, "c"):
+                        idx = _xlsx_col_index(cell.attrib.get("r", "A1"))
+                        while len(vals) <= idx:
+                            vals.append("")
+                        vals[idx] = _xlsx_cell_value(cell, shared)
+                    rows.append(vals)
+
+                for i, row in enumerate(rows[:200]):
+                    cols = _clean_cols(row)
+                    if all(col in cols for col in required_cols):
+                        width = len(cols)
+                        data = []
+                        for vals in rows[i + 1 :]:
+                            vals = list(vals) + [""] * max(0, width - len(vals))
+                            data.append(dict(zip(cols, vals[:width])))
+                        df = pd.DataFrame(data, columns=cols)
+                        print(f"[INFO] Loaded {Path(path).name} as xlsx sheet={sheet_name.rsplit('/', 1)[-1]}")
+                        return df
+    except (OSError, zipfile.BadZipFile, ET.ParseError):
+        return None
+    return None
+
+
+def _manual_read_table(path, required_cols):
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+    seps = [",", "\t", ";", "|"]
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc, errors="ignore", newline="") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+
+        for sep in seps:
+            header = None
+            header_i = None
+            for i, line in enumerate(lines[:200]):
+                cols = _clean_cols(line.split(sep))
+                if all(col in cols for col in required_cols):
+                    header = cols
+                    header_i = i
+                    break
+            if header is None:
+                continue
+
+            rows = []
+            for line in lines[header_i + 1 :]:
+                if not line.strip():
+                    continue
+                try:
+                    vals = next(csv.reader([line], delimiter=sep))
+                except Exception:
+                    vals = line.split(sep)
+                vals = [str(v).strip() for v in vals]
+                if len(vals) < len(header):
+                    vals += [""] * (len(header) - len(vals))
+                rows.append(dict(zip(header, vals[: len(header)])))
+
+            df = pd.DataFrame(rows, columns=header)
+            if all(col in df.columns for col in required_cols):
+                print(f"[INFO] Loaded {path.name} with manual parser encoding={enc} sep={repr(sep)}")
+                return df
+    return None
+
+
+def read_csv_any(path, required_cols, allow_empty=False):
+    df = _read_xlsx_any(path, required_cols)
+    if df is not None:
+        return df
+
     encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
     seps = [",", "\t", ";", "|", None]
     last_err = None
@@ -60,6 +192,15 @@ def read_csv_any(path, required_cols):
                     return df
             except (UnicodeDecodeError, pd.errors.ParserError, csv.Error) as exc:
                 last_err = exc
+
+    df = _manual_read_table(path, required_cols)
+    if df is not None:
+        return df
+
+    if allow_empty:
+        print(f"[WARN] Could not parse {path.name}; continuing with empty table")
+        return pd.DataFrame(columns=required_cols)
+
     raise RuntimeError(f"Could not parse {path} with expected columns {required_cols}") from last_err
 
 
@@ -73,7 +214,7 @@ def main():
     need3 = ["ID"] + FIELDS3
     df1 = read_csv_any(CSV1, need1)
     df2 = read_csv_any(CSV2, need2)
-    df3 = read_csv_any(CSV3, need3)
+    df3 = read_csv_any(CSV3, need3, allow_empty=True)
     for name, df, cols in [("MR_AMY_TAU_CDR_merge_DF26.csv", df1, need1), ("MR_COG_PET_rsfMRI.csv", df2, need2), ("demographics.csv", df3, need3)]:
         miss = [c for c in cols if c not in df.columns]
         if miss:
