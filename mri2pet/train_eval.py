@@ -24,11 +24,13 @@ from .config import (
     CKPT_DIR,
     CONTRAST_TEMP,
     DATA_RANGE,
+    EARLY_STOP_PATIENCE,
     EPOCHS,
     GAMMA,
     LAMBDA_56,
     LAMBDA_CON,
     LAMBDA_HIGH,
+    LR_PLATEAU_PATIENCE,
     LR_D,
     LR_G,
     RESAMPLE_BACK_TO_T1,
@@ -309,6 +311,7 @@ def train_paggan(
 
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
+    sched_G = torch.optim.lr_scheduler.ReduceLROnPlateau(opt_G, mode="min", patience=LR_PLATEAU_PATIENCE)
     adv_criterion = nn.MSELoss()
 
     train_items = _loader_items(train_loader)
@@ -341,6 +344,7 @@ def train_paggan(
     avg_norm_recon_roi = 0.0
     avg_norm_gan = 0.0
     norm_decay = 0.9
+    epochs_without_improve = 0
 
     for epoch in range(1, epochs + 1):
         w_global_running = 0.0
@@ -576,17 +580,24 @@ def train_paggan(
                 best_val_score = val_score_epoch
                 best_val_global = val_global_epoch
                 best_val_roi = val_roi_epoch
+                epochs_without_improve = 0
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
+            else:
+                epochs_without_improve += 1
+
+            sched_G.step(val_score_epoch)
+            current_lr_g = float(opt_G.param_groups[0]["lr"])
 
             if verbose:
                 dt = time.time() - t0
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValGlobal: {val_global_epoch:.4f}  ValROI: {val_roi_epoch:.4f}  "
-                    f"ValScore: {val_score_epoch:.4f}  | best {best_val_score:.4f}  | {dt:.1f}s"
+                    f"ValScore: {val_score_epoch:.4f}  | best {best_val_score:.4f}  "
+                    f"| lr_G {current_lr_g:.2e}  | {dt:.1f}s"
                 )
                 print(
                     f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  w_roi={avg_w_roi:.3f}  "
@@ -600,8 +611,12 @@ def train_paggan(
                 )
             G.train()
         elif verbose:
+            current_lr_g = float(opt_G.param_groups[0]["lr"])
             dt = time.time() - t0
-            print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
+            print(
+                f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  "
+                f"| lr_G {current_lr_g:.2e}  | {dt:.1f}s"
+            )
             print(
                 f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  w_roi={avg_w_roi:.3f}  "
                 f"w_gan={avg_w_gan:.3f}  ||grad_global||={avg_grad_recon:.3e}  "
@@ -627,6 +642,7 @@ def train_paggan(
                 "train/severe_loss": avg_56,
                 "train/p_high_mean": avg_p_high,
                 "train/p_56_mean": avg_p_56,
+                "train/lr_G": float(opt_G.param_groups[0]["lr"]),
                 "mgda/w_recon_global": avg_w_global,
                 "mgda/w_recon_roi": avg_w_roi,
                 "mgda/w_gan": avg_w_gan,
@@ -641,7 +657,15 @@ def train_paggan(
                 log_dict["val/best_score"] = best_val_score
                 log_dict["val/best_global"] = best_val_global
                 log_dict["val/best_roi"] = best_val_roi
+                log_dict["train/epochs_without_improve"] = epochs_without_improve
             wandb.log(log_dict, step=epoch)
+
+        if val_loader is not None and epochs_without_improve >= EARLY_STOP_PATIENCE:
+            print(
+                f"[INFO] Early stopping at epoch {epoch}: no ValScore improvement for "
+                f"{EARLY_STOP_PATIENCE} epochs."
+            )
+            break
 
     if best_G is not None:
         G.load_state_dict(best_G)

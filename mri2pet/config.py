@@ -119,3 +119,9 @@ LAMBDA_CON = _env_float("LAMBDA_CON", 0.1)
 LAMBDA_HIGH = _env_float("LAMBDA_HIGH", 0.1)
 LAMBDA_56 = _env_float("LAMBDA_56", 0.2)
 CONTRAST_TEMP = _env_float("CONTRAST_TEMP", 0.1)
+
+# =========================
+# Validation Scheduling
+# =========================
+LR_PLATEAU_PATIENCE = _env_int("LR_PLATEAU_PATIENCE", 15)
+EARLY_STOP_PATIENCE = _env_int("EARLY_STOP_PATIENCE", 40)

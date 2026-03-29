@@ -15,6 +15,7 @@ from mri2pet.config import (
     BRAAK_THRESHOLD, SPLITS_DIR, FOLD_INDEX, FOLD_CSV,
     MR_AMY_TAU_CDR_CSV, MR_COG_PET_CSV, DEMOGRAPHICS_CSV,
     LAMBDA_CON, LAMBDA_HIGH, LAMBDA_56, CONTRAST_TEMP,
+    LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
 )
 
 from mri2pet.data import build_loaders_from_fold_csv
@@ -72,6 +73,8 @@ def init_wandb_run():
                 "lambda_high": LAMBDA_HIGH,
                 "lambda_56": LAMBDA_56,
                 "contrast_temp": CONTRAST_TEMP,
+                "lr_plateau_patience": LR_PLATEAU_PATIENCE,
+                "early_stop_patience": EARLY_STOP_PATIENCE,
             },
         )
     except Exception as exc:
