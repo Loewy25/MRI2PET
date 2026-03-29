@@ -2,12 +2,12 @@ import os
 from typing import Optional, Tuple
 import torch
 
-ROOT_DIR   = "/scratch/l.peiwang/kari_all"
-OUT_DIR    = "/home/l.peiwang/MRI2PET"
+ROOT_DIR   = os.environ.get("ROOT_DIR", "/scratch/l.peiwang/kari_flair_all")
+OUT_DIR    = os.environ.get("OUT_DIR", "/home/l.peiwang/MRI2PET")
 
 # ---- NEW: allow override via environment variables ----
 # default name if env not set
-RUN_NAME = os.environ.get("RUN_NAME", "roi_recon_patch_lse_mgda_ub_1")
+RUN_NAME = os.environ.get("RUN_NAME", "mgda_ub_roi_recon_flair_clinical_1")
 
 OUT_RUN    = os.path.join(OUT_DIR, RUN_NAME)
 CKPT_DIR   = os.path.join(OUT_RUN, "checkpoints")
@@ -21,7 +21,7 @@ RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = 1
+BATCH_SIZE     = 2
 NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
@@ -34,12 +34,25 @@ DATA_RANGE  = 3.5
 
 torch.backends.cudnn.benchmark = True
 
-SPLITS_DIR = os.path.join('/scratch/l.peiwang/braak_merged_kari_all', "CV5_braak_strat")
+SPLITS_DIR = os.environ.get("SPLITS_DIR", os.path.join(ROOT_DIR, "CV5_braak_strat"))
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
 
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
+
+MR_AMY_TAU_CDR_CSV = os.environ.get(
+    "MR_AMY_TAU_CDR_CSV",
+    "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv",
+)
+MR_COG_PET_CSV = os.environ.get(
+    "MR_COG_PET_CSV",
+    "/scratch/l.peiwang/MR_COG_PET_rsfMRI.csv",
+)
+DEMOGRAPHICS_CSV = os.environ.get(
+    "DEMOGRAPHICS_CSV",
+    "/scratch/l.peiwang/demographics.csv",
+)
 
 # =========================
 # Imbalance / Oversampling
@@ -57,6 +70,9 @@ def _env_float(name: str, default: float) -> float:
 def _env_int(name: str, default: int) -> int:
     v = os.environ.get(name, None)
     return int(v) if v is not None else int(default)
+
+
+BRAAK_THRESHOLD = _env_float("BRAAK_THRESHOLD", 1.2)
 
 # Train-only oversampling (used only when fold CSV is used)
 OVERSAMPLE_ENABLE = _env_bool("OVERSAMPLE_ENABLE", True)
@@ -95,3 +111,11 @@ AUG_SHIFT_MAX = _env_float("AUG_SHIFT_MAX", 0.1)
 ROI_HI_Q = _env_float("ROI_HI_Q", 0.85)
 ROI_HI_LAMBDA = _env_float("ROI_HI_LAMBDA", 2.0)
 ROI_HI_MIN_VOXELS = _env_int("ROI_HI_MIN_VOXELS", 32)
+
+# =========================
+# Multimodal Auxiliary Losses
+# =========================
+LAMBDA_CON = _env_float("LAMBDA_CON", 0.1)
+LAMBDA_HIGH = _env_float("LAMBDA_HIGH", 0.1)
+LAMBDA_56 = _env_float("LAMBDA_56", 0.2)
+CONTRAST_TEMP = _env_float("CONTRAST_TEMP", 0.1)

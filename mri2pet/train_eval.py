@@ -1,24 +1,293 @@
-import os, time
-from typing import Any, Dict, Iterable, Optional
+import csv
+import json
+import os
+import time
+from typing import Any, Dict, Iterable, List, Optional
+
 import numpy as np
 from scipy.ndimage import zoom as nd_zoom
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 
 from .config import (
-    EPOCHS, GAMMA, DATA_RANGE,
-    LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
-    AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
-    AUG_INTENSITY_PROB, AUG_NOISE_STD,
-    AUG_SCALE_MIN, AUG_SCALE_MAX,
-    AUG_SHIFT_MIN, AUG_SHIFT_MAX,
-    ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
+    AUG_ENABLE,
+    AUG_FLIP_PROB,
+    AUG_INTENSITY_PROB,
+    AUG_NOISE_STD,
+    AUG_PROB,
+    AUG_SCALE_MAX,
+    AUG_SCALE_MIN,
+    AUG_SHIFT_MAX,
+    AUG_SHIFT_MIN,
+    CKPT_DIR,
+    CONTRAST_TEMP,
+    DATA_RANGE,
+    EPOCHS,
+    GAMMA,
+    LAMBDA_56,
+    LAMBDA_CON,
+    LAMBDA_HIGH,
+    LR_D,
+    LR_G,
+    RESAMPLE_BACK_TO_T1,
+    ROI_HI_LAMBDA,
+    ROI_HI_MIN_VOXELS,
+    ROI_HI_Q,
 )
+from .losses import l1_loss, mmd_gaussian, psnr, ssim3d
+from .utils import _safe_name, _save_nifti
 
-from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
-from .utils import _safe_name, _save_nifti, _meta_unbatch
-import wandb
+
+def _meta_as_list(meta_any: Any) -> List[Dict[str, Any]]:
+    if isinstance(meta_any, dict):
+        return [meta_any]
+    if isinstance(meta_any, list) and all(isinstance(m, dict) for m in meta_any):
+        return meta_any
+    raise TypeError("meta must be a dict or a list of dicts")
+
+
+def _sample_meta_tensor(value: Any) -> torch.Tensor:
+    t = torch.as_tensor(value)
+    if t.dim() == 3:
+        return t.unsqueeze(0)
+    if t.dim() == 0:
+        return t.view(1)
+    return t
+
+
+def _meta_to_tensor(
+    meta_any: Any,
+    key: str,
+    device: torch.device,
+    dtype: Optional[torch.dtype] = torch.float32,
+) -> torch.Tensor:
+    metas = _meta_as_list(meta_any)
+    vals = []
+    for meta in metas:
+        if key not in meta:
+            raise KeyError(f"Missing meta key '{key}'")
+        vals.append(_sample_meta_tensor(meta[key]))
+    out = torch.stack(vals, dim=0)
+    if dtype is not None:
+        out = out.to(dtype=dtype)
+    return out.to(device, non_blocking=True)
+
+
+def _extract_generator_inputs(meta_any: Any, device: torch.device, batch_size: int):
+    flair = _meta_to_tensor(meta_any, "flair", device, dtype=torch.float32)
+    clinical = _meta_to_tensor(meta_any, "clinical_vector", device, dtype=torch.float32)
+    if flair.size(0) != batch_size or clinical.size(0) != batch_size:
+        raise RuntimeError("Meta batch size does not match MRI/PET batch size")
+    return flair, clinical
+
+
+def _extract_training_targets(meta_any: Any, device: torch.device, batch_size: int):
+    brain = _meta_to_tensor(meta_any, "brain_mask", device, dtype=torch.float32)
+    cortex = _meta_to_tensor(meta_any, "cortex_mask", device, dtype=torch.float32)
+    y_high = _meta_to_tensor(meta_any, "y_high", device, dtype=torch.float32)
+    y_56 = _meta_to_tensor(meta_any, "y_56", device, dtype=torch.float32)
+    contrast_group = _meta_to_tensor(meta_any, "contrast_group", device, dtype=torch.long).view(-1)
+    tensors = [brain, cortex, y_high, y_56]
+    if any(t.size(0) != batch_size for t in tensors) or contrast_group.numel() != batch_size:
+        raise RuntimeError("Training target batch size does not match MRI/PET batch size")
+    return brain, cortex, y_high, y_56, contrast_group
+
+
+def _masked_l1_high_uptake(
+    fake5: torch.Tensor,
+    pet5: torch.Tensor,
+    mask5: torch.Tensor,
+) -> torch.Tensor:
+    diff = (fake5 - pet5).abs()
+    losses = []
+    q = float(min(max(ROI_HI_Q, 0.0), 1.0))
+    lambda_hi = float(ROI_HI_LAMBDA)
+    min_vox = max(1, int(ROI_HI_MIN_VOXELS))
+
+    for b in range(diff.size(0)):
+        cortex = mask5[b, 0] > 0.5
+        n_cortex = int(cortex.sum().item())
+        if n_cortex == 0:
+            losses.append(torch.zeros((), device=diff.device, dtype=diff.dtype))
+            continue
+
+        d_b = diff[b, 0]
+        p_b = pet5[b, 0]
+        l1_cortex = d_b[cortex].mean()
+
+        if n_cortex < min_vox:
+            hi_mask = cortex
+        else:
+            p_roi = p_b[cortex]
+            thr = torch.quantile(p_roi, q)
+            hi_mask = cortex & (p_b >= thr)
+            if int(hi_mask.sum().item()) == 0:
+                hi_mask = cortex
+
+        l1_high = d_b[hi_mask].mean()
+        losses.append(l1_cortex + lambda_hi * l1_high)
+
+    return torch.stack(losses).mean()
+
+
+def _maybe_augment_batch(
+    mri5: torch.Tensor,
+    pet5: torch.Tensor,
+    flair5: torch.Tensor,
+    brain5: torch.Tensor,
+    cortex5: torch.Tensor,
+):
+    if not AUG_ENABLE:
+        return mri5, pet5, flair5, brain5, cortex5
+
+    if torch.rand((), device=mri5.device) > float(AUG_PROB):
+        return mri5, pet5, flair5, brain5, cortex5
+
+    for dim in (-1, -2, -3):
+        if torch.rand((), device=mri5.device) < float(AUG_FLIP_PROB):
+            mri5 = torch.flip(mri5, dims=(dim,))
+            pet5 = torch.flip(pet5, dims=(dim,))
+            flair5 = torch.flip(flair5, dims=(dim,))
+            brain5 = torch.flip(brain5, dims=(dim,))
+            cortex5 = torch.flip(cortex5, dims=(dim,))
+
+    if torch.rand((), device=mri5.device) < float(AUG_INTENSITY_PROB):
+        batch = mri5.size(0)
+        dtype = mri5.dtype
+        dev = mri5.device
+        scale = float(AUG_SCALE_MIN) + (float(AUG_SCALE_MAX) - float(AUG_SCALE_MIN)) * torch.rand(
+            (batch, 1, 1, 1, 1), device=dev, dtype=dtype
+        )
+        shift = float(AUG_SHIFT_MIN) + (float(AUG_SHIFT_MAX) - float(AUG_SHIFT_MIN)) * torch.rand(
+            (batch, 1, 1, 1, 1), device=dev, dtype=dtype
+        )
+        noise = torch.randn_like(mri5) * float(AUG_NOISE_STD)
+        mask = (brain5 > 0.5).to(dtype)
+        mri5 = (mri5 * (1.0 - mask)) + ((mri5 * scale + shift + noise) * mask)
+
+    return mri5, pet5, flair5, brain5, cortex5
+
+
+def _alignment_supcon_loss(
+    anchor: torch.Tensor,
+    fused: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    anchor = F.normalize(anchor, dim=1)
+    fused = F.normalize(fused, dim=1)
+    logits = torch.matmul(anchor, fused.t()) / float(temperature)
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    labels = labels.view(-1)
+    pos_mask = labels[:, None].eq(labels[None, :])
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    pos_log_prob = torch.where(pos_mask, log_prob, torch.zeros_like(log_prob))
+    pos_count = pos_mask.sum(dim=1).clamp(min=1)
+    return -(pos_log_prob.sum(dim=1) / pos_count).mean()
+
+
+def _contrastive_loss(aux: Dict[str, torch.Tensor], contrast_group: torch.Tensor) -> torch.Tensor:
+    return (
+        _alignment_supcon_loss(aux["z_mri"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
+        + _alignment_supcon_loss(aux["z_flair"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
+        + _alignment_supcon_loss(aux["z_clin"], aux["z_fuse"], contrast_group, CONTRAST_TEMP)
+    )
+
+
+def _mgda_weights_from_gram_3(Gm: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    dev, dtype = Gm.device, Gm.dtype
+    one = torch.ones(3, device=dev, dtype=dtype)
+
+    def _obj(w: torch.Tensor) -> torch.Tensor:
+        return torch.dot(w, Gm @ w)
+
+    candidates = []
+    try:
+        try:
+            pinv = torch.linalg.pinv(Gm)
+        except Exception:
+            pinv = torch.pinverse(Gm)
+        w_int = pinv @ one
+        denom = torch.dot(one, w_int)
+        if torch.isfinite(denom) and float(denom.abs().item()) > eps:
+            w_int = w_int / denom
+            if torch.all(w_int >= -1e-6):
+                w_int = torch.clamp(w_int, min=0.0)
+                w_int = w_int / (w_int.sum() + eps)
+                candidates.append(w_int)
+    except Exception:
+        pass
+
+    def _edge(i: int, j: int) -> torch.Tensor:
+        Gii = Gm[i, i]
+        Gjj = Gm[j, j]
+        Gij = Gm[i, j]
+        num = Gjj - Gij
+        den = (Gii + Gjj - 2.0 * Gij) + eps
+        a = torch.clamp(num / den, 0.0, 1.0)
+        w = torch.zeros(3, device=dev, dtype=dtype)
+        w[i] = a
+        w[j] = 1.0 - a
+        return w
+
+    candidates += [_edge(0, 1), _edge(0, 2), _edge(1, 2)]
+    candidates += [
+        torch.tensor([1.0, 0.0, 0.0], device=dev, dtype=dtype),
+        torch.tensor([0.0, 1.0, 0.0], device=dev, dtype=dtype),
+        torch.tensor([0.0, 0.0, 1.0], device=dev, dtype=dtype),
+    ]
+
+    best_w = candidates[0]
+    best_val = _obj(best_w)
+    for w in candidates[1:]:
+        val = _obj(w)
+        if float(val.item()) < float(best_val.item()):
+            best_val = val
+            best_w = w
+
+    best_w = torch.clamp(best_w, min=0.0)
+    return best_w / (best_w.sum() + eps)
+
+
+def _mgda_weights_3(Vg: torch.Tensor, Vr: torch.Tensor, Vgan: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    weights = []
+    for b in range(Vg.size(0)):
+        g0 = Vg[b]
+        g1 = Vr[b]
+        g2 = Vgan[b]
+        Gm = torch.empty((3, 3), device=Vg.device, dtype=Vg.dtype)
+        Gm[0, 0] = torch.dot(g0, g0)
+        Gm[0, 1] = torch.dot(g0, g1)
+        Gm[0, 2] = torch.dot(g0, g2)
+        Gm[1, 0] = Gm[0, 1]
+        Gm[1, 1] = torch.dot(g1, g1)
+        Gm[1, 2] = torch.dot(g1, g2)
+        Gm[2, 0] = Gm[0, 2]
+        Gm[2, 1] = Gm[1, 2]
+        Gm[2, 2] = torch.dot(g2, g2)
+        weights.append(_mgda_weights_from_gram_3(Gm, eps=eps))
+    return torch.stack(weights, dim=0)
+
+
+def _loader_items(loader: Iterable) -> List[Dict[str, Any]]:
+    ds = loader.dataset
+    if isinstance(ds, torch.utils.data.Subset):
+        base = ds.dataset
+        return [base.items[i] for i in ds.indices]
+    if hasattr(ds, "items"):
+        return list(ds.items)
+    raise TypeError("Could not read dataset items for label statistics")
+
+
+def _pos_weight_from_items(items: List[Dict[str, Any]], key: str, device: torch.device) -> torch.Tensor:
+    positives = sum(int(float(item[key]) > 0.5) for item in items)
+    negatives = len(items) - positives
+    if positives == 0 or negatives == 0:
+        raise RuntimeError(f"Train split does not contain both classes for {key}")
+    return torch.tensor([negatives / positives], device=device, dtype=torch.float32)
 
 
 def train_paggan(
@@ -42,285 +311,84 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
 
-    best_val = float("inf")
+    train_items = _loader_items(train_loader)
+    pos_weight_high = _pos_weight_from_items(train_items, "y_high", device)
+    pos_weight_56 = _pos_weight_from_items(train_items, "y_56", device)
+
+    best_val_score = float("inf")
+    best_val_global = float("inf")
+    best_val_roi = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
 
-    hist = {"train_G": [], "train_D": [], "val_recon": []}
+    hist = {
+        "train_G": [],
+        "train_D": [],
+        "train_global": [],
+        "train_roi": [],
+        "train_gan": [],
+        "train_con": [],
+        "train_high": [],
+        "train_56": [],
+        "train_aux": [],
+        "val_global": [],
+        "val_roi": [],
+        "val_score": [],
+        "val_recon": [],
+    }
 
-    # =========================================================================
-    # [MGDA-UB STANDARDIZATION INIT]
-    # We now have:
-    #   - global recon gradient (v_global)
-    #   - ROI/cortex recon gradient (v_roi)
-    #   - GAN gradient (v_gan)
-    # and we do a single-stage 3-way MGDA on these three.
-    # =========================================================================
     avg_norm_recon_global = 0.0
     avg_norm_recon_roi = 0.0
     avg_norm_gan = 0.0
     norm_decay = 0.9
 
-    def _meta_to_mask(meta_any, key: str, B_expected: int) -> Optional[torch.Tensor]:
-        """
-        Returns mask tensor [B,1,D,H,W] on device, or None if unavailable.
-        Supports meta as dict (B=1) or list of dicts (B>1).
-        """
-        if isinstance(meta_any, dict):
-            arr = meta_any.get(key, None)
-            if arr is None:
-                return None
-            t = torch.from_numpy(arr.astype(np.float32))
-            if t.dim() == 3:
-                t = t.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
-            return t.to(device, non_blocking=True)
-
-        if isinstance(meta_any, list) and len(meta_any) == B_expected:
-            masks = []
-            for m in meta_any:
-                if not isinstance(m, dict):
-                    return None
-                arr = m.get(key, None)
-                if arr is None:
-                    return None
-                t = torch.from_numpy(arr.astype(np.float32))
-                if t.dim() != 3:
-                    return None
-                masks.append(t.unsqueeze(0).unsqueeze(0))  # [1,1,D,H,W]
-            return torch.cat(masks, dim=0).to(device, non_blocking=True)
-
-        return None
-
-    def _masked_l1_high_uptake(
-        fake5: torch.Tensor,
-        pet5: torch.Tensor,
-        mask5: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Cortex ROI loss with high-uptake emphasis:
-          L = L1(cortex) + ROI_HI_LAMBDA * L1(top-quantile uptake in cortex)
-        Quantile is computed from ground-truth PET within cortex mask, per sample.
-        fake5, pet5, mask5: [B,1,D,H,W]
-        """
-        diff = (fake5 - pet5).abs()
-        losses = []
-        q = float(min(max(ROI_HI_Q, 0.0), 1.0))
-        lambda_hi = float(ROI_HI_LAMBDA)
-        min_vox = max(1, int(ROI_HI_MIN_VOXELS))
-
-        for b in range(diff.size(0)):
-            cortex = (mask5[b, 0] > 0.5)
-            n_cortex = int(cortex.sum().item())
-            if n_cortex == 0:
-                losses.append(torch.zeros((), device=diff.device, dtype=diff.dtype))
-                continue
-
-            d_b = diff[b, 0]
-            p_b = pet5[b, 0]
-
-            l1_cortex = d_b[cortex].mean()
-
-            if n_cortex < min_vox:
-                hi_mask = cortex
-            else:
-                p_roi = p_b[cortex]
-                thr = torch.quantile(p_roi, q)
-                hi_mask = cortex & (p_b >= thr)
-                if int(hi_mask.sum().item()) == 0:
-                    hi_mask = cortex
-
-            l1_high = d_b[hi_mask].mean()
-            losses.append(l1_cortex + lambda_hi * l1_high)
-
-        return torch.stack(losses).mean()
-
-    def _maybe_augment_pair(
-        mri5: torch.Tensor,
-        pet5: torch.Tensor,
-        brain5: Optional[torch.Tensor],
-        cortex5: Optional[torch.Tensor],
-    ):
-        """
-        Train-only augmentation:
-          - paired random flips on MRI/PET/brain/cortex masks
-          - MRI-only intensity jitter inside brain mask
-        """
-        if not AUG_ENABLE:
-            return mri5, pet5, brain5, cortex5
-
-        # apply augmentation to this batch with probability AUG_PROB
-        if torch.rand((), device=mri5.device) > float(AUG_PROB):
-            return mri5, pet5, brain5, cortex5
-
-        # --- paired random flips (D/H/W axes) ---
-        for dim in (-1, -2, -3):  # W, H, D in [B,1,D,H,W]
-            if torch.rand((), device=mri5.device) < float(AUG_FLIP_PROB):
-                mri5 = torch.flip(mri5, dims=(dim,))
-                pet5 = torch.flip(pet5, dims=(dim,))
-                if brain5 is not None:
-                    brain5 = torch.flip(brain5, dims=(dim,))
-                if cortex5 is not None:
-                    cortex5 = torch.flip(cortex5, dims=(dim,))
-
-        # --- MRI-only intensity augmentation (inside brain mask) ---
-        if torch.rand((), device=mri5.device) < float(AUG_INTENSITY_PROB):
-            B = mri5.size(0)
-            dtype = mri5.dtype
-            dev = mri5.device
-
-            # per-sample scale/shift
-            s = float(AUG_SCALE_MIN) + (float(AUG_SCALE_MAX) - float(AUG_SCALE_MIN)) * torch.rand((B, 1, 1, 1, 1), device=dev, dtype=dtype)
-            b = float(AUG_SHIFT_MIN) + (float(AUG_SHIFT_MAX) - float(AUG_SHIFT_MIN)) * torch.rand((B, 1, 1, 1, 1), device=dev, dtype=dtype)
-            noise = torch.randn_like(mri5) * float(AUG_NOISE_STD)
-
-            if brain5 is not None:
-                m = (brain5 > 0.5).to(dtype)
-                mri5 = (mri5 * (1.0 - m)) + ((mri5 * s + b + noise) * m)
-            else:
-                mri5 = (mri5 * s + b + noise)
-
-        return mri5, pet5, brain5, cortex5
-
-    # -----------------------------
-    # MGDA-UB (3-way) utilities
-    # -----------------------------
-    def _mgda_weights_from_gram_3(Gm: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Solve min || sum_i w_i g_i ||^2 s.t. w_i >= 0, sum w_i = 1 for 3 objectives,
-        given Gram matrix Gm[i,j] = <g_i, g_j>.
-        Active-set enumeration: interior + edges + vertices.
-        Returns: w tensor shape [3] (global, roi, gan).
-        """
-        dev, dtype = Gm.device, Gm.dtype
-        one = torch.ones(3, device=dev, dtype=dtype)
-
-        def _obj(w: torch.Tensor) -> torch.Tensor:
-            return torch.dot(w, Gm @ w)
-
-        candidates = []
-
-        # Interior candidate (if feasible)
-        try:
-            try:
-                pinv = torch.linalg.pinv(Gm)
-            except Exception:
-                pinv = torch.pinverse(Gm)
-            w_int = pinv @ one
-            denom = torch.dot(one, w_int)
-            if torch.isfinite(denom) and float(denom.abs().item()) > eps:
-                w_int = w_int / denom
-                if torch.all(w_int >= -1e-6):
-                    w_int = torch.clamp(w_int, min=0.0)
-                    w_int = w_int / (w_int.sum() + eps)
-                    candidates.append(w_int)
-        except Exception:
-            pass
-
-        # Edge candidates (two objectives active)
-        def _edge(i: int, j: int) -> torch.Tensor:
-            Gii = Gm[i, i]
-            Gjj = Gm[j, j]
-            Gij = Gm[i, j]
-            num = (Gjj - Gij)
-            den = (Gii + Gjj - 2.0 * Gij) + eps
-            a = torch.clamp(num / den, 0.0, 1.0)
-            w = torch.zeros(3, device=dev, dtype=dtype)
-            w[i] = a
-            w[j] = 1.0 - a
-            return w
-
-        candidates += [_edge(0, 1), _edge(0, 2), _edge(1, 2)]
-
-        # Vertices
-        candidates += [
-            torch.tensor([1.0, 0.0, 0.0], device=dev, dtype=dtype),
-            torch.tensor([0.0, 1.0, 0.0], device=dev, dtype=dtype),
-            torch.tensor([0.0, 0.0, 1.0], device=dev, dtype=dtype),
-        ]
-
-        best_w = candidates[0]
-        best_val = _obj(best_w)
-        for w in candidates[1:]:
-            v = _obj(w)
-            if float(v.item()) < float(best_val.item()):
-                best_val = v
-                best_w = w
-
-        best_w = torch.clamp(best_w, min=0.0)
-        best_w = best_w / (best_w.sum() + eps)
-        return best_w
-
-    def _mgda_weights_3(Vg: torch.Tensor, Vr: torch.Tensor, Vgan: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Vg, Vr, Vgan: [B, N] flattened standardized gradients.
-        Returns: weights per-sample [B, 3] = (w_global, w_roi, w_gan)
-        """
-        B = Vg.size(0)
-        ws = []
-        for b in range(B):
-            g0 = Vg[b]
-            g1 = Vr[b]
-            g2 = Vgan[b]
-
-            Gm = torch.empty((3, 3), device=Vg.device, dtype=Vg.dtype)
-            Gm[0, 0] = torch.dot(g0, g0)
-            Gm[0, 1] = torch.dot(g0, g1)
-            Gm[0, 2] = torch.dot(g0, g2)
-            Gm[1, 0] = Gm[0, 1]
-            Gm[1, 1] = torch.dot(g1, g1)
-            Gm[1, 2] = torch.dot(g1, g2)
-            Gm[2, 0] = Gm[0, 2]
-            Gm[2, 1] = Gm[1, 2]
-            Gm[2, 2] = torch.dot(g2, g2)
-
-            ws.append(_mgda_weights_from_gram_3(Gm, eps=eps))
-
-        return torch.stack(ws, dim=0)
-
     for epoch in range(1, epochs + 1):
-        # --- MGDA monitoring accumulators (per epoch) ---
         w_global_running = 0.0
         w_roi_running = 0.0
         w_gan_running = 0.0
-
-        grad_recon_running = 0.0          # raw ||grad_global||
-        grad_roi_running = 0.0            # raw ||grad_roi||
-        grad_gan_running = 0.0            # raw ||grad_gan||
+        grad_recon_running = 0.0
+        grad_roi_running = 0.0
+        grad_gan_running = 0.0
 
         t0 = time.time()
-        g_running, d_running, n_batches = 0.0, 0.0, 0
+        g_running = 0.0
+        d_running = 0.0
+        global_running = 0.0
+        roi_running = 0.0
+        gan_running = 0.0
+        con_running = 0.0
+        high_running = 0.0
+        severe_running = 0.0
+        aux_running = 0.0
+        p_high_running = 0.0
+        p_56_running = 0.0
+        n_batches = 0
 
         for batch in train_loader:
-            if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                mri, pet, meta = batch
-            else:
-                raise ValueError("There is something wrong happened when passing data")
+            if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                raise ValueError("Expected train batch as (MRI, PET, meta)")
 
-            mri = mri.to(device, non_blocking=True)
-            pet = pet.to(device, non_blocking=True)
-            B = mri.size(0) if mri.dim() == 5 else 1
+            mri, pet, meta = batch
+            mri5 = mri.to(device, non_blocking=True)
+            pet5 = pet.to(device, non_blocking=True)
+            if mri5.dim() == 4:
+                mri5 = mri5.unsqueeze(0)
+            if pet5.dim() == 4:
+                pet5 = pet5.unsqueeze(0)
 
-            # ---- Update D ----
-            mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
-            pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
-
-            # get masks from meta (for augmentation + ROI loss)
-            brain5 = _meta_to_mask(meta, "brain_mask",  B_expected=mri5.size(0))
-            cortex5 = _meta_to_mask(meta, "cortex_mask", B_expected=mri5.size(0))
-
-            # train-only augmentation (paired)
-            mri5, pet5, brain5, cortex5 = _maybe_augment_pair(mri5, pet5, brain5, cortex5)
+            batch_size = mri5.size(0)
+            flair5, clinical = _extract_generator_inputs(meta, device, batch_size)
+            brain5, cortex5, y_high, y_56, contrast_group = _extract_training_targets(meta, device, batch_size)
+            mri5, pet5, flair5, brain5, cortex5 = _maybe_augment_batch(mri5, pet5, flair5, brain5, cortex5)
 
             with torch.no_grad():
-                fake = G(mri5)
+                fake = G(mri5, flair5, clinical)
 
             D.zero_grad(set_to_none=True)
             pair_real = torch.cat([mri5, pet5], dim=1)
             pair_fake = torch.cat([mri5, fake.detach()], dim=1)
-
             out_real = D(pair_real)
             out_fake = D(pair_fake)
-
             loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
             loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
             loss_D = 0.5 * (loss_D_real + loss_D_fake)
@@ -328,30 +396,28 @@ def train_paggan(
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             opt_D.step()
 
-            # ---- Update G ----
-            G.zero_grad(set_to_none=True)
-
-            fake = G(mri5)
+            fake, aux = G(mri5, flair5, clinical, return_aux=True)
             out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
 
-            # GAN objective (as-is)
             loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
-
-            # Global recon objective (as-is)
             loss_l1 = l1_loss(fake, pet5)
             ssim_val = ssim3d(fake, pet5, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
-            # ROI/cortex recon objective (masked L1 + high-uptake weighted L1)
-            use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
+            use_roi = float(cortex5.sum().item()) > 0.0
             if use_roi:
                 loss_recon_roi = _masked_l1_high_uptake(fake, pet5, cortex5)
             else:
                 loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
 
-            # ========================= MGDA-UB (3-way, single stage) =========================
+            loss_high = F.binary_cross_entropy_with_logits(aux["high_logit"], y_high, pos_weight=pos_weight_high)
+            loss_56 = F.binary_cross_entropy_with_logits(aux["severe_logit"], y_56, pos_weight=pos_weight_56)
+            loss_con = _contrastive_loss(aux, contrast_group)
+            aux_loss = (LAMBDA_CON * loss_con) + (LAMBDA_HIGH * loss_high) + (LAMBDA_56 * loss_56)
 
-            # ---- global recon grad ----
+            if not torch.isfinite(aux_loss):
+                raise RuntimeError("Auxiliary multimodal loss became non-finite")
+
             v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
             current_nglobal = v_global.norm().item()
             if avg_norm_recon_global == 0:
@@ -360,7 +426,6 @@ def train_paggan(
                 avg_norm_recon_global = norm_decay * avg_norm_recon_global + (1 - norm_decay) * current_nglobal
             v_global_s = v_global / (avg_norm_recon_global + 1e-8)
 
-            # ---- ROI recon grad ----
             if use_roi:
                 v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0]
                 current_nroi = v_roi.norm().item()
@@ -373,7 +438,6 @@ def train_paggan(
                 v_roi_s = torch.zeros_like(v_global_s)
                 current_nroi = 0.0
 
-            # ---- GAN grad ----
             v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0]
             current_ngan = v_gan.norm().item()
             if avg_norm_gan == 0:
@@ -382,20 +446,16 @@ def train_paggan(
                 avg_norm_gan = norm_decay * avg_norm_gan + (1 - norm_decay) * current_ngan
             v_gan_s = v_gan / (avg_norm_gan + 1e-8)
 
-            # Flatten standardized grads
             Vg = v_global_s.reshape(v_global_s.size(0), -1)
             Vr = v_roi_s.reshape(v_roi_s.size(0), -1)
             Vgan = v_gan_s.reshape(v_gan_s.size(0), -1)
 
             if use_roi:
-                # 3-way MGDA weights (per-sample), then robust median across batch
-                w_batch = _mgda_weights_3(Vg, Vr, Vgan)         # [B,3]
-                w_med = w_batch.median(dim=0).values            # [3]
-                w_sum = (w_med.sum() + 1e-12)
-                w_med = w_med / w_sum
+                w_batch = _mgda_weights_3(Vg, Vr, Vgan)
+                w_med = w_batch.median(dim=0).values
+                w_med = w_med / (w_med.sum() + 1e-12)
                 w_global, w_roi, w_gan_w = w_med[0], w_med[1], w_med[2]
             else:
-                # fallback: 2-way MGDA between global recon and GAN
                 diff = Vgan - Vg
                 num = (diff * Vgan).sum(dim=1)
                 den = (diff * diff).sum(dim=1) + 1e-12
@@ -405,71 +465,117 @@ def train_paggan(
                 w_roi = torch.tensor(0.0, device=device, dtype=fake.dtype)
                 w_gan_w = 1.0 - a
 
-            # Monitoring
             w_global_running += float(w_global.item())
             w_roi_running += float(w_roi.item())
             w_gan_running += float(w_gan_w.item())
-
             grad_recon_running += current_nglobal
             grad_roi_running += current_nroi
             grad_gan_running += current_ngan
 
-            # Final direction
             v_final = (w_global * v_global_s) + (w_roi * v_roi_s) + (w_gan_w * v_gan_s)
 
             opt_G.zero_grad(set_to_none=True)
-            fake.backward(v_final)
+            fake.backward(v_final, retain_graph=True)
+            aux_loss.backward()
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
 
-            # For logging only (proxy scalar; not used for backward)
-            loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
+            loss_G_log = (
+                loss_recon_global
+                + (loss_recon_roi if use_roi else 0.0)
+                + loss_gan
+                + aux_loss
+            ).detach().item()
 
             g_running += float(loss_G_log)
             d_running += loss_D.item()
+            global_running += float(loss_recon_global.detach().item())
+            roi_running += float(loss_recon_roi.detach().item()) if use_roi else 0.0
+            gan_running += float(loss_gan.detach().item())
+            con_running += float(loss_con.detach().item())
+            high_running += float(loss_high.detach().item())
+            severe_running += float(loss_56.detach().item())
+            aux_running += float(aux_loss.detach().item())
+            p_high_running += float(aux["p_high"].mean().detach().item())
+            p_56_running += float(aux["p_56"].mean().detach().item())
             n_batches += 1
 
-        # ---- Epoch aggregates ----
         avg_g = g_running / max(1, n_batches)
         avg_d = d_running / max(1, n_batches)
+        avg_global = global_running / max(1, n_batches)
+        avg_roi = roi_running / max(1, n_batches)
+        avg_gan = gan_running / max(1, n_batches)
+        avg_con = con_running / max(1, n_batches)
+        avg_high = high_running / max(1, n_batches)
+        avg_56 = severe_running / max(1, n_batches)
+        avg_aux = aux_running / max(1, n_batches)
+        avg_p_high = p_high_running / max(1, n_batches)
+        avg_p_56 = p_56_running / max(1, n_batches)
 
         avg_w_global = w_global_running / max(1, n_batches)
         avg_w_roi = w_roi_running / max(1, n_batches)
         avg_w_gan = w_gan_running / max(1, n_batches)
-
         avg_grad_recon = grad_recon_running / max(1, n_batches)
         avg_grad_roi = grad_roi_running / max(1, n_batches)
         avg_grad_gan = grad_gan_running / max(1, n_batches)
 
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
+        hist["train_global"].append(avg_global)
+        hist["train_roi"].append(avg_roi)
+        hist["train_gan"].append(avg_gan)
+        hist["train_con"].append(avg_con)
+        hist["train_high"].append(avg_high)
+        hist["train_56"].append(avg_56)
+        hist["train_aux"].append(avg_aux)
 
-        # ---- Validation ----
-        val_recon_epoch: Optional[float] = None
+        val_global_epoch: Optional[float] = None
+        val_roi_epoch: Optional[float] = None
+        val_score_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, v_batches = 0.0, 0
+                val_global_sum = 0.0
+                val_roi_sum = 0.0
+                v_batches = 0
                 for batch in val_loader:
-                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                        mri, pet, _ = batch
-                    else:
-                        mri, pet = batch
-                    mri = mri.to(device, non_blocking=True)
-                    pet = pet.to(device, non_blocking=True)
-                    fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
-                    pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
-                    loss_l1_v = l1_loss(fake, pet_for_metric)
-                    ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
-                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
-                    v_batches += 1
-            val_recon /= max(1, v_batches)
-            val_recon_epoch = val_recon
-            hist["val_recon"].append(val_recon)
+                    if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                        raise ValueError("Expected validation batch as (MRI, PET, meta)")
+                    mri, pet, meta = batch
+                    mri5 = mri.to(device, non_blocking=True)
+                    pet5 = pet.to(device, non_blocking=True)
+                    if mri5.dim() == 4:
+                        mri5 = mri5.unsqueeze(0)
+                    if pet5.dim() == 4:
+                        pet5 = pet5.unsqueeze(0)
+                    batch_size = mri5.size(0)
+                    flair5, clinical = _extract_generator_inputs(meta, device, batch_size)
+                    cortex5 = _meta_to_tensor(meta, "cortex_mask", device, dtype=torch.float32)
+                    fake = G(mri5, flair5, clinical)
 
-            if val_recon < best_val:
-                best_val = val_recon
+                    loss_l1_v = l1_loss(fake, pet5)
+                    ssim_v = ssim3d(fake, pet5, data_range=data_range)
+                    val_global_sum += float((loss_l1_v + (1.0 - ssim_v)).item())
+
+                    use_roi = float(cortex5.sum().item()) > 0.0
+                    if use_roi:
+                        val_roi_sum += float(_masked_l1_high_uptake(fake, pet5, cortex5).item())
+                    v_batches += 1
+
+            val_global_epoch = val_global_sum / max(1, v_batches)
+            val_roi_epoch = val_roi_sum / max(1, v_batches)
+            val_score_epoch = val_global_epoch + val_roi_epoch
+
+            hist["val_global"].append(val_global_epoch)
+            hist["val_roi"].append(val_roi_epoch)
+            hist["val_score"].append(val_score_epoch)
+            hist["val_recon"].append(val_global_epoch)
+
+            if val_score_epoch < best_val_score:
+                best_val_score = val_score_epoch
+                best_val_global = val_global_epoch
+                best_val_roi = val_roi_epoch
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
@@ -478,57 +584,65 @@ def train_paggan(
             if verbose:
                 dt = time.time() - t0
                 print(
-                    f"Epoch [{epoch:03d}/{epochs}]  "
-                    f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                    f"| best {best_val:.4f}  | {dt:.1f}s"
+                    f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  "
+                    f"ValGlobal: {val_global_epoch:.4f}  ValROI: {val_roi_epoch:.4f}  "
+                    f"ValScore: {val_score_epoch:.4f}  | best {best_val_score:.4f}  | {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
-                    f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
-                    f"||grad_global||={avg_grad_recon:.3e}  "
-                    f"||grad_roi||={avg_grad_roi:.3e}  "
-                    f"||grad_gan||={avg_grad_gan:.3e}"
+                    f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  w_roi={avg_w_roi:.3f}  "
+                    f"w_gan={avg_w_gan:.3f}  ||grad_global||={avg_grad_recon:.3e}  "
+                    f"||grad_roi||={avg_grad_roi:.3e}  ||grad_gan||={avg_grad_gan:.3e}"
                 )
-
+                print(
+                    f"      [AUX] global={avg_global:.4f} roi={avg_roi:.4f} gan={avg_gan:.4f} "
+                    f"con={avg_con:.4f} high={avg_high:.4f} severe={avg_56:.4f} "
+                    f"p_high={avg_p_high:.3f} p_56={avg_p_56:.3f}"
+                )
             G.train()
         elif verbose:
             dt = time.time() - t0
+            print(f"Epoch [{epoch:03d}/{epochs}]  G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s")
             print(
-                f"Epoch [{epoch:03d}/{epochs}]  "
-                f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
+                f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  w_roi={avg_w_roi:.3f}  "
+                f"w_gan={avg_w_gan:.3f}  ||grad_global||={avg_grad_recon:.3e}  "
+                f"||grad_roi||={avg_grad_roi:.3e}  ||grad_gan||={avg_grad_gan:.3e}"
             )
             print(
-                f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
-                f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
-                f"||grad_global||={avg_grad_recon:.3e}  "
-                f"||grad_roi||={avg_grad_roi:.3e}  "
-                f"||grad_gan||={avg_grad_gan:.3e}"
+                f"      [AUX] global={avg_global:.4f} roi={avg_roi:.4f} gan={avg_gan:.4f} "
+                f"con={avg_con:.4f} high={avg_high:.4f} severe={avg_56:.4f} "
+                f"p_high={avg_p_high:.3f} p_56={avg_p_56:.3f}"
             )
 
-        # ---- wandb logging per epoch ----
         if log_to_wandb and wandb.run is not None:
             log_dict = {
                 "epoch": epoch,
                 "train/G_loss": avg_g,
                 "train/D_loss": avg_d,
-
-                # --- NEW: 3-way MGDA weights ---
+                "train/global_loss": avg_global,
+                "train/roi_loss": avg_roi,
+                "train/gan_loss": avg_gan,
+                "train/aux_loss": avg_aux,
+                "train/con_loss": avg_con,
+                "train/high_loss": avg_high,
+                "train/severe_loss": avg_56,
+                "train/p_high_mean": avg_p_high,
+                "train/p_56_mean": avg_p_56,
                 "mgda/w_recon_global": avg_w_global,
                 "mgda/w_recon_roi": avg_w_roi,
                 "mgda/w_gan": avg_w_gan,
-
-                # keep grad norm tracking
                 "mgda/grad_recon_global_norm": avg_grad_recon,
                 "mgda/grad_recon_roi_norm": avg_grad_roi,
                 "mgda/grad_gan_norm": avg_grad_gan,
             }
-            if val_recon_epoch is not None:
-                log_dict["val/recon_loss"] = val_recon_epoch
-                log_dict["val/best_recon_loss"] = best_val
+            if val_global_epoch is not None:
+                log_dict["val/global_loss"] = val_global_epoch
+                log_dict["val/roi_loss"] = val_roi_epoch
+                log_dict["val/score"] = val_score_epoch
+                log_dict["val/best_score"] = best_val_score
+                log_dict["val/best_global"] = best_val_global
+                log_dict["val/best_roi"] = best_val_roi
             wandb.log(log_dict, step=epoch)
 
-    # ---- Load best weights ----
     if best_G is not None:
         G.load_state_dict(best_G)
     if best_D is not None:
@@ -555,38 +669,35 @@ def evaluate_paggan(
     n = 0
 
     for batch in test_loader:
-        if isinstance(batch, (list, tuple)) and len(batch) == 3:
-            mri, pet, meta = batch
-        else:
-            mri, pet = batch
-            meta = {}
-        mri = mri.to(device, non_blocking=True)
-        pet = pet.to(device, non_blocking=True)
-        fake = G(mri if mri.dim()==5 else mri.unsqueeze(0))
+        if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+            raise ValueError("Expected test batch as (MRI, PET, meta)")
+        mri, pet, meta = batch
+        mri5 = mri.to(device, non_blocking=True)
+        pet5 = pet.to(device, non_blocking=True)
+        if mri5.dim() == 4:
+            mri5 = mri5.unsqueeze(0)
+        if pet5.dim() == 4:
+            pet5 = pet5.unsqueeze(0)
+        batch_size = mri5.size(0)
+        flair5, clinical = _extract_generator_inputs(meta, device, batch_size)
+        brain5 = _meta_to_tensor(meta, "brain_mask", device, dtype=torch.float32)
+        fake5 = G(mri5, flair5, clinical)
 
-        pet_for_metric  = pet if pet.dim()==5 else pet.unsqueeze(0)
-
-        # masked metrics
-        brain_mask_np = meta.get("brain_mask", None) if isinstance(meta, dict) else None
-        if brain_mask_np is not None:
-            brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
-        else:
-            raise TypeError("No Mask")
-
-        fake_m = fake * brain
-        pet_m  = pet_for_metric * brain
-
-        ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
-        psnr_sum += psnr(fake_m, pet_m, data_range=data_range)
-        mse_sum  += F.mse_loss(fake_m, pet_m).item()
-        mmd_sum  += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
-        n += 1
+        for i in range(batch_size):
+            brain = brain5[i : i + 1]
+            fake_m = fake5[i : i + 1] * brain
+            pet_m = pet5[i : i + 1] * brain
+            ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
+            psnr_sum += psnr(fake_m, pet_m, data_range=data_range)
+            mse_sum += F.mse_loss(fake_m, pet_m).item()
+            mmd_sum += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
+            n += 1
 
     return {
         "SSIM": ssim_sum / max(1, n),
         "PSNR": psnr_sum / max(1, n),
-        "MSE":  mse_sum  / max(1, n),
-        "MMD":  mmd_sum  / max(1, n),
+        "MSE": mse_sum / max(1, n),
+        "MMD": mmd_sum / max(1, n),
     }
 
 
@@ -600,103 +711,108 @@ def evaluate_and_save(
     mmd_voxels: int = 2048,
     resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
 ):
-    """
-    Evaluates on test_loader, saves volumes, and returns a dict of aggregate metrics.
-    Also writes per-subject metrics CSV (sid, SSIM, PSNR, MSE, MMD) for later aggregation,
-    and includes 95% confidence intervals in the returned dict.
-    """
-    import csv, json
-    import numpy as np
     try:
         from scipy.stats import t as _t_dist
-        def _tcrit(df): return float(_t_dist.ppf(0.975, df)) if df > 0 else float('nan')
+
+        def _tcrit(df):
+            return float(_t_dist.ppf(0.975, df)) if df > 0 else float("nan")
+
     except Exception:
-        def _tcrit(df): return 1.96 if df > 0 else float('nan')  # normal approx fallback
+
+        def _tcrit(df):
+            return 1.96 if df > 0 else float("nan")
 
     os.makedirs(out_dir, exist_ok=True)
     G.to(device)
     G.eval()
 
-    # Per-subject collections
-    sids, ssim_list, psnr_list, mse_list, mmd_list = [], [], [], [], []
+    sids: List[str] = []
+    ssim_list: List[float] = []
+    psnr_list: List[float] = []
+    mse_list: List[float] = []
+    mmd_list: List[float] = []
 
     run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
 
-    for i, batch in enumerate(test_loader):
-        if isinstance(batch, (list, tuple)) and len(batch) == 3:
-            mri, pet, meta = batch
-        else:
-            mri, pet = batch
-            meta = {"sid": f"sample_{i:04d}", "t1_affine": np.eye(4),
-                    "orig_shape": tuple(mri.shape[2:]), "cur_shape": tuple(mri.shape[2:]), "resized_to": None}
-        meta = _meta_unbatch(meta)
+    for batch_idx, batch in enumerate(test_loader):
+        if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+            raise ValueError("Expected test batch as (MRI, PET, meta)")
+        mri, pet, meta = batch
+        metas = _meta_as_list(meta)
 
-        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
-        sids.append(sid)
-        subdir = os.path.join(out_dir, sid)
-        os.makedirs(subdir, exist_ok=True)
+        mri5 = mri.to(device, non_blocking=True)
+        pet5 = pet.to(device, non_blocking=True)
+        if mri5.dim() == 4:
+            mri5 = mri5.unsqueeze(0)
+        if pet5.dim() == 4:
+            pet5 = pet5.unsqueeze(0)
+        batch_size = mri5.size(0)
+        if len(metas) != batch_size:
+            raise RuntimeError("Meta batch size does not match evaluation batch size")
 
-        mri_t = mri.to(device, non_blocking=True)
-        pet_t = pet.to(device, non_blocking=True)
-        fake_t = G(mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0))
+        flair5, clinical = _extract_generator_inputs(meta, device, batch_size)
+        fake5 = G(mri5, flair5, clinical)
 
-        pet_for_metric = pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)
+        for i, meta_i in enumerate(metas):
+            sid = _safe_name(meta_i.get("sid", f"sample_{batch_idx:04d}_{i:02d}"))
+            sids.append(sid)
+            subdir = os.path.join(out_dir, sid)
+            os.makedirs(subdir, exist_ok=True)
 
-        # mask (prefer brain mask from meta; else pet>0)
-        brain_mask_np = meta.get("brain_mask", None)
-        if brain_mask_np is not None:
-            brain = torch.from_numpy(brain_mask_np.astype(np.float32))[None, None].to(device)
-        else:
-            brain = (pet_for_metric > 0).float()
+            mri_i = mri5[i : i + 1]
+            pet_i = pet5[i : i + 1]
+            fake_i = fake5[i : i + 1]
 
-        fake_m = fake_t * brain
-        pet_m  = pet_for_metric * brain
+            if "brain_mask" not in meta_i:
+                raise RuntimeError(f"{sid}: missing brain_mask in meta")
+            brain = _sample_meta_tensor(meta_i["brain_mask"]).unsqueeze(0).to(device=device, dtype=torch.float32)
 
-        # per-subject metrics
-        ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
-        psnr_val = psnr(fake_m,  pet_m, data_range=data_range)
-        mse_val  = F.mse_loss(fake_m, pet_m).item()
-        mmd_val  = mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
+            fake_m = fake_i * brain
+            pet_m = pet_i * brain
 
-        ssim_list.append(ssim_val)
-        psnr_list.append(psnr_val)
-        mse_list.append(mse_val)
-        mmd_list.append(mmd_val)
+            ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
+            psnr_val = psnr(fake_m, pet_m, data_range=data_range)
+            mse_val = F.mse_loss(fake_m, pet_m).item()
+            mmd_val = mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
 
-        # Save volumes (same as before)
-        mri_np  = (mri_t if mri_t.dim()==5 else mri_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
-        pet_np  = (pet_t if pet_t.dim()==5 else pet_t.unsqueeze(0)).squeeze(0).squeeze(0).detach().cpu().numpy()
-        fake_np =  fake_t.squeeze(0).squeeze(0).detach().cpu().numpy()
-        err_np  = np.abs(fake_np - pet_np)
+            ssim_list.append(ssim_val)
+            psnr_list.append(psnr_val)
+            mse_list.append(mse_val)
+            mmd_list.append(mmd_val)
 
-        cur_shape  = tuple(mri_np.shape)
-        orig_shape = tuple(meta.get("orig_shape", cur_shape))
+            mri_np = mri_i.squeeze(0).squeeze(0).detach().cpu().numpy()
+            pet_np = pet_i.squeeze(0).squeeze(0).detach().cpu().numpy()
+            fake_np = fake_i.squeeze(0).squeeze(0).detach().cpu().numpy()
+            err_np = np.abs(fake_np - pet_np)
 
-        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
-            zf = (float(orig_shape[0]) / float(cur_shape[0]),
-                  float(orig_shape[1]) / float(cur_shape[1]),
-                  float(orig_shape[2]) / float(cur_shape[2]))
-            mri_np  = nd_zoom(mri_np,  zf, order=1)
-            pet_np  = nd_zoom(pet_np,  zf, order=1)
-            fake_np = nd_zoom(fake_np, zf, order=1)
-            err_np  = nd_zoom(err_np,  zf, order=1)
-            affine_to_use = meta.get("t1_affine", np.eye(4))
-        else:
-            resized_to = meta.get("resized_to", None)
-            affine_to_use = meta.get("t1_affine", np.eye(4)) if resized_to is None else np.eye(4)
+            cur_shape = tuple(mri_np.shape)
+            orig_shape = tuple(meta_i.get("orig_shape", cur_shape))
+            if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
+                zf = (
+                    float(orig_shape[0]) / float(cur_shape[0]),
+                    float(orig_shape[1]) / float(cur_shape[1]),
+                    float(orig_shape[2]) / float(cur_shape[2]),
+                )
+                mri_np = nd_zoom(mri_np, zf, order=1)
+                pet_np = nd_zoom(pet_np, zf, order=1)
+                fake_np = nd_zoom(fake_np, zf, order=1)
+                err_np = nd_zoom(err_np, zf, order=1)
+                affine_to_use = meta_i.get("t1_affine", np.eye(4))
+            else:
+                resized_to = meta_i.get("resized_to", None)
+                affine_to_use = meta_i.get("t1_affine", np.eye(4)) if resized_to is None else np.eye(4)
 
-        _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
-        _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
-        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
-        _save_nifti(err_np,  affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
+            _save_nifti(mri_np, affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
+            _save_nifti(pet_np, affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
+            _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
+            _save_nifti(err_np, affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
 
-    # ---- Aggregate + CI (keep old keys as means) ----
     def _mean_std_ci(vals):
-        a = np.asarray(vals, dtype=np.float64)
-        n = a.size
-        mean = float(a.mean()) if n > 0 else float("nan")
-        std  = float(a.std(ddof=1)) if n > 1 else float("nan")
-        se   = (std / np.sqrt(n)) if n > 1 else float("nan")
+        arr = np.asarray(vals, dtype=np.float64)
+        n = arr.size
+        mean = float(arr.mean()) if n > 0 else float("nan")
+        std = float(arr.std(ddof=1)) if n > 1 else float("nan")
+        se = (std / np.sqrt(n)) if n > 1 else float("nan")
         tcrit = _tcrit(n - 1)
         lo = mean - tcrit * se if n > 1 else float("nan")
         hi = mean + tcrit * se if n > 1 else float("nan")
@@ -704,37 +820,58 @@ def evaluate_and_save(
 
     m_ssim, sd_ssim, n_ssim, lo_ssim, hi_ssim = _mean_std_ci(ssim_list)
     m_psnr, sd_psnr, n_psnr, lo_psnr, hi_psnr = _mean_std_ci(psnr_list)
-    m_mse,  sd_mse,  n_mse,  lo_mse,  hi_mse  = _mean_std_ci(mse_list)
-    m_mmd,  sd_mmd,  n_mmd,  lo_mmd,  hi_mmd  = _mean_std_ci(mmd_list)
+    m_mse, sd_mse, n_mse, lo_mse, hi_mse = _mean_std_ci(mse_list)
+    m_mmd, sd_mmd, n_mmd, lo_mmd, hi_mmd = _mean_std_ci(mmd_list)
 
-    # Per-subject CSV in run directory (sits next to 'volumes/')
     per_subj_csv = os.path.join(run_dir, "per_subject_metrics.csv")
     with open(per_subj_csv, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["sid", "SSIM", "PSNR", "MSE", "MMD"])
+        writer = csv.writer(f)
+        writer.writerow(["sid", "SSIM", "PSNR", "MSE", "MMD"])
         for sid, ssim_v, psnr_v, mse_v, mmd_v in zip(sids, ssim_list, psnr_list, mse_list, mmd_list):
-            w.writerow([sid, ssim_v, psnr_v, mse_v, mmd_v])
+            writer.writerow([sid, ssim_v, psnr_v, mse_v, mmd_v])
 
-    # Also write a machine-readable summary JSON (optional, handy later)
     summary_json = os.path.join(run_dir, "test_metrics_summary.json")
     summary = {
         "N": n_ssim,
-        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
-        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
-        "MSE":  m_mse,  "MSE_std":  sd_mse,  "MSE_lo95":  lo_mse,  "MSE_hi95":  hi_mse,
-        "MMD":  m_mmd,  "MMD_std":  sd_mmd,  "MMD_lo95":  lo_mmd,  "MMD_hi95":  hi_mmd,
+        "SSIM": m_ssim,
+        "SSIM_std": sd_ssim,
+        "SSIM_lo95": lo_ssim,
+        "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr,
+        "PSNR_std": sd_psnr,
+        "PSNR_lo95": lo_psnr,
+        "PSNR_hi95": hi_psnr,
+        "MSE": m_mse,
+        "MSE_std": sd_mse,
+        "MSE_lo95": lo_mse,
+        "MSE_hi95": hi_mse,
+        "MMD": m_mmd,
+        "MMD_std": sd_mmd,
+        "MMD_lo95": lo_mmd,
+        "MMD_hi95": hi_mmd,
         "per_subject_csv": per_subj_csv,
     }
     with open(summary_json, "w") as f:
         json.dump(summary, f, indent=2)
 
-    # Keep backward-compatible keys as means for your main() writer
     return {
         "N": n_ssim,
-        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
-        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
-        "MSE":  m_mse,  "MSE_std":  sd_mse,  "MSE_lo95":  lo_mse,  "MSE_hi95":  hi_mse,
-        "MMD":  m_mmd,  "MMD_std":  sd_mmd,  "MMD_lo95":  lo_mmd,  "MMD_hi95":  hi_mmd,
+        "SSIM": m_ssim,
+        "SSIM_std": sd_ssim,
+        "SSIM_lo95": lo_ssim,
+        "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr,
+        "PSNR_std": sd_psnr,
+        "PSNR_lo95": lo_psnr,
+        "PSNR_hi95": hi_psnr,
+        "MSE": m_mse,
+        "MSE_std": sd_mse,
+        "MSE_lo95": lo_mse,
+        "MSE_hi95": hi_mse,
+        "MMD": m_mmd,
+        "MMD_std": sd_mmd,
+        "MMD_lo95": lo_mmd,
+        "MMD_hi95": hi_mmd,
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
     }

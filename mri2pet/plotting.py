@@ -10,8 +10,14 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
         plt.plot(history["train_G"], label="Train G")
     if "train_D" in history:
         plt.plot(history["train_D"], label="Train D")
-    if "val_recon" in history and len(history["val_recon"]) > 0:
-        plt.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
+    if "val_global" in history and len(history["val_global"]) > 0:
+        plt.plot(history["val_global"], label="Val Global")
+    if "val_roi" in history and len(history["val_roi"]) > 0:
+        plt.plot(history["val_roi"], label="Val ROI")
+    if "val_score" in history and len(history["val_score"]) > 0:
+        plt.plot(history["val_score"], label="Val Score")
+    if "train_aux" in history and len(history["train_aux"]) > 0:
+        plt.plot(history["train_aux"], label="Train Aux")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training / Validation Losses")
@@ -21,15 +27,27 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     plt.close()
 
 def save_history_csv(history: Dict[str, Sequence[float]], out_csv: str):
-    L = max(len(history.get("train_G", [])),
-            len(history.get("train_D", [])),
-            len(history.get("val_recon", [])))
+    keys = [
+        "train_G",
+        "train_D",
+        "train_global",
+        "train_roi",
+        "train_gan",
+        "train_con",
+        "train_high",
+        "train_56",
+        "train_aux",
+        "val_global",
+        "val_roi",
+        "val_score",
+    ]
+    L = max(len(history.get(k, [])) for k in keys)
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["epoch", "train_G", "train_D", "val_recon"])
+        w.writerow(["epoch"] + keys)
         for i in range(L):
-            row = [i+1,
-                   history.get("train_G",  [None]*L)[i] if i < len(history.get("train_G",[])) else "",
-                   history.get("train_D",  [None]*L)[i] if i < len(history.get("train_D",[])) else "",
-                   history.get("val_recon",[None]*L)[i] if i < len(history.get("val_recon",[])) else ""]
+            row = [i + 1]
+            for key in keys:
+                vals = history.get(key, [])
+                row.append(vals[i] if i < len(vals) else "")
             w.writerow(row)

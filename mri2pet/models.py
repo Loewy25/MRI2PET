@@ -1,5 +1,5 @@
 # model.py
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -143,6 +143,43 @@ class ResidualBlock3D(nn.Module):
         return self.relu(out + x)
 
 
+class FlairEncoder3D(nn.Module):
+    def __init__(self, in_ch: int = 1, out_dim: int = 256):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv3d(in_ch, 32, kernel_size=3, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(64, 128, kernel_size=3, stride=2, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(128, 256, kernel_size=3, stride=2, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.proj = nn.Linear(256, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.pool(x).flatten(1)
+        return self.proj(x)
+
+
+class ClinicalEncoder(nn.Module):
+    def __init__(self, in_dim: int = 10, out_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class Generator(nn.Module):
     """
     Deeper-by-1 version (minimal-risk):
@@ -177,6 +214,20 @@ class Generator(nn.Module):
             ResidualBlock3D(ch4), ResidualBlock3D(ch4), ResidualBlock3D(ch4),
             ResidualBlock3D(ch4), ResidualBlock3D(ch4), ResidualBlock3D(ch4),
         )
+        self.mri_pool = nn.AdaptiveAvgPool3d(1)
+        self.flair_encoder = FlairEncoder3D(in_ch=1, out_dim=256)
+        self.clinical_encoder = ClinicalEncoder(in_dim=10, out_dim=256)
+        self.fusion = nn.Sequential(
+            nn.Linear(ch4 + 256 + 256, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+        )
+        self.global_proj = nn.Sequential(nn.Linear(256, 256), nn.ReLU(inplace=True))
+        self.severe_proj = nn.Sequential(nn.Linear(256, 256), nn.ReLU(inplace=True))
+        self.high_head = nn.Linear(256, 1)
+        self.severe_head = nn.Linear(256, 1)
+        self.bottleneck_condition = nn.Conv3d(ch4 + 256 + 256, ch4, kernel_size=1, bias=True)
 
         # Decoder
         # ---- NEW: first up stage to fuse with x4 (skip at depth 4) ----
@@ -207,7 +258,18 @@ class Generator(nn.Module):
 
         self.out_conv = nn.Conv3d(64, out_ch, kernel_size=3, padding=1, bias=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        flair: torch.Tensor,
+        clinical: torch.Tensor,
+        return_aux: bool = False,
+    ):
+        if x.dim() != 5 or flair.dim() != 5:
+            raise ValueError("Generator expects MRI and FLAIR as [B,1,D,H,W]")
+        if clinical.dim() != 2 or clinical.size(1) != 10:
+            raise ValueError("Generator expects clinical vectors as [B,10]")
+
         # Encoder
         x1 = self.down1(x);  p1 = self.pool(x1)
         x2 = self.down2(p1); p2 = self.pool(x2)
@@ -221,8 +283,24 @@ class Generator(nn.Module):
         b = self.bottleneck(p4)
         b = self.bottleneck_res6(b)
 
+        z_mri = self.mri_pool(b).flatten(1)
+        z_flair = self.flair_encoder(flair)
+        z_clin = self.clinical_encoder(clinical)
+        z_fuse = self.fusion(torch.cat([z_mri, z_flair, z_clin], dim=1))
+        z_global = self.global_proj(z_fuse)
+        z_severe = self.severe_proj(z_fuse)
+        high_logit = self.high_head(z_fuse)
+        severe_logit = self.severe_head(z_fuse)
+        p_high = torch.sigmoid(high_logit)
+        p_56 = torch.sigmoid(severe_logit)
+
+        spatial = b.shape[2:]
+        z_global_map = z_global.view(z_global.size(0), z_global.size(1), 1, 1, 1).expand(-1, -1, *spatial)
+        z_severe_map = (p_56 * z_severe).view(z_severe.size(0), z_severe.size(1), 1, 1, 1).expand(-1, -1, *spatial)
+        b_cond = self.bottleneck_condition(torch.cat([b, z_global_map, z_severe_map], dim=1))
+
         # ---- NEW Decoder stage 0 (gate x4) ----
-        u0_up = self.up0_ups(b)
+        u0_up = self.up0_ups(b_cond)
         u0_up = _pad_or_crop_to(u0_up, x4)
         x4_g  = self.gate_x4(x4, u0_up)
         u0 = torch.cat([u0_up, x4_g], dim=1)
@@ -257,7 +335,23 @@ class Generator(nn.Module):
         gate_s = self.satt(u3)          # [B, 1, D, H, W] (starts ~1 everywhere)
         u3 = gate_s * u3
 
-        return self.out_conv(u3)
+        out = self.out_conv(u3)
+        if not return_aux:
+            return out
+
+        aux: Dict[str, Any] = {
+            "z_mri": z_mri,
+            "z_flair": z_flair,
+            "z_clin": z_clin,
+            "z_fuse": z_fuse,
+            "z_global": z_global,
+            "z_severe": z_severe,
+            "high_logit": high_logit,
+            "severe_logit": severe_logit,
+            "p_high": p_high,
+            "p_56": p_56,
+        }
+        return out, aux
 
 
 class CondPatchDiscriminator3D(nn.Module):
@@ -288,4 +382,3 @@ class CondPatchDiscriminator3D(nn.Module):
         f = self.features(x)     # [B, C, d, h, w]
         s = self.head(f)         # [B, 1, d, h, w]
         return s                 # logits (no sigmoid)
-

@@ -4,7 +4,7 @@ import torch
 import wandb  # <-- add this
 
 from mri2pet.config import (
-    ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
+    ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, VOL_DIR,
     EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, RESIZE_TO,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
@@ -12,10 +12,11 @@ from mri2pet.config import (
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
+    BRAAK_THRESHOLD, SPLITS_DIR, FOLD_INDEX, FOLD_CSV,
+    MR_AMY_TAU_CDR_CSV, MR_COG_PET_CSV, DEMOGRAPHICS_CSV,
+    LAMBDA_CON, LAMBDA_HIGH, LAMBDA_56, CONTRAST_TEMP,
 )
 
-from mri2pet.data import build_loaders
-from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
 from mri2pet.models import Generator, CondPatchDiscriminator3D
 from mri2pet.train_eval import train_paggan, evaluate_and_save
@@ -60,6 +61,17 @@ def init_wandb_run():
                 "roi_hi_q": ROI_HI_Q,
                 "roi_hi_lambda": ROI_HI_LAMBDA,
                 "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
+                "splits_dir": SPLITS_DIR,
+                "fold_index": FOLD_INDEX,
+                "fold_csv": FOLD_CSV,
+                "braak_threshold": BRAAK_THRESHOLD,
+                "mr_amy_tau_cdr_csv": MR_AMY_TAU_CDR_CSV,
+                "mr_cog_pet_csv": MR_COG_PET_CSV,
+                "demographics_csv": DEMOGRAPHICS_CSV,
+                "lambda_con": LAMBDA_CON,
+                "lambda_high": LAMBDA_HIGH,
+                "lambda_56": LAMBDA_56,
+                "contrast_temp": CONTRAST_TEMP,
             },
         )
     except Exception as exc:
@@ -72,28 +84,42 @@ if __name__ == "__main__":
     print(f"Output root: {OUT_DIR}")
     print(f"Run name: {RUN_NAME}")
     print(f"Run dir: {OUT_RUN}")
+    print(f"Fold CSV: {FOLD_CSV}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     wandb_run = init_wandb_run()
 
     # Build loaders
-    if os.path.isfile(FOLD_CSV):
-        print(f"Using fold CSV: {FOLD_CSV}")
-        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(FOLD_CSV)
-    else:
-        print("No fold CSV found; falling back to random split.")
-        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
+    if not os.path.isfile(FOLD_CSV):
+        raise FileNotFoundError(f"Fold CSV not found: {FOLD_CSV}")
+    train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(FOLD_CSV)
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
         sample = next(iter(train_loader))
         if isinstance(sample, (list, tuple)) and len(sample) == 3:
             mri0, pet0, meta0 = sample
-            sid0 = meta0.get("sid", "NA") if isinstance(meta0, dict) else "NA"
+            if isinstance(meta0, dict):
+                sid0 = meta0.get("sid", "NA")
+                flair_shape = tuple(meta0["flair"].shape)
+                clinical_shape = tuple(meta0["clinical_vector"].shape)
+            elif isinstance(meta0, list) and len(meta0) > 0:
+                sid0 = meta0[0].get("sid", "NA")
+                flair_shape = tuple(meta0[0]["flair"].shape)
+                clinical_shape = tuple(meta0[0]["clinical_vector"].shape)
+            else:
+                sid0 = "NA"
+                flair_shape = ()
+                clinical_shape = ()
         else:
             mri0, pet0 = sample
             sid0 = "NA"
-        print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {sid0}")
+            flair_shape = ()
+            clinical_shape = ()
+        print(
+            f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, "
+            f"FLAIR {flair_shape}, clinical {clinical_shape}, SID {sid0}"
+        )
 
     # Instantiate models
     G = Generator(in_ch=1, out_ch=1)
