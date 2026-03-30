@@ -56,11 +56,13 @@ pip install pydicom
 #python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/nohierachy_fold1_os65_aug_7_amy_dataset_manifest.csv --modality pet_fake
 python compare_dataset_distributions.py \
   --root-a /scratch/l.peiwang/kari_brainv33_top300 \
-  --root-b /scratch/l.peiwang/kari_all \
-  --name-a brainv33_top300 \
-  --name-b kari_all \
-  --out-dir /scratch/l.peiwang/distribution_audit \
-  --workers 8
+  --root-b /scratch/l.peiwang/kari_flair_all \
+  --name-a kari_brainv33_top300 \
+  --name-b kari_flair_all \
+  --top-k 50 \
+  --no-plots
+
+
 
 
 #python Classification_csv.py \
