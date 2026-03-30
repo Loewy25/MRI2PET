@@ -54,13 +54,13 @@ pip install pydicom
 #python add_label.py
 
 #python classification_cnn.py --csv /scratch/l.peiwang/MRI2PET_classfication/nohierachy_fold1_os65_aug_7_amy_dataset_manifest.csv --modality pet_fake
-python compare_dataset_distributions.py \
-  --root-a /scratch/l.peiwang/kari_brainv33_top300 \
-  --root-b /scratch/l.peiwang/kari_flair_all \
-  --name-a kari_brainv33_top300 \
-  --name-b kari_flair_all \
-  --top-k 50 \
-  --no-plots
+#python compare_dataset_distributions.py \
+#  --root-a /scratch/l.peiwang/kari_brainv33_top300 \
+#  --root-b /scratch/l.peiwang/kari_flair_all \
+#  --name-a kari_brainv33_top300 \
+#  --name-b kari_flair_all \
+#  --top-k 50 \
+#  --no-plots
 
 
 
@@ -101,10 +101,10 @@ python compare_dataset_distributions.py \
 # ------------------------------------------------------------
 #python summary_extra_modality.py
 # Actual job
-#python cv_creator_with_label.py \
-#  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-#  --root /scratch/l.peiwang/kari_flair_all \
-#  --outdir /scratch/l.peiwang/kari_flair_all/CV5_braak_strat
+python cv_creator_with_label.py \
+  --meta_csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+  --root /scratch/l.peiwang/kari_flair_all \
+  --outdir /scratch/l.peiwang/kari_flair_all/CV5_braak_strat
 
 #BASE_DIR=/scratch/l.peiwang/kari_all 
 #python Brain_mask.py
