@@ -135,10 +135,6 @@ if __name__ == "__main__":
         G = torch.nn.DataParallel(G)
         D = torch.nn.DataParallel(D)
 
-    if wandb_run is not None:
-        wandb.watch(G, log="gradients", log_freq=50)
-        wandb.watch(D, log="gradients", log_freq=50)
-
     # Train
     out = train_paggan(
         G, D, train_loader, val_loader,
