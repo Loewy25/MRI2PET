@@ -33,6 +33,10 @@ REQUIRED_FILES = [
     "mask_cortex.nii.gz",
 ]
 
+DEFAULT_META_CSV = "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv"
+DEFAULT_SESSION_COL = "TAU_PET_Session"
+DEFAULT_BRAAK_THRESHOLD = 1.2
+
 IGNORE_DIR_NAMES = {
     ".git",
     "__pycache__",
@@ -44,6 +48,7 @@ IGNORE_DIR_NAMES = {
 
 PLOT_TOP_K = 6
 EPS = 1e-6
+BRAAK_STAGE_ORDER = ["5/6", "3/4", "1/2", "0", "missing"]
 
 
 def _safe_slug(value: str) -> str:
@@ -61,9 +66,138 @@ def _safe_float(value: Any) -> Optional[float]:
     return out
 
 
+def _norm_key(value: Any) -> str:
+    return str(value).strip().lower()
+
+
 def _finite_array(values: Iterable[Any]) -> np.ndarray:
     out = np.asarray(list(values), dtype=np.float64)
     return out[np.isfinite(out)]
+
+
+def _find_csv_column(fieldnames: Sequence[str], target: str) -> str:
+    mapping = {_norm_key(name): name for name in fieldnames}
+    key = _norm_key(target)
+    if key not in mapping:
+        raise KeyError("Column '{0}' not found. Available columns: {1}".format(target, list(fieldnames)))
+    return mapping[key]
+
+
+def _braak_stage_from_values(
+    braak_12: Optional[float],
+    braak_34: Optional[float],
+    braak_56: Optional[float],
+    threshold: float,
+) -> Tuple[str, int]:
+    b12 = braak_12 if braak_12 is not None else math.nan
+    b34 = braak_34 if braak_34 is not None else math.nan
+    b56 = braak_56 if braak_56 is not None else math.nan
+    if math.isfinite(b56) and b56 >= threshold:
+        return "5/6", 3
+    if math.isfinite(b34) and b34 >= threshold:
+        return "3/4", 2
+    if math.isfinite(b12) and b12 >= threshold:
+        return "1/2", 1
+    return "0", 0
+
+
+def _load_braak_lookup(
+    meta_csv: str,
+    session_col: str,
+    threshold: float,
+) -> Tuple[Dict[str, Dict[str, Any]], str]:
+    if not meta_csv:
+        return {}, "Braak labels skipped: no metadata CSV provided."
+    if not os.path.isfile(meta_csv):
+        return {}, "Braak labels skipped: metadata CSV not found at {0}".format(meta_csv)
+
+    with open(meta_csv, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        if not fieldnames:
+            return {}, "Braak labels skipped: metadata CSV has no header."
+
+        session_col_real = _find_csv_column(fieldnames, session_col)
+        braak12_col = _find_csv_column(fieldnames, "Braak1_2")
+        braak34_col = _find_csv_column(fieldnames, "Braak3_4")
+        braak56_col = _find_csv_column(fieldnames, "Braak5_6")
+
+        lookup: Dict[str, Dict[str, Any]] = {}
+        for row in reader:
+            session = str(row.get(session_col_real, "")).strip()
+            if not session:
+                continue
+            braak_12 = _safe_float(row.get(braak12_col))
+            braak_34 = _safe_float(row.get(braak34_col))
+            braak_56 = _safe_float(row.get(braak56_col))
+            stage, stage_code = _braak_stage_from_values(braak_12, braak_34, braak_56, threshold)
+            key = _norm_key(session)
+            previous = lookup.get(key)
+            if previous is not None and int(previous["braak_stage_code"]) > stage_code:
+                continue
+            lookup[key] = {
+                "braak_stage": stage,
+                "braak_stage_code": stage_code,
+                "braak1_2": braak_12,
+                "braak3_4": braak_34,
+                "braak5_6": braak_56,
+            }
+
+    status = "Braak labels loaded from {0} ({1} unique sessions)".format(meta_csv, len(lookup))
+    return lookup, status
+
+
+def _attach_braak_labels(rows: Sequence[Dict[str, Any]], lookup: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    matched = 0
+    missing = 0
+    for row in rows:
+        info = lookup.get(_norm_key(row.get("sid", "")))
+        if info is None:
+            row["braak_stage"] = "missing"
+            row["braak_stage_code"] = -1
+            row["braak1_2"] = math.nan
+            row["braak3_4"] = math.nan
+            row["braak5_6"] = math.nan
+            missing += 1
+            continue
+        row.update(info)
+        matched += 1
+    return {"matched": matched, "missing": missing}
+
+
+def _label_counts(rows: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {label: 0 for label in BRAAK_STAGE_ORDER}
+    for row in rows:
+        label = str(row.get("braak_stage", "missing")).strip() or "missing"
+        if label not in counts:
+            counts[label] = 0
+        counts[label] += 1
+    return counts
+
+
+def _format_label_mix(rows: Sequence[Dict[str, Any]]) -> str:
+    total = len(rows)
+    if total == 0:
+        return "none"
+    counts = _label_counts(rows)
+    parts = []
+    for label in BRAAK_STAGE_ORDER:
+        count = counts.get(label, 0)
+        if count <= 0:
+            continue
+        parts.append("{0}={1} ({2:.1f}%)".format(label, count, 100.0 * count / float(total)))
+    return ", ".join(parts) if parts else "none"
+
+
+def _format_high_braak_share(rows: Sequence[Dict[str, Any]]) -> str:
+    total = len(rows)
+    if total == 0:
+        return "0/0 (0.0%)"
+    high = 0
+    for row in rows:
+        if str(row.get("braak_stage", "")).strip() in {"5/6", "3/4"}:
+            high += 1
+    return "{0}/{1} ({2:.1f}%)".format(high, total, 100.0 * high / float(total))
 
 
 def _percentiles(values: np.ndarray, qs: Sequence[float]) -> Dict[str, float]:
@@ -274,7 +408,22 @@ def _collect_features(
 
 
 def _numeric_feature_names(rows: Sequence[Dict[str, Any]]) -> List[str]:
-    exclude = {"dataset", "sid", "subject_dir", "error", "top_outlier_features", "top_vs_ref_features"}
+    exclude = {
+        "dataset",
+        "sid",
+        "subject_dir",
+        "error",
+        "top_outlier_features",
+        "top_vs_ref_features",
+        "outlier_score_within_dataset",
+        "outlier_score_vs_ref_a",
+        "outlier_score_vs_ref_b",
+        "braak_stage",
+        "braak_stage_code",
+        "braak1_2",
+        "braak3_4",
+        "braak5_6",
+    }
     names = []
     for key in sorted({k for row in rows for k in row.keys()}):
         if key in exclude:
@@ -443,6 +592,9 @@ def _render_report(
     summary_a: Dict[str, Any],
     summary_b: Dict[str, Any],
     feature_rows: Sequence[Dict[str, Any]],
+    braak_status: str,
+    braak_summary_b: str,
+    braak_high_share_b: str,
     out_dir: str,
     write_files: bool,
 ) -> str:
@@ -453,6 +605,9 @@ def _render_report(
         "{0}: ok={1}, errors={2}".format(
             summary_b["dataset"], summary_b["subject_count_ok"], summary_b["subject_count_error"]
         ),
+        braak_status,
+        "{0} overall Braak mix: {1}".format(summary_b["dataset"], braak_summary_b),
+        "{0} overall high Braak (3/4 or 5/6): {1}".format(summary_b["dataset"], braak_high_share_b),
         "",
         "Top shifted features overall:",
     ]
@@ -491,14 +646,24 @@ def _render_ranked_outliers(
     score_field: str,
     reason_field: str,
     limit: int,
+    overall_rows: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> str:
+    chosen = list(rows[:limit])
     lines = [title]
-    for row in rows[:limit]:
+    if chosen:
+        lines.append("  Braak mix in top {0}: {1}".format(len(chosen), _format_label_mix(chosen)))
+        lines.append("  High Braak (3/4 or 5/6) in top {0}: {1}".format(len(chosen), _format_high_braak_share(chosen)))
+    if overall_rows is not None:
+        lines.append("  Dataset-B overall Braak mix: {0}".format(_format_label_mix(overall_rows)))
+        lines.append("  Dataset-B overall high Braak (3/4 or 5/6): {0}".format(_format_high_braak_share(overall_rows)))
+    for index, row in enumerate(chosen, start=1):
         score = _safe_float(row.get(score_field))
         score_text = "NA" if score is None else "{0:.3f}".format(score)
         lines.append(
-            "  {0}: score={1}, reasons={2}".format(
+            "  {0:02d}. {1}: braak={2}, score={3}, reasons={4}".format(
+                index,
                 row.get("sid", "NA"),
+                row.get("braak_stage", "missing"),
                 score_text,
                 row.get(reason_field, ""),
             )
@@ -516,6 +681,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root-b", required=True, help="Comparison dataset root")
     parser.add_argument("--name-a", default="dataset_a", help="Label for dataset A")
     parser.add_argument("--name-b", default="dataset_b", help="Label for dataset B")
+    parser.add_argument(
+        "--meta-csv",
+        default=DEFAULT_META_CSV,
+        help="Metadata CSV used to attach Braak labels to printed outliers",
+    )
+    parser.add_argument(
+        "--session-col",
+        default=DEFAULT_SESSION_COL,
+        help="Metadata CSV session column used to match subject folder names",
+    )
+    parser.add_argument(
+        "--braak-threshold",
+        type=float,
+        default=DEFAULT_BRAAK_THRESHOLD,
+        help="Threshold used to convert Braak1_2/Braak3_4/Braak5_6 values into stage labels",
+    )
+    parser.add_argument(
+        "--no-labels",
+        action="store_true",
+        help="Skip Braak label lookup and print outlier ranks without stage information",
+    )
     parser.add_argument(
         "--out-dir",
         default=os.path.join("results", "distribution_audit"),
@@ -571,10 +757,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rows_a = _collect_features(subject_dirs_a, args.name_a, max(args.workers, 1))
     rows_b = _collect_features(subject_dirs_b, args.name_b, max(args.workers, 1))
 
-    if args.write_files:
-        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_a)), rows_a)
-        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_b)), rows_b)
-
     ok_rows_a = [row for row in rows_a if not row.get("error")]
     ok_rows_b = [row for row in rows_b if not row.get("error")]
 
@@ -620,10 +802,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "top_vs_ref_features",
     )
 
+    if args.no_labels:
+        braak_lookup = {}
+        braak_status = "Braak labels skipped by --no-labels."
+    else:
+        try:
+            braak_lookup, braak_status = _load_braak_lookup(args.meta_csv, args.session_col, args.braak_threshold)
+        except Exception as exc:
+            braak_lookup = {}
+            braak_status = "Braak labels skipped: {0}".format(exc)
+    braak_match_a = _attach_braak_labels(rows_a, braak_lookup)
+    braak_match_b = _attach_braak_labels(rows_b, braak_lookup)
+    if not args.no_labels:
+        braak_status = "{0} | {1} matched={2}, missing={3} | {4} matched={5}, missing={6}".format(
+            braak_status,
+            args.name_a,
+            braak_match_a["matched"],
+            braak_match_a["missing"],
+            args.name_b,
+            braak_match_b["matched"],
+            braak_match_b["missing"],
+        )
+
     top_outliers_b_vs_a = _top_outliers(ok_rows_b, "outlier_score_vs_ref_a", limit=len(ok_rows_b))
     top_outliers_b_within = _top_outliers(ok_rows_b, "outlier_score_within_dataset", limit=len(ok_rows_b))
 
     if args.write_files:
+        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_a)), rows_a)
+        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_b)), rows_b)
         _write_csv(
             os.path.join(args.out_dir, "feature_comparison_{0}_vs_{1}.csv".format(slug_a, slug_b)),
             comparison_rows,
@@ -673,6 +879,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         summary_a,
         summary_b,
         comparison_rows,
+        braak_status,
+        _format_label_mix(ok_rows_b),
+        _format_high_braak_share(ok_rows_b),
         args.out_dir,
         args.write_files,
     )
@@ -685,6 +894,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "outlier_score_vs_ref_a",
             "top_vs_ref_features",
             args.top_k,
+            overall_rows=ok_rows_b,
         )
     )
     print("")
@@ -695,6 +905,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "outlier_score_within_dataset",
             "top_outlier_features",
             args.top_k,
+            overall_rows=ok_rows_b,
         )
     )
     return 0
