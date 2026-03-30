@@ -443,8 +443,8 @@ def _render_report(
     summary_a: Dict[str, Any],
     summary_b: Dict[str, Any],
     feature_rows: Sequence[Dict[str, Any]],
-    outliers_b_vs_a: Sequence[Dict[str, Any]],
     out_dir: str,
+    write_files: bool,
 ) -> str:
     lines = [
         "{0}: ok={1}, errors={2}".format(
@@ -479,18 +479,30 @@ def _render_report(
                 row["feature"], row["mean_a"], row["mean_b"], effect_text, p_text
             )
         )
-    lines.append("")
-    lines.append("Top dataset-B outliers vs dataset-A baseline:")
-    for row in outliers_b_vs_a[:10]:
+    if write_files:
+        lines.append("")
+        lines.append("Artifacts written to: {0}".format(os.path.abspath(out_dir)))
+    return "\n".join(lines)
+
+
+def _render_ranked_outliers(
+    title: str,
+    rows: Sequence[Dict[str, Any]],
+    score_field: str,
+    reason_field: str,
+    limit: int,
+) -> str:
+    lines = [title]
+    for row in rows[:limit]:
+        score = _safe_float(row.get(score_field))
+        score_text = "NA" if score is None else "{0:.3f}".format(score)
         lines.append(
-            "  {0}: score={1:.3f}, reasons={2}".format(
-                row["sid"],
-                float(row["outlier_score_vs_ref_a"]),
-                row.get("top_vs_ref_features", ""),
+            "  {0}: score={1}, reasons={2}".format(
+                row.get("sid", "NA"),
+                score_text,
+                row.get(reason_field, ""),
             )
         )
-    lines.append("")
-    lines.append("Artifacts written to: {0}".format(os.path.abspath(out_dir)))
     return "\n".join(lines)
 
 
@@ -526,6 +538,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip histogram plot generation",
     )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=50,
+        help="How many outlier subjects to print for dataset B vs reference and within dataset B",
+    )
+    parser.add_argument(
+        "--write-files",
+        action="store_true",
+        help="Also write CSV/JSON/plot artifacts. By default this script prints results only.",
+    )
     return parser
 
 
@@ -533,7 +556,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    if args.write_files:
+        os.makedirs(args.out_dir, exist_ok=True)
     slug_a = _safe_slug(args.name_a)
     slug_b = _safe_slug(args.name_b)
 
@@ -547,8 +571,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rows_a = _collect_features(subject_dirs_a, args.name_a, max(args.workers, 1))
     rows_b = _collect_features(subject_dirs_b, args.name_b, max(args.workers, 1))
 
-    _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_a)), rows_a)
-    _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_b)), rows_b)
+    if args.write_files:
+        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_a)), rows_a)
+        _write_csv(os.path.join(args.out_dir, "{0}_subject_features.csv".format(slug_b)), rows_b)
 
     ok_rows_a = [row for row in rows_a if not row.get("error")]
     ok_rows_b = [row for row in rows_b if not row.get("error")]
@@ -595,22 +620,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "top_vs_ref_features",
     )
 
-    _write_csv(
-        os.path.join(args.out_dir, "feature_comparison_{0}_vs_{1}.csv".format(slug_a, slug_b)),
-        comparison_rows,
-    )
-    _write_csv(
-        os.path.join(args.out_dir, "{0}_outliers_within.csv".format(slug_a)),
-        _top_outliers(ok_rows_a, "outlier_score_within_dataset", limit=len(ok_rows_a)),
-    )
-    _write_csv(
-        os.path.join(args.out_dir, "{0}_outliers_within.csv".format(slug_b)),
-        _top_outliers(ok_rows_b, "outlier_score_within_dataset", limit=len(ok_rows_b)),
-    )
-    _write_csv(
-        os.path.join(args.out_dir, "{0}_outliers_vs_{1}.csv".format(slug_b, slug_a)),
-        _top_outliers(ok_rows_b, "outlier_score_vs_ref_a", limit=len(ok_rows_b)),
-    )
+    top_outliers_b_vs_a = _top_outliers(ok_rows_b, "outlier_score_vs_ref_a", limit=len(ok_rows_b))
+    top_outliers_b_within = _top_outliers(ok_rows_b, "outlier_score_within_dataset", limit=len(ok_rows_b))
+
+    if args.write_files:
+        _write_csv(
+            os.path.join(args.out_dir, "feature_comparison_{0}_vs_{1}.csv".format(slug_a, slug_b)),
+            comparison_rows,
+        )
+        _write_csv(
+            os.path.join(args.out_dir, "{0}_outliers_within.csv".format(slug_a)),
+            _top_outliers(ok_rows_a, "outlier_score_within_dataset", limit=len(ok_rows_a)),
+        )
+        _write_csv(
+            os.path.join(args.out_dir, "{0}_outliers_within.csv".format(slug_b)),
+            top_outliers_b_within,
+        )
+        _write_csv(
+            os.path.join(args.out_dir, "{0}_outliers_vs_{1}.csv".format(slug_b, slug_a)),
+            top_outliers_b_vs_a,
+        )
 
     summary_a = _dataset_summary(args.name_a, rows_a)
     summary_b = _dataset_summary(args.name_b, rows_b)
@@ -624,12 +653,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "score": float(row["outlier_score_vs_ref_a"]),
                 "reasons": row.get("top_vs_ref_features", ""),
             }
-            for row in _top_outliers(ok_rows_b, "outlier_score_vs_ref_a", limit=20)
+            for row in top_outliers_b_vs_a[:20]
         ],
     }
-    _write_json(os.path.join(args.out_dir, "distribution_summary.json"), payload)
+    if args.write_files:
+        _write_json(os.path.join(args.out_dir, "distribution_summary.json"), payload)
 
-    if not args.no_plots:
+    if args.write_files and not args.no_plots:
         _plot_top_shifted_features(
             comparison_rows,
             ok_rows_a,
@@ -643,10 +673,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         summary_a,
         summary_b,
         comparison_rows,
-        _top_outliers(ok_rows_b, "outlier_score_vs_ref_a", limit=20),
         args.out_dir,
+        args.write_files,
     )
     print(report)
+    print("")
+    print(
+        _render_ranked_outliers(
+            "Top dataset-B outliers vs dataset-A baseline:",
+            top_outliers_b_vs_a,
+            "outlier_score_vs_ref_a",
+            "top_vs_ref_features",
+            args.top_k,
+        )
+    )
+    print("")
+    print(
+        _render_ranked_outliers(
+            "Top dataset-B outliers within dataset-B:",
+            top_outliers_b_within,
+            "outlier_score_within_dataset",
+            "top_outlier_features",
+            args.top_k,
+        )
+    )
     return 0
 
 
