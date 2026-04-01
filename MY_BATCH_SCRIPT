@@ -145,16 +145,16 @@ pip install pydicom
 python eval_taupet_comprehensive.py \
   --roi-root /scratch/l.peiwang/kari_all\
   --vols-roots \
-    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os4_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os4_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os4_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os4_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold2_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold3_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os5_aug_5/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os4_aug_5
+  --out /scratch/l.peiwang/new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold1_os5_aug_5
 
 #python build_kari_flair_all.py
 #python new_class.py \
