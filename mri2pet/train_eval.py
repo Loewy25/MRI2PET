@@ -310,11 +310,25 @@ def train_paggan(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
 
+    # AMP: prefer BF16 on supported hardware (A100+), fall back to FP16
+    use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+    use_scaler = use_amp and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_scaler)
+
+    # LR scheduler + early stopping
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE
+    )
+
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
+    patience_counter = 0
 
-    hist: Dict[str, list] = {"train_G": [], "train_D": [], "val_recon": []}
+    hist: Dict[str, list] = {"train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": []}
 
     avg_norm_recon_global = 0.0
     avg_norm_recon_roi = 0.0
@@ -352,41 +366,53 @@ def train_paggan(
 
             # ---- Update D ----
             with torch.no_grad():
-                fake = G(mri5)
+                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    fake = G(mri5)
 
             D.zero_grad(set_to_none=True)
-            pair_real = torch.cat([mri5, pet5], dim=1)
-            pair_fake = torch.cat([mri5, fake.detach()], dim=1)
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                pair_real = torch.cat([mri5, pet5], dim=1)
+                pair_fake = torch.cat([mri5, fake.detach()], dim=1)
+                out_real = D(pair_real)
+                out_fake = D(pair_fake)
+                loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
+                loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
+                loss_D = 0.5 * (loss_D_real + loss_D_fake)
 
-            out_real = D(pair_real)
-            out_fake = D(pair_fake)
-
-            loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
-            loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
-            loss_D = 0.5 * (loss_D_real + loss_D_fake)
-            loss_D.backward()
+            scaler.scale(loss_D).backward()
+            scaler.unscale_(opt_D)
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
-            opt_D.step()
+            scaler.step(opt_D)
+            scaler.update()
 
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
-            fake = G(mri5)
-            out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                fake = G(mri5)
+                out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
+                loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
 
-            loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
-            loss_l1 = l1_loss(fake, pet5)
-            ssim_val = ssim3d(fake, pet5, data_range=data_range)
+            # Recon losses in float32 for MGDA stability
+            fake_f32 = fake.float()
+            pet5_f32 = pet5.float()
+
+            if MASK_GLOBAL_RECON and brain5 is not None:
+                loss_l1 = l1_loss(fake_f32 * brain5.float(), pet5_f32 * brain5.float())
+                ssim_val = ssim3d(fake_f32 * brain5.float(), pet5_f32 * brain5.float(), data_range=data_range)
+            else:
+                loss_l1 = l1_loss(fake_f32, pet5_f32)
+                ssim_val = ssim3d(fake_f32, pet5_f32, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
             if use_roi:
-                loss_recon_roi = _masked_l1_high_uptake(fake, pet5, cortex5)
+                loss_recon_roi = _masked_l1_high_uptake(fake_f32, pet5_f32, cortex5.float())
             else:
-                loss_recon_roi = torch.zeros((), device=device, dtype=fake.dtype)
+                loss_recon_roi = torch.zeros((), device=device, dtype=torch.float32)
 
             # ---- MGDA-UB 3-way ----
-            v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0]
+            v_global = torch.autograd.grad(loss_recon_global, fake, retain_graph=True)[0].float()
             current_nglobal = v_global.norm().item()
             if avg_norm_recon_global == 0:
                 avg_norm_recon_global = current_nglobal
@@ -395,7 +421,7 @@ def train_paggan(
             v_global_s = v_global / (avg_norm_recon_global + 1e-8)
 
             if use_roi:
-                v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0]
+                v_roi = torch.autograd.grad(loss_recon_roi, fake, retain_graph=True)[0].float()
                 current_nroi = v_roi.norm().item()
                 if avg_norm_recon_roi == 0:
                     avg_norm_recon_roi = current_nroi
@@ -406,7 +432,7 @@ def train_paggan(
                 v_roi_s = torch.zeros_like(v_global_s)
                 current_nroi = 0.0
 
-            v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0]
+            v_gan = torch.autograd.grad(loss_gan, fake, retain_graph=True)[0].float()
             current_ngan = v_gan.norm().item()
             if avg_norm_gan == 0:
                 avg_norm_gan = current_ngan
@@ -431,7 +457,7 @@ def train_paggan(
                 a_batch = torch.clamp(num / den, 0.0, 1.0)
                 a = a_batch.median()
                 w_global = a
-                w_roi = torch.tensor(0.0, device=device, dtype=fake.dtype)
+                w_roi = torch.tensor(0.0, device=device, dtype=torch.float32)
                 w_gan_w = 1.0 - a
 
             w_global_running += float(w_global.item())
@@ -468,42 +494,80 @@ def train_paggan(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
+        val_roi_epoch: Optional[float] = None
+        val_score_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, v_batches = 0.0, 0
+                val_recon, val_roi_sum, v_batches = 0.0, 0.0, 0
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                        mri, pet, _ = batch
+                        mri, pet, meta_v = batch
                     else:
                         mri, pet = batch
+                        meta_v = {}
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
-                    fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
-                    pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
-                    loss_l1_v = l1_loss(fake, pet_for_metric)
-                    ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
-                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
-                    v_batches += 1
-            val_recon /= max(1, v_batches)
-            val_recon_epoch = val_recon
-            hist["val_recon"].append(val_recon)
+                    Bv = mri.size(0) if mri.dim() == 5 else 1
+                    mri5v = mri if mri.dim() == 5 else mri.unsqueeze(0)
+                    pet5v = pet if pet.dim() == 5 else pet.unsqueeze(0)
 
-            if val_recon < best_val:
-                best_val = val_recon
+                    metas_v = _meta_as_list(meta_v, Bv)
+                    brain5_v, cortex5_v = _extract_masks(metas_v, device)
+
+                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        fake_v = G(mri5v)
+
+                    fake_eval = fake_v.float()
+                    pet_eval = pet5v.float()
+                    if MASK_GLOBAL_RECON and brain5_v is not None:
+                        fake_eval = fake_eval * brain5_v.float()
+                        pet_eval = pet_eval * brain5_v.float()
+
+                    loss_l1_v = l1_loss(fake_eval, pet_eval)
+                    ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
+                    val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
+
+                    if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
+                        val_roi_sum += _masked_l1_high_uptake(fake_eval, pet_eval, cortex5_v.float()).item()
+
+                    v_batches += 1
+
+            val_recon /= max(1, v_batches)
+            val_roi_sum /= max(1, v_batches)
+            val_score = val_recon + val_roi_sum
+            val_recon_epoch = val_recon
+            val_roi_epoch = val_roi_sum
+            val_score_epoch = val_score
+            hist["val_recon"].append(val_recon)
+            hist["val_roi"].append(val_roi_sum)
+            hist["val_score"].append(val_score)
+
+            # LR scheduler step on combined val_score
+            scheduler.step(val_score)
+
+            if val_score < best_val:
+                best_val = val_score
+                patience_counter = 0
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
+            else:
+                patience_counter += 1
 
             if verbose:
                 dt = time.time() - t0
+                cur_lr = opt_G.param_groups[0]["lr"]
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
-                    f"| best {best_val:.4f}  | {dt:.1f}s"
+                    f"ValRecon: {val_recon:.4f}  ValROI: {val_roi_sum:.4f}  "
+                    f"ValScore: {val_score:.4f}  "
+                    f"| best {best_val:.4f}  "
+                    f"patience={patience_counter}/{EARLY_STOP_PATIENCE}  "
+                    f"lr={cur_lr:.1e}  | {dt:.1f}s"
                 )
                 print(
                     f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
@@ -514,6 +578,12 @@ def train_paggan(
                 )
 
             G.train()
+
+            # Early stopping
+            if patience_counter >= EARLY_STOP_PATIENCE:
+                print(f"Early stopping at epoch {epoch} (patience={EARLY_STOP_PATIENCE})")
+                break
+
         elif verbose:
             dt = time.time() - t0
             print(
@@ -542,7 +612,11 @@ def train_paggan(
             }
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
-                log_dict["val/best_recon_loss"] = best_val
+            if val_roi_epoch is not None:
+                log_dict["val/roi_loss"] = val_roi_epoch
+            if val_score_epoch is not None:
+                log_dict["val/score"] = val_score_epoch
+                log_dict["val/best_score"] = best_val
             wandb.log(log_dict, step=epoch)
 
     if best_G is not None:
@@ -614,7 +688,7 @@ def train_prompt_residual_braak(
     patience_counter = 0
 
     hist: Dict[str, list] = {
-        "train_G": [], "train_D": [], "val_recon": [],
+        "train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": [],
         "train_stage_ord": [], "train_braak": [], "train_delta_out": [],
         "train_alpha": [], "val_braak": [],
     }
@@ -633,7 +707,8 @@ def train_prompt_residual_braak(
         else:
             for p in base_params:
                 p.requires_grad = True
-            opt_G.param_groups[0]["lr"] = LR_G * BASE_LR_MULT
+            # Proportional: base LR tracks new-branch LR * BASE_LR_MULT
+            opt_G.param_groups[0]["lr"] = opt_G.param_groups[1]["lr"] * BASE_LR_MULT
 
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
@@ -851,12 +926,14 @@ def train_prompt_residual_braak(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
+        val_roi_epoch: Optional[float] = None
+        val_score_epoch: Optional[float] = None
         val_braak_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, val_braak_sum, v_batches = 0.0, 0.0, 0
+                val_recon, val_roi_sum, val_braak_sum, v_batches = 0.0, 0.0, 0.0, 0
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
                         mri, pet, meta = batch
@@ -887,6 +964,9 @@ def train_prompt_residual_braak(
                         loss_l1_v = l1_loss(fake_eval, pet_eval)
                         ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
                         val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
+                        # Val ROI loss
+                        if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
+                            val_roi_sum += _masked_l1_high_uptake(fake_eval, pet_eval, cortex5_v.float()).item()
                         val_braak_sum += F.smooth_l1_loss(aux_v["braak_pred"].float(), braak_v.float()).item()
                     else:
                         # Fallback: T1-only
@@ -899,17 +979,27 @@ def train_prompt_residual_braak(
                     v_batches += 1
 
                 val_recon /= max(1, v_batches)
+                val_roi_sum /= max(1, v_batches)
                 val_braak_sum /= max(1, v_batches)
+                val_score = val_recon + val_roi_sum
                 val_recon_epoch = val_recon
+                val_roi_epoch = val_roi_sum
+                val_score_epoch = val_score
                 val_braak_epoch = val_braak_sum
                 hist["val_recon"].append(val_recon)
+                hist["val_roi"].append(val_roi_sum)
+                hist["val_score"].append(val_score)
                 hist["val_braak"].append(val_braak_sum)
 
-                # LR scheduler step
-                scheduler.step(val_recon)
+                # LR scheduler step on combined val_score
+                scheduler.step(val_score)
 
-                if val_recon < best_val:
-                    best_val = val_recon
+                # Sync base LR proportionally after scheduler step
+                if epoch > FREEZE_BASE_EPOCHS:
+                    opt_G.param_groups[0]["lr"] = opt_G.param_groups[1]["lr"] * BASE_LR_MULT
+
+                if val_score < best_val:
+                    best_val = val_score
                     patience_counter = 0
                     best_G_state = {k: v.detach().clone() for k, v in G.state_dict().items()}
                     best_D_state = {k: v.detach().clone() for k, v in D.state_dict().items()}
@@ -920,12 +1010,14 @@ def train_prompt_residual_braak(
 
             if verbose:
                 dt = time.time() - t0
-                frozen_str = "FROZEN" if epoch <= FREEZE_BASE_EPOCHS else f"lr={LR_G * BASE_LR_MULT:.1e}"
+                cur_lr_base = opt_G.param_groups[0]["lr"]
                 cur_lr_new = opt_G.param_groups[1]["lr"]
+                frozen_str = "FROZEN" if epoch <= FREEZE_BASE_EPOCHS else f"lr={cur_lr_base:.1e}"
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"ValRecon: {val_recon:.4f}  "
+                    f"ValRecon: {val_recon:.4f}  ValROI: {val_roi_sum:.4f}  "
+                    f"ValScore: {val_score:.4f}  "
                     f"ValBraak: {val_braak_sum:.4f}  "
                     f"| best {best_val:.4f}  "
                     f"patience={patience_counter}/{EARLY_STOP_PATIENCE}  "
@@ -970,7 +1062,11 @@ def train_prompt_residual_braak(
             }
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
-                log_dict["val/best_recon_loss"] = best_val
+            if val_roi_epoch is not None:
+                log_dict["val/roi_loss"] = val_roi_epoch
+            if val_score_epoch is not None:
+                log_dict["val/score"] = val_score_epoch
+                log_dict["val/best_score"] = best_val
             if val_braak_epoch is not None:
                 log_dict["val/braak_loss"] = val_braak_epoch
             wandb.log(log_dict, step=epoch)
@@ -1053,7 +1149,11 @@ def evaluate_and_save(
     """
     Evaluates on test_loader, saves volumes, returns aggregate metrics with 95% CI.
     If is_prompt_residual=True, also saves PET_base, PET_delta, and per-subject aux CSV.
+    Requires batch_size=1 (per-subject metrics/saves assume single-sample batches).
     """
+    assert getattr(test_loader, "batch_size", 1) == 1, (
+        f"evaluate_and_save requires batch_size=1, got {getattr(test_loader, 'batch_size', '?')}"
+    )
     import json
     try:
         from scipy.stats import t as _t_dist
@@ -1111,10 +1211,7 @@ def evaluate_and_save(
                 stage_probs_np = aux["stage_probs"].squeeze(0).float().cpu().numpy()
                 braak_pred_np = aux["braak_pred"].squeeze(0).float().cpu().numpy()
 
-                # De-normalize braak predictions if stats available
                 braak_raw_gt = meta.get("braak_values_raw", None)
-                braak_mean = meta.get("braak_mean", None)
-                braak_std = meta.get("braak_std", None)
 
                 aux_rows.append({
                     "sid": sid,

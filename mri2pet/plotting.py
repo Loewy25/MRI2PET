@@ -21,7 +21,11 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     if "train_D" in history:
         ax.plot(history["train_D"], label="Train D")
     if "val_recon" in history and len(history["val_recon"]) > 0:
-        ax.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
+        ax.plot(history["val_recon"], label="Val Recon")
+    if "val_roi" in history and len(history["val_roi"]) > 0:
+        ax.plot(history["val_roi"], label="Val ROI")
+    if "val_score" in history and len(history["val_score"]) > 0:
+        ax.plot(history["val_score"], label="Val Score", linestyle="--")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.set_title("Training / Validation Losses")

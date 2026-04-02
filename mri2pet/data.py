@@ -633,6 +633,28 @@ def build_loaders_from_fold_csv(
     idx_val = _to_indices(val_sids)
     idx_test = _to_indices(test_sids)
 
+    # Label integrity check: compare fold CSV labels vs Braak-derived stage_ord
+    if train_sid_to_label:
+        mismatch_count = 0
+        mismatch_examples = []
+        for sid, csv_label in train_sid_to_label.items():
+            idx = sid_to_index.get(sid)
+            if idx is None:
+                continue
+            braak_label = ds.items[idx]["stage_ord"]
+            if csv_label != braak_label:
+                mismatch_count += 1
+                if len(mismatch_examples) < 5:
+                    mismatch_examples.append(f"{sid}: csv={csv_label} vs braak={braak_label}")
+        if mismatch_count > 0:
+            print(
+                f"[WARN] Label integrity: {mismatch_count}/{len(train_sid_to_label)} train subjects "
+                f"have CSV label != Braak-derived stage_ord (threshold={BRAAK_THRESHOLD})."
+            )
+            for ex in mismatch_examples:
+                print(f"  {ex}")
+            print("  (Using CSV labels for training as intended.)")
+
     ds.set_clinical_stats(_compute_clinical_stats(ds, idx_train))
     braak_mean, braak_std = _compute_braak_stats(ds, idx_train)
     ds.set_braak_stats(braak_mean, braak_std)
