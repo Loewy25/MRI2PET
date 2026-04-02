@@ -118,7 +118,7 @@ DEMOGRAPHICS_CSV = os.environ.get(
 # =========================
 # Model Variant
 # =========================
-MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "baseline")
+MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "prompt_residual_braak")
 BASE_PRETRAIN_CKPT = os.environ.get("BASE_PRETRAIN_CKPT", "")
 
 # =========================
