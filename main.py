@@ -5,7 +5,7 @@ import wandb
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
-    EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, RESIZE_TO,
+    EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, EVAL_BATCH_SIZE, RESIZE_TO,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
@@ -18,6 +18,7 @@ from mri2pet.config import (
     RESIDUAL_ALPHA_INIT, CLINICAL_DIM, PROMPT_HIDDEN_DIM,
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
+    MASK_GLOBAL_RECON, USE_GT_STAGE_HINT_TRAIN,
 )
 
 from mri2pet.data import build_loaders
@@ -94,13 +95,35 @@ def init_wandb_run():
 
 
 if __name__ == "__main__":
-    print(f"Data root: {ROOT_DIR}")
-    print(f"Output root: {OUT_DIR}")
-    print(f"Run name: {RUN_NAME}")
-    print(f"Run dir: {OUT_RUN}")
-    print(f"Model variant: {MODEL_VARIANT}")
+    print("=" * 70)
+    print("MRI2PET Training Run")
+    print("=" * 70)
+    print(f"Data root:      {ROOT_DIR}")
+    print(f"Output root:    {OUT_DIR}")
+    print(f"Run name:       {RUN_NAME}")
+    print(f"Run dir:        {OUT_RUN}")
+    print(f"Model variant:  {MODEL_VARIANT}")
+    print(f"Fold CSV:       {FOLD_CSV}")
+    print(f"Base ckpt:      {BASE_PRETRAIN_CKPT or '(none, training from scratch)'}")
+    print(f"Resize to:      {RESIZE_TO}")
+    print(f"Batch size:     {BATCH_SIZE}  (eval: {EVAL_BATCH_SIZE})")
+    print(f"Epochs:         {EPOCHS}")
+    print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
+    print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
+    if MODEL_VARIANT == "prompt_residual_braak":
+        print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
+        print(f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  delta_out: {LAMBDA_DELTA_OUT}")
+        print(f"Alpha init:     {RESIDUAL_ALPHA_INIT} (sigmoid={1/(1+2.718**(-RESIDUAL_ALPHA_INIT)):.4f})")
+        print(f"Mask global:    {MASK_GLOBAL_RECON}  GT stage hint: {USE_GT_STAGE_HINT_TRAIN}")
+        print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
+    print(f"Augmentation:   {AUG_ENABLE} (prob={AUG_PROB})")
+    print(f"Oversample:     {OVERSAMPLE_ENABLE} (target_p3={OVERSAMPLE_LABEL3_TARGET})")
+    print("=" * 70)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU memory: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
 
     wandb_run = init_wandb_run()
 
@@ -144,6 +167,17 @@ if __name__ == "__main__":
         G = Generator(in_ch=1, out_ch=1)
 
     D = CondPatchDiscriminator3D(in_ch=2)
+
+    def _count_params(m):
+        return sum(p.numel() for p in m.parameters())
+    def _count_trainable(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+    print(f"Generator params:     {_count_params(G):,} ({_count_trainable(G):,} trainable)")
+    print(f"Discriminator params: {_count_params(D):,}")
+    if is_prompt_residual:
+        print(f"  Base params:        {_count_params(G.base):,}")
+        print(f"  New branch params:  {_count_params(G) - _count_params(G.base):,}")
+    print("=" * 70)
 
     if wandb_run is not None:
         wandb.watch(G, log="gradients", log_freq=50)

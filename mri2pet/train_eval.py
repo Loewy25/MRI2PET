@@ -921,19 +921,21 @@ def train_prompt_residual_braak(
             if verbose:
                 dt = time.time() - t0
                 frozen_str = "FROZEN" if epoch <= FREEZE_BASE_EPOCHS else f"lr={LR_G * BASE_LR_MULT:.1e}"
+                cur_lr_new = opt_G.param_groups[1]["lr"]
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
                     f"ValRecon: {val_recon:.4f}  "
+                    f"ValBraak: {val_braak_sum:.4f}  "
                     f"| best {best_val:.4f}  "
-                    f"alpha={avg_alpha:.4f}  base={frozen_str}  "
+                    f"patience={patience_counter}/{EARLY_STOP_PATIENCE}  "
                     f"| {dt:.1f}s"
                 )
                 print(
-                    f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
-                    f"w_roi={avg_w_roi:.3f}  w_gan={avg_w_gan:.3f}  "
-                    f"[AUX] stage={avg_stage:.4f}  braak={avg_braak:.4f}  "
-                    f"delta_out={avg_dout:.4f}"
+                    f"      alpha={avg_alpha:.4f}  base={frozen_str}  "
+                    f"lr_new={cur_lr_new:.1e}  "
+                    f"[MGDA] w_g={avg_w_global:.3f} w_r={avg_w_roi:.3f} w_a={avg_w_gan:.3f}  "
+                    f"[AUX] stage={avg_stage:.4f} braak={avg_braak:.4f} dout={avg_dout:.4f}"
                 )
 
             G.train()
