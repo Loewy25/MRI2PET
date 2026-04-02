@@ -362,7 +362,7 @@ class PromptFusionBlock(nn.Module):
         fused = fused * (1.0 + gamma[..., None, None, None]) + beta[..., None, None, None]
         fused = fused + stage_prompt[..., None, None, None]
         fused = fused + self.res_conv(fused)
-        return F.relu(fused, inplace=True)
+        return F.relu(fused)
 
 
 # --- F. ResidualDecoder3D ---

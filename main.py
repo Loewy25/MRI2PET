@@ -113,7 +113,8 @@ if __name__ == "__main__":
     if MODEL_VARIANT == "prompt_residual_braak":
         print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
         print(f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  delta_out: {LAMBDA_DELTA_OUT}")
-        print(f"Alpha init:     {RESIDUAL_ALPHA_INIT} (sigmoid={1/(1+2.718**(-RESIDUAL_ALPHA_INIT)):.4f})")
+        import math
+        print(f"Alpha init:     {RESIDUAL_ALPHA_INIT} (sigmoid={1/(1+math.exp(-RESIDUAL_ALPHA_INIT)):.4f})")
         print(f"Mask global:    {MASK_GLOBAL_RECON}  GT stage hint: {USE_GT_STAGE_HINT_TRAIN}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
     print(f"Augmentation:   {AUG_ENABLE} (prob={AUG_PROB})")

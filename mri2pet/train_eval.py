@@ -601,11 +601,11 @@ def train_prompt_residual_braak(
         amp_dtype = torch.bfloat16
     # GradScaler is only needed for FP16; BF16 does not need loss scaling
     use_scaler = use_amp and amp_dtype == torch.float16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_scaler)
 
     # LR scheduler on validation loss (new params group only)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE, verbose=True
+        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE
     )
 
     best_val = float("inf")
