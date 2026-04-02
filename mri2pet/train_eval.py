@@ -316,7 +316,7 @@ def train_paggan(
     if use_amp and torch.cuda.is_bf16_supported():
         amp_dtype = torch.bfloat16
     use_scaler = use_amp and amp_dtype == torch.float16
-    scaler = torch.amp.GradScaler(device="cuda", enabled=use_scaler)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
     # LR scheduler + early stopping
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -366,11 +366,11 @@ def train_paggan(
 
             # ---- Update D ----
             with torch.no_grad():
-                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                     fake = G(mri5)
 
             D.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 pair_real = torch.cat([mri5, pet5], dim=1)
                 pair_fake = torch.cat([mri5, fake.detach()], dim=1)
                 out_real = D(pair_real)
@@ -388,7 +388,7 @@ def train_paggan(
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 fake = G(mri5)
                 out_fake_for_G = D(torch.cat([mri5, fake], dim=1))
                 loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
@@ -516,7 +516,7 @@ def train_paggan(
                     metas_v = _meta_as_list(meta_v, Bv)
                     brain5_v, cortex5_v = _extract_masks(metas_v, device)
 
-                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                         fake_v = G(mri5v)
 
                     fake_eval = fake_v.float()
@@ -675,7 +675,7 @@ def train_prompt_residual_braak(
         amp_dtype = torch.bfloat16
     # GradScaler is only needed for FP16; BF16 does not need loss scaling
     use_scaler = use_amp and amp_dtype == torch.float16
-    scaler = torch.amp.GradScaler(device="cuda", enabled=use_scaler)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
 
     # LR scheduler on validation loss (new params group only)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -749,11 +749,11 @@ def train_prompt_residual_braak(
 
             # ---- Update D ----
             with torch.no_grad():
-                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                     fake = G(mri5, flair5, clinical, stage_prompt_weights=stage_weights)
 
             D.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 pair_real = torch.cat([mri5, pet5], dim=1)
                 pair_fake = torch.cat([mri5, fake.detach()], dim=1)
                 out_real = D(pair_real)
@@ -771,7 +771,7 @@ def train_prompt_residual_braak(
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 pet_hat, aux = G(mri5, flair5, clinical,
                                  stage_prompt_weights=stage_weights,
                                  return_aux=True)
@@ -952,7 +952,7 @@ def train_prompt_residual_braak(
 
                     if flair_v is not None:
                         # At validation: use predicted probs (no GT stage hint)
-                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                             pet_hat_v, aux_v = G(mri5v, flair_v, clin_v,
                                                  stage_prompt_weights=None,
                                                  return_aux=True)
@@ -970,7 +970,7 @@ def train_prompt_residual_braak(
                         val_braak_sum += F.smooth_l1_loss(aux_v["braak_pred"].float(), braak_v.float()).item()
                     else:
                         # Fallback: T1-only
-                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                             fake_v = G.base(mri5v)
                         loss_l1_v = l1_loss(fake_v.float(), pet5v.float())
                         ssim_v = ssim3d(fake_v.float(), pet5v.float(), data_range=data_range)
@@ -1199,7 +1199,7 @@ def evaluate_and_save(
             flair5, clinical, stage_ord_t, braak_gt = _extract_new_variant_inputs(metas_list, device)
 
             if flair5 is not None:
-                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                     pet_hat, aux = G(mri5, flair5, clinical,
                                      stage_prompt_weights=None,
                                      return_aux=True)
