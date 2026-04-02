@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=test #Assign a descriptive job name
+#SBATCH --job-name=test_haha #Assign a descriptive job name
 #SBATCH -N 1                    # Request 1 node
 #SBATCH --mem=10G               # Request 400GB memory
 #SBATCH -t 50:30:00             # Set maximum time
