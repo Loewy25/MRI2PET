@@ -1105,11 +1105,11 @@ def evaluate_and_save(
                                      return_aux=True)
                 fake_t = pet_hat
                 # Save base and delta
-                pet_base_np = aux["pet_base"].squeeze(0).squeeze(0).cpu().numpy()
-                delta_np = aux["delta_pet"].squeeze(0).squeeze(0).cpu().numpy()
+                pet_base_np = aux["pet_base"].squeeze(0).squeeze(0).float().cpu().numpy()
+                delta_np = aux["delta_pet"].squeeze(0).squeeze(0).float().cpu().numpy()
                 alpha_v = float(aux["alpha"].item())
-                stage_probs_np = aux["stage_probs"].squeeze(0).cpu().numpy()
-                braak_pred_np = aux["braak_pred"].squeeze(0).cpu().numpy()
+                stage_probs_np = aux["stage_probs"].squeeze(0).float().cpu().numpy()
+                braak_pred_np = aux["braak_pred"].squeeze(0).float().cpu().numpy()
 
                 # De-normalize braak predictions if stats available
                 braak_raw_gt = meta.get("braak_values_raw", None)
@@ -1149,8 +1149,8 @@ def evaluate_and_save(
         else:
             brain = (pet_for_metric > 0).float()
 
-        fake_m = fake_t * brain
-        pet_m  = pet_for_metric * brain
+        fake_m = fake_t.float() * brain
+        pet_m  = pet_for_metric.float() * brain
 
         ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
         psnr_val = psnr(fake_m,  pet_m, data_range=data_range)
@@ -1165,7 +1165,7 @@ def evaluate_and_save(
         # Save volumes
         mri_np  = mri5.squeeze(0).squeeze(0).cpu().numpy()
         pet_np  = pet5.squeeze(0).squeeze(0).cpu().numpy()
-        fake_np = fake_t.squeeze(0).squeeze(0).cpu().numpy()
+        fake_np = fake_t.squeeze(0).squeeze(0).float().cpu().numpy()
         err_np  = np.abs(fake_np - pet_np)
 
         cur_shape  = tuple(mri_np.shape)
