@@ -594,9 +594,14 @@ def train_prompt_residual_braak(
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
 
-    # AMP scaler
+    # AMP: prefer BF16 on supported hardware (A100+), fall back to FP16
     use_amp = AMP_ENABLE and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+    # GradScaler is only needed for FP16; BF16 does not need loss scaling
+    use_scaler = use_amp and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # LR scheduler on validation loss (new params group only)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -669,11 +674,11 @@ def train_prompt_residual_braak(
 
             # ---- Update D ----
             with torch.no_grad():
-                with torch.amp.autocast("cuda", enabled=use_amp):
+                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                     fake = G(mri5, flair5, clinical, stage_prompt_weights=stage_weights)
 
             D.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 pair_real = torch.cat([mri5, pet5], dim=1)
                 pair_fake = torch.cat([mri5, fake.detach()], dim=1)
                 out_real = D(pair_real)
@@ -691,7 +696,7 @@ def train_prompt_residual_braak(
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 pet_hat, aux = G(mri5, flair5, clinical,
                                  stage_prompt_weights=stage_weights,
                                  return_aux=True)
@@ -782,7 +787,7 @@ def train_prompt_residual_braak(
             # ---- Aux losses (outside MGDA) ----
             # CORAL ordinal stage loss: BCE on cumulative logits
             stage_logits = aux["stage_logits"]  # [B, 3]
-            target_cum = (stage_ord.unsqueeze(1) > torch.arange(1, 4, device=device).unsqueeze(0)).float()
+            target_cum = (stage_ord.unsqueeze(1) >= torch.arange(1, 4, device=device).unsqueeze(0)).float()
             loss_stage_ord = F.binary_cross_entropy_with_logits(stage_logits.float(), target_cum)
 
             # Braak prediction loss: SmoothL1
@@ -866,20 +871,26 @@ def train_prompt_residual_braak(
 
                     metas_v = _meta_as_list(meta, Bv)
                     flair_v, clin_v, stage_v, braak_v = _extract_new_variant_inputs(metas_v, device)
+                    brain5_v, cortex5_v = _extract_masks(metas_v, device)
 
                     if flair_v is not None:
                         # At validation: use predicted probs (no GT stage hint)
-                        with torch.amp.autocast("cuda", enabled=use_amp):
+                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                             pet_hat_v, aux_v = G(mri5v, flair_v, clin_v,
                                                  stage_prompt_weights=None,
                                                  return_aux=True)
-                        loss_l1_v = l1_loss(pet_hat_v.float(), pet5v.float())
-                        ssim_v = ssim3d(pet_hat_v.float(), pet5v.float(), data_range=data_range)
+                        fake_eval = pet_hat_v.float()
+                        pet_eval = pet5v.float()
+                        if MASK_GLOBAL_RECON and brain5_v is not None:
+                            fake_eval = fake_eval * brain5_v.float()
+                            pet_eval = pet_eval * brain5_v.float()
+                        loss_l1_v = l1_loss(fake_eval, pet_eval)
+                        ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
                         val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
                         val_braak_sum += F.smooth_l1_loss(aux_v["braak_pred"].float(), braak_v.float()).item()
                     else:
                         # Fallback: T1-only
-                        with torch.amp.autocast("cuda", enabled=use_amp):
+                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                             fake_v = G.base(mri5v)
                         loss_l1_v = l1_loss(fake_v.float(), pet5v.float())
                         ssim_v = ssim3d(fake_v.float(), pet5v.float(), data_range=data_range)
@@ -1058,6 +1069,9 @@ def evaluate_and_save(
     run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
 
     use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
 
     for i, batch in enumerate(test_loader):
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -1083,7 +1097,7 @@ def evaluate_and_save(
             flair5, clinical, stage_ord_t, braak_gt = _extract_new_variant_inputs(metas_list, device)
 
             if flair5 is not None:
-                with torch.amp.autocast("cuda", enabled=use_amp):
+                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                     pet_hat, aux = G(mri5, flair5, clinical,
                                      stage_prompt_weights=None,
                                      return_aux=True)
@@ -1092,14 +1106,27 @@ def evaluate_and_save(
                 pet_base_np = aux["pet_base"].squeeze(0).squeeze(0).cpu().numpy()
                 delta_np = aux["delta_pet"].squeeze(0).squeeze(0).cpu().numpy()
                 alpha_v = float(aux["alpha"].item())
-                stage_probs_v = aux["stage_probs"].squeeze(0).cpu().numpy().tolist()
-                braak_pred_v = aux["braak_pred"].squeeze(0).cpu().numpy().tolist()
+                stage_probs_np = aux["stage_probs"].squeeze(0).cpu().numpy()
+                braak_pred_np = aux["braak_pred"].squeeze(0).cpu().numpy()
+
+                # De-normalize braak predictions if stats available
+                braak_raw_gt = meta.get("braak_values_raw", None)
+                braak_mean = meta.get("braak_mean", None)
+                braak_std = meta.get("braak_std", None)
 
                 aux_rows.append({
                     "sid": sid,
                     "alpha": alpha_v,
-                    "stage_probs": stage_probs_v,
-                    "braak_pred": braak_pred_v,
+                    "stage_pred_0": float(stage_probs_np[0]),
+                    "stage_pred_12": float(stage_probs_np[1]),
+                    "stage_pred_34": float(stage_probs_np[2]),
+                    "stage_pred_56": float(stage_probs_np[3]),
+                    "braak_pred_12": float(braak_pred_np[0]),
+                    "braak_pred_34": float(braak_pred_np[1]),
+                    "braak_pred_56": float(braak_pred_np[2]),
+                    "braak_raw_gt_12": float(braak_raw_gt[0]) if braak_raw_gt is not None else "",
+                    "braak_raw_gt_34": float(braak_raw_gt[1]) if braak_raw_gt is not None else "",
+                    "braak_raw_gt_56": float(braak_raw_gt[2]) if braak_raw_gt is not None else "",
                     "stage_ord_gt": int(stage_ord_t.item()) if stage_ord_t is not None else "",
                 })
             else:
@@ -1196,12 +1223,18 @@ def evaluate_and_save(
     # Per-subject aux CSV (prompt-residual only)
     if is_prompt_residual and aux_rows:
         aux_csv = os.path.join(run_dir, "per_subject_aux.csv")
+        aux_cols = [
+            "sid", "alpha",
+            "stage_pred_0", "stage_pred_12", "stage_pred_34", "stage_pred_56",
+            "braak_pred_12", "braak_pred_34", "braak_pred_56",
+            "braak_raw_gt_12", "braak_raw_gt_34", "braak_raw_gt_56",
+            "stage_ord_gt",
+        ]
         with open(aux_csv, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["sid", "alpha", "stage_probs", "braak_pred", "stage_ord_gt"])
+            w.writerow(aux_cols)
             for row in aux_rows:
-                w.writerow([row["sid"], row["alpha"], row["stage_probs"],
-                            row["braak_pred"], row["stage_ord_gt"]])
+                w.writerow([row.get(c, "") for c in aux_cols])
 
     summary_json = os.path.join(run_dir, "test_metrics_summary.json")
     summary = {

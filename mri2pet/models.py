@@ -419,7 +419,17 @@ def ordinal_logits_to_stage_probs(logits: torch.Tensor) -> torch.Tensor:
     p_ge1 = torch.sigmoid(logits[:, 0])
     p_ge2 = torch.sigmoid(logits[:, 1])
     p_ge3 = torch.sigmoid(logits[:, 2])
-    w = torch.stack([1.0 - p_ge1, p_ge1 - p_ge2, p_ge2 - p_ge3, p_ge3], dim=1)
+
+    # enforce ordinal monotonicity: P(>=k+1) <= P(>=k)
+    p_ge2 = torch.minimum(p_ge2, p_ge1)
+    p_ge3 = torch.minimum(p_ge3, p_ge2)
+
+    w0 = 1.0 - p_ge1
+    w1 = p_ge1 - p_ge2
+    w2 = p_ge2 - p_ge3
+    w3 = p_ge3
+
+    w = torch.stack([w0, w1, w2, w3], dim=1)
     w = torch.clamp(w, min=0.0)
     return w / (w.sum(dim=1, keepdim=True) + 1e-8)
 

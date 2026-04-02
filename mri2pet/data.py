@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler,
 
 from .config import (
     BATCH_SIZE,
+    EVAL_BATCH_SIZE,
     BRAAK_THRESHOLD,
     DEMOGRAPHICS_CSV,
     MR_AMY_TAU_CDR_CSV,
@@ -507,6 +508,7 @@ class KariAV1451Dataset(Dataset):
             "clinical_vector": clin.astype(np.float32),
             "stage_ord": int(item["stage_ord"]),
             "braak_values": braak_norm,
+            "braak_values_raw": item["braak_values_raw"].astype(np.float32),
         }
         return t1n_t, petn_t, meta
 
@@ -551,7 +553,7 @@ def build_loaders(
     dl_val = DataLoader(val_set, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=pin_memory,
                         drop_last=False, collate_fn=_collate_keep_meta)
-    dl_test = DataLoader(test_set, batch_size=batch_size, shuffle=False,
+    dl_test = DataLoader(test_set, batch_size=EVAL_BATCH_SIZE, shuffle=False,
                          num_workers=num_workers, pin_memory=pin_memory,
                          drop_last=False, collate_fn=_collate_keep_meta)
     return dl_train, dl_val, dl_test, n_total, n_train, n_val, n_test
@@ -684,7 +686,7 @@ def build_loaders_from_fold_csv(
     dl_val = DataLoader(val_set, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=pin_memory,
                         drop_last=False, collate_fn=_collate_keep_meta)
-    dl_test = DataLoader(test_set, batch_size=batch_size, shuffle=False,
+    dl_test = DataLoader(test_set, batch_size=EVAL_BATCH_SIZE, shuffle=False,
                          num_workers=num_workers, pin_memory=pin_memory,
                          drop_last=False, collate_fn=_collate_keep_meta)
     return dl_train, dl_val, dl_test, n_total, len(idx_train), len(idx_val), len(idx_test)
