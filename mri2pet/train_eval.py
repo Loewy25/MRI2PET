@@ -686,6 +686,7 @@ def train_prompt_residual_braak(
             scaler.unscale_(opt_D)
             torch.nn.utils.clip_grad_norm_(D.parameters(), 5.0)
             scaler.step(opt_D)
+            scaler.update()
 
             # ---- Update G ----
             G.zero_grad(set_to_none=True)
@@ -801,16 +802,17 @@ def train_prompt_residual_braak(
                         + LAMBDA_DELTA_OUT * loss_delta_out)
 
             # Combined backward: MGDA direction + aux
+            # NOTE: both backward passes are in float32 (MGDA grads are float32,
+            # aux losses are cast to float32), so we skip the scaler for G to
+            # avoid mixing scaled/unscaled gradients.
             opt_G.zero_grad(set_to_none=True)
-            # First: MGDA direction through pet_hat
+            # First: MGDA direction through pet_hat (retain graph for aux)
             pet_hat.backward(v_final, retain_graph=True)
-            # Second: aux losses
-            scaler.scale(loss_aux).backward()
+            # Second: aux losses (shares computation graph with pet_hat)
+            loss_aux.backward()
 
-            scaler.unscale_(opt_G)
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
-            scaler.step(opt_G)
-            scaler.update()
+            opt_G.step()
 
             # Logging accumulators
             alpha_val = float(aux["alpha"].detach().item())
