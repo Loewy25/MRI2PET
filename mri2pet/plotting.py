@@ -5,31 +5,66 @@ from typing import Dict, Sequence
 import csv
 
 def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
-    plt.figure(figsize=(7,5))
+    n_plots = 1
+    has_aux = any(k in history for k in ("train_stage_ord", "train_braak", "train_delta_out", "train_alpha"))
+    if has_aux:
+        n_plots = 3
+
+    fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 5))
+    if n_plots == 1:
+        axes = [axes]
+
+    # Panel 1: G/D/Val recon
+    ax = axes[0]
     if "train_G" in history:
-        plt.plot(history["train_G"], label="Train G")
+        ax.plot(history["train_G"], label="Train G")
     if "train_D" in history:
-        plt.plot(history["train_D"], label="Train D")
+        ax.plot(history["train_D"], label="Train D")
     if "val_recon" in history and len(history["val_recon"]) > 0:
-        plt.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training / Validation Losses")
-    plt.legend()
+        ax.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training / Validation Losses")
+    ax.legend()
+
+    if has_aux:
+        # Panel 2: Aux losses
+        ax2 = axes[1]
+        if "train_stage_ord" in history:
+            ax2.plot(history["train_stage_ord"], label="Stage Ord (BCE)")
+        if "train_braak" in history:
+            ax2.plot(history["train_braak"], label="Braak (SmoothL1)")
+        if "train_delta_out" in history:
+            ax2.plot(history["train_delta_out"], label="Delta Out Reg")
+        if "val_braak" in history and len(history["val_braak"]) > 0:
+            ax2.plot(history["val_braak"], label="Val Braak")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.set_title("Auxiliary Losses")
+        ax2.legend()
+
+        # Panel 3: Alpha
+        ax3 = axes[2]
+        if "train_alpha" in history:
+            ax3.plot(history["train_alpha"], label="Alpha (sigmoid)")
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("Value")
+        ax3.set_title("Residual Alpha")
+        ax3.legend()
+
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
 
 def save_history_csv(history: Dict[str, Sequence[float]], out_csv: str):
-    L = max(len(history.get("train_G", [])),
-            len(history.get("train_D", [])),
-            len(history.get("val_recon", [])))
+    all_keys = [k for k in history if len(history[k]) > 0]
+    L = max(len(history[k]) for k in all_keys) if all_keys else 0
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["epoch", "train_G", "train_D", "val_recon"])
+        w.writerow(["epoch"] + all_keys)
         for i in range(L):
-            row = [i+1,
-                   history.get("train_G",  [None]*L)[i] if i < len(history.get("train_G",[])) else "",
-                   history.get("train_D",  [None]*L)[i] if i < len(history.get("train_D",[])) else "",
-                   history.get("val_recon",[None]*L)[i] if i < len(history.get("val_recon",[])) else ""]
+            row = [i + 1]
+            for k in all_keys:
+                vals = history[k]
+                row.append(vals[i] if i < len(vals) else "")
             w.writerow(row)

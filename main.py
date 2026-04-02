@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import torch
-import wandb  # <-- add this
+import wandb
 
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
@@ -12,13 +12,19 @@ from mri2pet.config import (
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
+    MODEL_VARIANT, BASE_PRETRAIN_CKPT,
+    FREEZE_BASE_EPOCHS, BASE_LR_MULT,
+    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
+    RESIDUAL_ALPHA_INIT, CLINICAL_DIM, PROMPT_HIDDEN_DIM,
+    USE_CHECKPOINT, AMP_ENABLE,
+    LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
 )
 
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
-from mri2pet.models import Generator, CondPatchDiscriminator3D
-from mri2pet.train_eval import train_paggan, evaluate_and_save
+from mri2pet.models import Generator, CondPatchDiscriminator3D, PromptResidualBraakGenerator
+from mri2pet.train_eval import train_paggan, train_prompt_residual_braak, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
 
 
@@ -32,46 +38,67 @@ def init_wandb_run():
     except Exception:
         settings = None
 
+    wandb_config = {
+        "root_dir": ROOT_DIR,
+        "run_name": RUN_NAME,
+        "model_variant": MODEL_VARIANT,
+        "epochs": EPOCHS,
+        "gamma": GAMMA,
+        "data_range": DATA_RANGE,
+        "batch_size": BATCH_SIZE,
+        "resize_to": RESIZE_TO,
+        "oversample_enable": OVERSAMPLE_ENABLE,
+        "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
+        "aug_enable": AUG_ENABLE,
+        "aug_prob": AUG_PROB,
+        "aug_flip_prob": AUG_FLIP_PROB,
+        "aug_intensity_prob": AUG_INTENSITY_PROB,
+        "aug_noise_std": AUG_NOISE_STD,
+        "aug_scale_min": AUG_SCALE_MIN,
+        "aug_scale_max": AUG_SCALE_MAX,
+        "aug_shift_min": AUG_SHIFT_MIN,
+        "aug_shift_max": AUG_SHIFT_MAX,
+        "roi_hi_q": ROI_HI_Q,
+        "roi_hi_lambda": ROI_HI_LAMBDA,
+        "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
+    }
+
+    if MODEL_VARIANT == "prompt_residual_braak":
+        wandb_config.update({
+            "freeze_base_epochs": FREEZE_BASE_EPOCHS,
+            "base_lr_mult": BASE_LR_MULT,
+            "lambda_stage_ord": LAMBDA_STAGE_ORD,
+            "lambda_braak": LAMBDA_BRAAK,
+            "lambda_delta_out": LAMBDA_DELTA_OUT,
+            "residual_alpha_init": RESIDUAL_ALPHA_INIT,
+            "clinical_dim": CLINICAL_DIM,
+            "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
+            "use_checkpoint": USE_CHECKPOINT,
+            "amp_enable": AMP_ENABLE,
+            "lr_plateau_patience": LR_PLATEAU_PATIENCE,
+            "early_stop_patience": EARLY_STOP_PATIENCE,
+        })
+
     try:
         return wandb.init(
             project="mri2pet",
             name=RUN_NAME,
             dir=OUT_RUN,
             settings=settings,
-            config={
-                "root_dir": ROOT_DIR,
-                "run_name": RUN_NAME,
-                "epochs": EPOCHS,
-                "gamma": GAMMA,
-                "data_range": DATA_RANGE,
-                "batch_size": BATCH_SIZE,
-                "resize_to": RESIZE_TO,
-                "oversample_enable": OVERSAMPLE_ENABLE,
-                "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
-                "aug_enable": AUG_ENABLE,
-                "aug_prob": AUG_PROB,
-                "aug_flip_prob": AUG_FLIP_PROB,
-                "aug_intensity_prob": AUG_INTENSITY_PROB,
-                "aug_noise_std": AUG_NOISE_STD,
-                "aug_scale_min": AUG_SCALE_MIN,
-                "aug_scale_max": AUG_SCALE_MAX,
-                "aug_shift_min": AUG_SHIFT_MIN,
-                "aug_shift_max": AUG_SHIFT_MAX,
-                "roi_hi_q": ROI_HI_Q,
-                "roi_hi_lambda": ROI_HI_LAMBDA,
-                "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
-            },
+            config=wandb_config,
         )
     except Exception as exc:
         print(f"[WARN] wandb init failed: {exc}")
         print("[WARN] Continuing with wandb disabled.")
         return None
 
+
 if __name__ == "__main__":
     print(f"Data root: {ROOT_DIR}")
     print(f"Output root: {OUT_DIR}")
     print(f"Run name: {RUN_NAME}")
     print(f"Run dir: {OUT_RUN}")
+    print(f"Model variant: {MODEL_VARIANT}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -96,7 +123,26 @@ if __name__ == "__main__":
         print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {sid0}")
 
     # Instantiate models
-    G = Generator(in_ch=1, out_ch=1)
+    is_prompt_residual = (MODEL_VARIANT == "prompt_residual_braak")
+
+    if is_prompt_residual:
+        G = PromptResidualBraakGenerator(
+            in_ch=1, out_ch=1,
+            use_checkpoint=USE_CHECKPOINT,
+            clinical_dim=CLINICAL_DIM,
+            prompt_z_dim=PROMPT_HIDDEN_DIM,
+        )
+        # Load base pretrain checkpoint if specified
+        if BASE_PRETRAIN_CKPT and os.path.isfile(BASE_PRETRAIN_CKPT):
+            print(f"Loading base pretrain checkpoint: {BASE_PRETRAIN_CKPT}")
+            ckpt = torch.load(BASE_PRETRAIN_CKPT, map_location="cpu")
+            G.base.load_state_dict(ckpt, strict=True)
+            print("Base weights loaded successfully.")
+        elif BASE_PRETRAIN_CKPT:
+            print(f"[WARN] BASE_PRETRAIN_CKPT not found: {BASE_PRETRAIN_CKPT}")
+    else:
+        G = Generator(in_ch=1, out_ch=1)
+
     D = CondPatchDiscriminator3D(in_ch=2)
 
     if wandb_run is not None:
@@ -104,15 +150,24 @@ if __name__ == "__main__":
         wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
-    out = train_paggan(
-        G, D, train_loader, val_loader,
-        device=device, epochs=EPOCHS, gamma=GAMMA,
-        data_range=DATA_RANGE,
-        verbose=True,
-        log_to_wandb=(wandb_run is not None),
-    )
+    if is_prompt_residual:
+        out = train_prompt_residual_braak(
+            G, D, train_loader, val_loader,
+            device=device, epochs=EPOCHS, gamma=GAMMA,
+            data_range=DATA_RANGE,
+            verbose=True,
+            log_to_wandb=(wandb_run is not None),
+        )
+    else:
+        out = train_paggan(
+            G, D, train_loader, val_loader,
+            device=device, epochs=EPOCHS, gamma=GAMMA,
+            data_range=DATA_RANGE,
+            verbose=True,
+            log_to_wandb=(wandb_run is not None),
+        )
 
-    # Save curves & CSV (still useful)
+    # Save curves & CSV
     curves_path = os.path.join(OUT_RUN, "loss_curves.png")
     save_loss_curves(out["history"], curves_path)
     print(f"Saved loss curves to: {curves_path}")
@@ -121,11 +176,12 @@ if __name__ == "__main__":
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
-    # Evaluate + Save (single pass)
+    # Evaluate + Save
     metrics = evaluate_and_save(
         G, test_loader, device=device,
         out_dir=VOL_DIR, data_range=DATA_RANGE,
-        mmd_voxels=2048
+        mmd_voxels=2048,
+        is_prompt_residual=is_prompt_residual,
     )
     print("Test metrics:", metrics)
 
