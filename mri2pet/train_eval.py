@@ -394,15 +394,14 @@ def train_paggan(
                 loss_gan = 0.5 * adv_criterion(out_fake_for_G, torch.ones_like(out_fake_for_G))
 
             # Recon losses in float32 for MGDA stability
+            # NOTE: baseline does NOT use MASK_GLOBAL_RECON — PET target is
+            # already brain-masked, and mean-reducing over zero-masked voxels
+            # would dilute the global gradient, letting GAN dominate in MGDA.
             fake_f32 = fake.float()
             pet5_f32 = pet5.float()
 
-            if MASK_GLOBAL_RECON and brain5 is not None:
-                loss_l1 = l1_loss(fake_f32 * brain5.float(), pet5_f32 * brain5.float())
-                ssim_val = ssim3d(fake_f32 * brain5.float(), pet5_f32 * brain5.float(), data_range=data_range)
-            else:
-                loss_l1 = l1_loss(fake_f32, pet5_f32)
-                ssim_val = ssim3d(fake_f32, pet5_f32, data_range=data_range)
+            loss_l1 = l1_loss(fake_f32, pet5_f32)
+            ssim_val = ssim3d(fake_f32, pet5_f32, data_range=data_range)
             loss_recon_global = gamma * (loss_l1 + (1.0 - ssim_val))
 
             use_roi = (cortex5 is not None) and (float(cortex5.sum().item()) > 0.0)
@@ -521,9 +520,6 @@ def train_paggan(
 
                     fake_eval = fake_v.float()
                     pet_eval = pet5v.float()
-                    if MASK_GLOBAL_RECON and brain5_v is not None:
-                        fake_eval = fake_eval * brain5_v.float()
-                        pet_eval = pet_eval * brain5_v.float()
 
                     loss_l1_v = l1_loss(fake_eval, pet_eval)
                     ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
