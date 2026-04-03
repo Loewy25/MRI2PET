@@ -532,19 +532,18 @@ def train_paggan(
 
             val_recon /= max(1, v_batches)
             val_roi_sum /= max(1, v_batches)
-            val_score = val_recon + val_roi_sum
             val_recon_epoch = val_recon
             val_roi_epoch = val_roi_sum
-            val_score_epoch = val_score
+            val_score_epoch = val_recon  # baseline: use val_recon only
             hist["val_recon"].append(val_recon)
             hist["val_roi"].append(val_roi_sum)
-            hist["val_score"].append(val_score)
+            hist["val_score"].append(val_recon)
 
-            # LR scheduler step on combined val_score
-            scheduler.step(val_score)
+            # LR scheduler + model selection on val_recon only (baseline)
+            scheduler.step(val_recon)
 
-            if val_score < best_val:
-                best_val = val_score
+            if val_recon < best_val:
+                best_val = val_recon
                 patience_counter = 0
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
