@@ -149,4 +149,4 @@ EARLY_STOP_PATIENCE = _env_int("EARLY_STOP_PATIENCE", 40)
 # Memory Saving
 # =========================
 USE_CHECKPOINT = _env_bool("USE_CHECKPOINT", True)
-AMP_ENABLE     = _env_bool("AMP_ENABLE", False)
+AMP_ENABLE     = _env_bool("AMP_ENABLE", True)
