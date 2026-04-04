@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="batch1_new_baseline_fold5_os5_aug_5"
+export RUN_NAME="batch2_new_baseline_fold5_os5_aug_5"
 export FOLD_INDEX=4
 
 # Oversampling (train only)
