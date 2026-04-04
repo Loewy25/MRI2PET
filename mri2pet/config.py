@@ -21,7 +21,7 @@ RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "1"))
+BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "2"))
 EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "1"))
 NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "2"))
 PIN_MEMORY     = True
