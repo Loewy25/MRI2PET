@@ -642,7 +642,7 @@ def train_prompt_residual_braak(
     Train PromptResidualBraakGenerator with:
       - Base freeze schedule (frozen for FREEZE_BASE_EPOCHS, then lower LR)
       - GT stage one-hot at train, predicted probs at val
-      - MGDA-UB-3 on [global_recon, roi_recon, gan] with w_gan floor 0.15
+      - MGDA-UB-3 on [global_recon, roi_recon, gan]
       - Aux losses outside MGDA: CORAL stage_ord, braak SmoothL1, delta outside-cortex reg
       - AMP with float32 for MGDA-sensitive losses
       - LR scheduler + early stopping
@@ -840,11 +840,6 @@ def train_prompt_residual_braak(
                 w_g = a
                 w_r = torch.tensor(0.0, device=device, dtype=torch.float32)
                 w_a = 1.0 - a
-
-            # Floor w_gan at 0.15
-            w_a = torch.clamp(w_a, min=0.15)
-            w_total = w_g + w_r + w_a + 1e-12
-            w_g, w_r, w_a = w_g / w_total, w_r / w_total, w_a / w_total
 
             w_global_running += float(w_g.item())
             w_roi_running += float(w_r.item())
