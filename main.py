@@ -17,7 +17,7 @@ from mri2pet.config import (
     LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
     RESIDUAL_ALPHA_INIT, CLINICAL_DIM, PROMPT_HIDDEN_DIM,
     USE_CHECKPOINT, AMP_ENABLE,
-    LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
+    LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
     MASK_GLOBAL_RECON, USE_GT_STAGE_HINT_TRAIN,
 )
 
@@ -78,6 +78,7 @@ def init_wandb_run():
             "amp_enable": AMP_ENABLE,
             "lr_plateau_patience": LR_PLATEAU_PATIENCE,
             "early_stop_patience": EARLY_STOP_PATIENCE,
+            "val_roi_weight": VAL_ROI_WEIGHT,
         })
 
     try:
@@ -117,6 +118,7 @@ if __name__ == "__main__":
         print(f"Alpha init:     {RESIDUAL_ALPHA_INIT} (sigmoid={1/(1+math.exp(-RESIDUAL_ALPHA_INIT)):.4f})")
         print(f"Mask global:    {MASK_GLOBAL_RECON}  GT stage hint: {USE_GT_STAGE_HINT_TRAIN}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
+    print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")
     print(f"Augmentation:   {AUG_ENABLE} (prob={AUG_PROB})")
     print(f"Oversample:     {OVERSAMPLE_ENABLE} (target_p3={OVERSAMPLE_LABEL3_TARGET})")
     print("=" * 70)

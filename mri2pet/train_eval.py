@@ -18,7 +18,7 @@ from .config import (
     LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
     USE_GT_STAGE_HINT_TRAIN, MASK_GLOBAL_RECON,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
-    AMP_ENABLE, USE_CHECKPOINT,
+    AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
@@ -532,18 +532,19 @@ def train_paggan(
 
             val_recon /= max(1, v_batches)
             val_roi_sum /= max(1, v_batches)
+            val_score = val_recon + VAL_ROI_WEIGHT * val_roi_sum
             val_recon_epoch = val_recon
             val_roi_epoch = val_roi_sum
-            val_score_epoch = val_recon  # baseline: use val_recon only
+            val_score_epoch = val_score
             hist["val_recon"].append(val_recon)
             hist["val_roi"].append(val_roi_sum)
-            hist["val_score"].append(val_recon)
+            hist["val_score"].append(val_score)
 
-            # LR scheduler + model selection on val_recon only (baseline)
-            scheduler.step(val_recon)
+            # LR scheduler + model selection on weighted val_score
+            scheduler.step(val_score)
 
-            if val_recon < best_val:
-                best_val = val_recon
+            if val_score < best_val:
+                best_val = val_score
                 patience_counter = 0
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
@@ -976,7 +977,7 @@ def train_prompt_residual_braak(
                 val_recon /= max(1, v_batches)
                 val_roi_sum /= max(1, v_batches)
                 val_braak_sum /= max(1, v_batches)
-                val_score = val_recon + val_roi_sum
+                val_score = val_recon + VAL_ROI_WEIGHT * val_roi_sum
                 val_recon_epoch = val_recon
                 val_roi_epoch = val_roi_sum
                 val_score_epoch = val_score
