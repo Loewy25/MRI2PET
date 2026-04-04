@@ -18,7 +18,7 @@ from .config import (
     LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
     USE_GT_STAGE_HINT_TRAIN, MASK_GLOBAL_RECON,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
-    AMP_ENABLE, USE_CHECKPOINT,
+    AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
@@ -532,7 +532,7 @@ def train_paggan(
 
             val_recon /= max(1, v_batches)
             val_roi_sum /= max(1, v_batches)
-            val_score = val_recon + val_roi_sum
+            val_score = val_recon + VAL_ROI_WEIGHT * val_roi_sum
             val_recon_epoch = val_recon
             val_roi_epoch = val_roi_sum
             val_score_epoch = val_score
@@ -977,7 +977,7 @@ def train_prompt_residual_braak(
                 val_recon /= max(1, v_batches)
                 val_roi_sum /= max(1, v_batches)
                 val_braak_sum /= max(1, v_batches)
-                val_score = val_recon + val_roi_sum
+                val_score = val_recon + VAL_ROI_WEIGHT * val_roi_sum
                 val_recon_epoch = val_recon
                 val_roi_epoch = val_roi_sum
                 val_score_epoch = val_score

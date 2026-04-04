@@ -140,6 +140,11 @@ USE_GT_STAGE_HINT_TRAIN = _env_bool("USE_GT_STAGE_HINT_TRAIN", True)
 MASK_GLOBAL_RECON = _env_bool("MASK_GLOBAL_RECON", True)
 
 # =========================
+# Validation Score
+# =========================
+VAL_ROI_WEIGHT = _env_float("VAL_ROI_WEIGHT", 0.02)
+
+# =========================
 # Validation Scheduling
 # =========================
 LR_PLATEAU_PATIENCE = _env_int("LR_PLATEAU_PATIENCE", 15)
