@@ -19,6 +19,7 @@ from mri2pet.config import (
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
     MASK_GLOBAL_RECON, USE_GT_STAGE_HINT_TRAIN,
+    ABLATION_STEP, USE_FLAIR, USE_CLINICAL, USE_STAGE_PROMPT,
 )
 
 from mri2pet.data import build_loaders
@@ -79,6 +80,10 @@ def init_wandb_run():
             "lr_plateau_patience": LR_PLATEAU_PATIENCE,
             "early_stop_patience": EARLY_STOP_PATIENCE,
             "val_roi_weight": VAL_ROI_WEIGHT,
+            "ablation_step": ABLATION_STEP,
+            "use_flair": USE_FLAIR,
+            "use_clinical": USE_CLINICAL,
+            "use_stage_prompt": USE_STAGE_PROMPT,
         })
 
     try:
@@ -112,6 +117,9 @@ if __name__ == "__main__":
     print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
     print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
     if MODEL_VARIANT == "prompt_residual_braak":
+        step_desc = {1: "base+residual", 2: "+FLAIR", 3: "+Clinical", 4: "+Stage/CORAL", 5: "+Braak(full)"}
+        print(f"Ablation step:  {ABLATION_STEP} ({step_desc.get(ABLATION_STEP, '?')})")
+        print(f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  USE_STAGE_PROMPT={USE_STAGE_PROMPT}")
         print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
         print(f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  delta_out: {LAMBDA_DELTA_OUT}")
         import math

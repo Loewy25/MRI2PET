@@ -6,7 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
-from .config import DETACH_BASE_LATENT_FOR_AUX, RESIDUAL_ALPHA_INIT
+from .config import (
+    DETACH_BASE_LATENT_FOR_AUX, RESIDUAL_ALPHA_INIT,
+    USE_FLAIR, USE_CLINICAL, USE_STAGE_PROMPT,
+)
 from .utils import _pad_or_crop_to
 
 
@@ -258,11 +261,23 @@ class FlairPromptEncoder3D(nn.Module):
         z_flair = self.proj(self.gap(pb).flatten(1))
         return {"p1": p1, "p2": p2, "p3": p3, "p4": p4, "pb": pb, "z_flair": z_flair}
 
+    def zero_prompts(self, B: int, device: torch.device, dtype: torch.dtype) -> Dict[str, Any]:
+        """Return zero-valued prompts (ablation: no FLAIR). Spatial size 1 — fusion blocks will pad/crop."""
+        return {
+            "p1": torch.zeros(B, 16, 1, 1, 1, device=device, dtype=dtype),
+            "p2": torch.zeros(B, 32, 1, 1, 1, device=device, dtype=dtype),
+            "p3": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
+            "p4": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
+            "pb": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
+            "z_flair": torch.zeros(B, self.proj.out_features, device=device, dtype=dtype),
+        }
+
 
 # --- B. ClinicalFiLMConditioner ---
 class ClinicalFiLMConditioner(nn.Module):
     def __init__(self, clinical_dim: int = 10, z_dim: int = 128):
         super().__init__()
+        self.z_dim = z_dim
         self.trunk = nn.Sequential(
             nn.LayerNorm(clinical_dim),
             nn.Linear(clinical_dim, 64),
@@ -295,6 +310,19 @@ class ClinicalFiLMConditioner(nn.Module):
             "d2": _split(self.film_d2, 64),
             "d3": _split(self.film_d3, 32),
             "d4": _split(self.film_d4, 16),
+        }
+        return z, film
+
+    def identity(self, B: int, device: torch.device, dtype: torch.dtype
+                 ) -> Tuple[torch.Tensor, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
+        """Return identity FiLM (gamma=0, beta=0) and zero z_clin (ablation: no clinical)."""
+        z = torch.zeros(B, self.z_dim, device=device, dtype=dtype)
+        film = {
+            "b":  (torch.zeros(B, 128, device=device, dtype=dtype), torch.zeros(B, 128, device=device, dtype=dtype)),
+            "d1": (torch.zeros(B, 128, device=device, dtype=dtype), torch.zeros(B, 128, device=device, dtype=dtype)),
+            "d2": (torch.zeros(B, 64,  device=device, dtype=dtype), torch.zeros(B, 64,  device=device, dtype=dtype)),
+            "d3": (torch.zeros(B, 32,  device=device, dtype=dtype), torch.zeros(B, 32,  device=device, dtype=dtype)),
+            "d4": (torch.zeros(B, 16,  device=device, dtype=dtype), torch.zeros(B, 16,  device=device, dtype=dtype)),
         }
         return z, film
 
@@ -471,32 +499,44 @@ class PromptResidualBraakGenerator(nn.Module):
         stage_prompt_weights: Optional[torch.Tensor] = None,
         return_aux: bool = False,
     ):
+        B = t1.size(0)
+        dev, dtype = t1.device, t1.dtype
+
         # 1. Base T1-only generator
         pet_base, feats = self.base(t1, return_features=True)
 
-        # 2. FLAIR prompt pyramid
-        pf = self.flair_encoder(flair)
+        # 2. FLAIR prompt pyramid (or zeros if ablation step < 2)
+        if USE_FLAIR:
+            pf = self.flair_encoder(flair)
+        else:
+            pf = self.flair_encoder.zero_prompts(B, dev, dtype)
 
-        # 3. Fuse latents for auxiliary heads
+        # 3. Clinical FiLM (or identity if ablation step < 3)
+        if USE_CLINICAL:
+            z_clin, film = self.clinical_conditioner(clinical)
+        else:
+            z_clin, film = self.clinical_conditioner.identity(B, dev, dtype)
+
+        # 4. Fuse latents for auxiliary heads
         z_t1 = self.gap(feats["b"]).flatten(1)  # [B, 512]
         z_t1_aux = z_t1.detach() if DETACH_BASE_LATENT_FOR_AUX else z_t1
-
-        z_clin, film = self.clinical_conditioner(clinical)
-
         z_fuse = self.fusion_mlp(torch.cat([z_t1_aux, pf["z_flair"], z_clin], dim=1))
 
-        # 4. Auxiliary heads
+        # 5. Auxiliary heads
         stage_logits, braak_pred = self.stage_head(z_fuse)
         stage_probs = ordinal_logits_to_stage_probs(stage_logits)
 
-        # 5. Stage prompt weights
-        weights = stage_prompt_weights if stage_prompt_weights is not None else stage_probs
+        # 6. Stage prompt weights (or uniform if ablation step < 4)
+        if USE_STAGE_PROMPT:
+            weights = stage_prompt_weights if stage_prompt_weights is not None else stage_probs
+        else:
+            weights = torch.ones(B, 4, device=dev, dtype=dtype) * 0.25
         stage_prompts = self.prompt_bank(weights)
 
-        # 6. Residual decoder
+        # 7. Residual decoder
         delta_pet = self.residual_decoder(feats, pf, film, stage_prompts)
 
-        # 7. Combine
+        # 8. Combine
         alpha = torch.sigmoid(self.alpha_logit)
         pet_hat = pet_base + alpha * delta_pet
 

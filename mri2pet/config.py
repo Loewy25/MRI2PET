@@ -131,9 +131,22 @@ DETACH_BASE_LATENT_FOR_AUX = _env_bool("DETACH_BASE_LATENT_FOR_AUX", True)
 CLINICAL_DIM = _env_int("CLINICAL_DIM", 10)
 PROMPT_HIDDEN_DIM = _env_int("PROMPT_HIDDEN_DIM", 128)
 
-LAMBDA_STAGE_ORD = _env_float("LAMBDA_STAGE_ORD", 0.2)
-LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.5)
+# =========================
+# Ablation Step (1-5)
+# =========================
+# 1: base + residual decoder only (T1)
+# 2: + FLAIR spatial prompts
+# 3: + Clinical FiLM
+# 4: + Stage prompt bank + CORAL ordinal loss
+# 5: + Braak regression loss (full model)
+ABLATION_STEP = _env_int("ABLATION_STEP", 5)
+USE_FLAIR = _env_bool("USE_FLAIR", ABLATION_STEP >= 2)
+USE_CLINICAL = _env_bool("USE_CLINICAL", ABLATION_STEP >= 3)
+USE_STAGE_PROMPT = _env_bool("USE_STAGE_PROMPT", ABLATION_STEP >= 4)
+
 LAMBDA_DELTA_OUT = _env_float("LAMBDA_DELTA_OUT", 0.02)
+LAMBDA_STAGE_ORD = _env_float("LAMBDA_STAGE_ORD", 0.2 if ABLATION_STEP >= 4 else 0.0)
+LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.5 if ABLATION_STEP >= 5 else 0.0)
 
 RESIDUAL_ALPHA_INIT = _env_float("RESIDUAL_ALPHA_INIT", -4.0)
 USE_GT_STAGE_HINT_TRAIN = _env_bool("USE_GT_STAGE_HINT_TRAIN", True)
