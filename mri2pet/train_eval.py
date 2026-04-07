@@ -720,6 +720,8 @@ def train_prompt_residual_braak(
         # Gradient conflict tracking (recon vs aux on shared params)
         grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
         has_aux_grads = (LAMBDA_STAGE_ORD > 0 or LAMBDA_BRAAK > 0 or LAMBDA_DELTA_OUT > 0)
+        # Precompute trainable params for gradient conflict monitoring (changes at epoch boundaries only)
+        shared_params_for_conflict = [p for p in G.parameters() if p.requires_grad] if has_aux_grads else []
 
         G.train()
         D.train()
@@ -908,25 +910,24 @@ def train_prompt_residual_braak(
             # ---- Gradient conflict monitoring (recon vs aux on shared params) ----
             if has_aux_grads:
                 # Use torch.autograd.grad to probe without consuming the graph
-                shared_params = [p for p in G.parameters() if p.requires_grad]
-                if shared_params:
+                if shared_params_for_conflict:
                     recon_grads_tuple = torch.autograd.grad(
-                        outputs=pet_hat, inputs=shared_params,
+                        outputs=pet_hat, inputs=shared_params_for_conflict,
                         grad_outputs=v_final,
                         retain_graph=True, allow_unused=True,
                     )
                     aux_grads_tuple = torch.autograd.grad(
-                        outputs=loss_aux, inputs=shared_params,
+                        outputs=loss_aux, inputs=shared_params_for_conflict,
                         retain_graph=True, allow_unused=True,
                     )
                     # Flatten and concatenate (replace None with zeros)
                     recon_flat = torch.cat([
                         g.detach().flatten() if g is not None else torch.zeros(p.numel(), device=device)
-                        for g, p in zip(recon_grads_tuple, shared_params)
+                        for g, p in zip(recon_grads_tuple, shared_params_for_conflict)
                     ])
                     aux_flat = torch.cat([
                         g.detach().flatten() if g is not None else torch.zeros(p.numel(), device=device)
-                        for g, p in zip(aux_grads_tuple, shared_params)
+                        for g, p in zip(aux_grads_tuple, shared_params_for_conflict)
                     ])
                     recon_norm = recon_flat.norm().item()
                     aux_norm = aux_flat.norm().item()

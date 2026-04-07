@@ -262,13 +262,13 @@ class FlairPromptEncoder3D(nn.Module):
         return {"p1": p1, "p2": p2, "p3": p3, "p4": p4, "pb": pb, "z_flair": z_flair}
 
     def zero_prompts(self, B: int, device: torch.device, dtype: torch.dtype) -> Dict[str, Any]:
-        """Return zero-valued prompts (ablation: no FLAIR). Spatial size 1 — fusion blocks will pad/crop."""
+        """Return None spatial prompts (ablation: no FLAIR). Skips proj_prompt conv entirely."""
         return {
-            "p1": torch.zeros(B, 16, 1, 1, 1, device=device, dtype=dtype),
-            "p2": torch.zeros(B, 32, 1, 1, 1, device=device, dtype=dtype),
-            "p3": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
-            "p4": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
-            "pb": torch.zeros(B, 64, 1, 1, 1, device=device, dtype=dtype),
+            "p1": None,
+            "p2": None,
+            "p3": None,
+            "p4": None,
+            "pb": None,
             "z_flair": torch.zeros(B, self.proj.out_features, device=device, dtype=dtype),
         }
 
@@ -376,15 +376,18 @@ class PromptFusionBlock(nn.Module):
     def forward(
         self,
         base_feat: torch.Tensor,
-        flair_prompt: torch.Tensor,
+        flair_prompt: Optional[torch.Tensor],
         film: Tuple[torch.Tensor, torch.Tensor],
         stage_prompt: torch.Tensor,
     ) -> torch.Tensor:
         gamma, beta = film
         bp = self.proj_base(base_feat)
-        fp = self.proj_prompt(flair_prompt)
-        if fp.shape[2:] != bp.shape[2:]:
-            fp = _pad_or_crop_to(fp, bp)
+        if flair_prompt is None:
+            fp = torch.zeros_like(bp)
+        else:
+            fp = self.proj_prompt(flair_prompt)
+            if fp.shape[2:] != bp.shape[2:]:
+                fp = _pad_or_crop_to(fp, bp)
         gate = torch.sigmoid(self.gate_conv(torch.cat([bp, fp], dim=1)))
         fused = bp + gate * fp
         fused = fused * (1.0 + gamma[..., None, None, None]) + beta[..., None, None, None]
@@ -526,12 +529,18 @@ class PromptResidualBraakGenerator(nn.Module):
         stage_logits, braak_pred = self.stage_head(z_fuse)
         stage_probs = ordinal_logits_to_stage_probs(stage_logits)
 
-        # 6. Stage prompt weights (or uniform if ablation step < 4)
+        # 6. Stage prompt weights (or true zeros if ablation step < 4)
         if USE_STAGE_PROMPT:
             weights = stage_prompt_weights if stage_prompt_weights is not None else stage_probs
+            stage_prompts = self.prompt_bank(weights)
         else:
-            weights = torch.ones(B, 4, device=dev, dtype=dtype) * 0.25
-        stage_prompts = self.prompt_bank(weights)
+            stage_prompts = {
+                "b":  torch.zeros(B, 128, device=dev, dtype=dtype),
+                "d1": torch.zeros(B, 128, device=dev, dtype=dtype),
+                "d2": torch.zeros(B, 64,  device=dev, dtype=dtype),
+                "d3": torch.zeros(B, 32,  device=dev, dtype=dtype),
+                "d4": torch.zeros(B, 16,  device=dev, dtype=dtype),
+            }
 
         # 7. Residual decoder
         delta_pet = self.residual_decoder(feats, pf, film, stage_prompts)
