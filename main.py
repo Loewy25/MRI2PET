@@ -173,7 +173,9 @@ if __name__ == "__main__":
             G.base.load_state_dict(ckpt, strict=True)
             print("Base weights loaded successfully.")
         elif BASE_PRETRAIN_CKPT:
-            print(f"[WARN] BASE_PRETRAIN_CKPT not found: {BASE_PRETRAIN_CKPT}")
+            raise FileNotFoundError(
+                f"BASE_PRETRAIN_CKPT not found: {BASE_PRETRAIN_CKPT}"
+            )
     else:
         G = Generator(in_ch=1, out_ch=1)
 
