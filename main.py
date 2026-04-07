@@ -28,6 +28,7 @@ from mri2pet.data import build_loaders_from_fold_csv
 from mri2pet.models import Generator, CondPatchDiscriminator3D, PromptResidualBraakGenerator
 from mri2pet.train_eval import train_paggan, train_prompt_residual_braak, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
+from mri2pet.data import CLINICAL_FEATURE_NAMES
 
 
 def init_wandb_run():
@@ -155,6 +156,70 @@ if __name__ == "__main__":
             mri0, pet0 = sample
             sid0 = "NA"
         print(f"Sample tensor shapes: MRI {tuple(mri0.shape)}, PET {tuple(pet0.shape)}, SID {sid0}")
+
+    # ---- Data sanity log ----
+    import numpy as np
+    def _data_sanity_log(loader, split_name):
+        """Collect stage_ord class counts and clinical stats from a data loader."""
+        stage_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        clin_vecs, braak_vecs = [], []
+        n_samples, n_missing = 0, 0
+        shapes = set()
+        for batch in loader:
+            if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                continue
+            _, _, meta = batch
+            metas = [meta] if isinstance(meta, dict) else meta
+            for m in metas:
+                n_samples += 1
+                so = m.get("stage_ord", None)
+                if so is not None:
+                    stage_counts[int(so)] = stage_counts.get(int(so), 0) + 1
+                else:
+                    n_missing += 1
+                cv = m.get("clinical_vector", None)
+                if cv is not None:
+                    clin_vecs.append(cv if isinstance(cv, np.ndarray) else cv.numpy())
+                bv = m.get("braak_values", None)
+                if bv is not None:
+                    braak_vecs.append(bv if isinstance(bv, np.ndarray) else bv.numpy())
+                t1_shape = m.get("cur_shape", None)
+                if t1_shape is not None:
+                    shapes.add(tuple(t1_shape) if not isinstance(t1_shape, tuple) else t1_shape)
+        print(f"  [{split_name}] n={n_samples}, stage_ord counts={stage_counts}, missing_meta={n_missing}")
+        if shapes:
+            print(f"  [{split_name}] volume shapes: {shapes}")
+        if clin_vecs:
+            clin = np.stack(clin_vecs)
+            summary = {CLINICAL_FEATURE_NAMES[i]: f"mean={clin[:, i].mean():.3f} std={clin[:, i].std():.3f}"
+                       for i in range(min(clin.shape[1], len(CLINICAL_FEATURE_NAMES)))}
+            print(f"  [{split_name}] clinical (normalized): {summary}")
+        if braak_vecs:
+            bk = np.stack(braak_vecs)
+            print(f"  [{split_name}] braak (normalized): mean={bk.mean(0)} std={bk.std(0)}")
+        return stage_counts, clin_vecs, braak_vecs
+
+    print("-" * 70)
+    print("DATA SANITY CHECK")
+    train_stage, train_clin, train_braak = _data_sanity_log(train_loader, "train")
+    val_stage, _, _ = _data_sanity_log(val_loader, "val")
+    test_stage, _, _ = _data_sanity_log(test_loader, "test")
+
+    if wandb_run is not None:
+        sanity = {"data/train_n": ntr, "data/val_n": nva, "data/test_n": nte}
+        for k, v in train_stage.items():
+            sanity[f"data/train_stage_{k}"] = v
+        for k, v in val_stage.items():
+            sanity[f"data/val_stage_{k}"] = v
+        for k, v in test_stage.items():
+            sanity[f"data/test_stage_{k}"] = v
+        if train_braak:
+            bk = np.stack(train_braak)
+            sanity["data/braak_norm_mean_12"] = float(bk[:, 0].mean())
+            sanity["data/braak_norm_mean_34"] = float(bk[:, 1].mean())
+            sanity["data/braak_norm_mean_56"] = float(bk[:, 2].mean())
+        wandb.log(sanity, step=0)
+    print("-" * 70)
 
     # Instantiate models
     is_prompt_residual = (MODEL_VARIANT == "prompt_residual_braak")

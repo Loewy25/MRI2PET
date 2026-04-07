@@ -19,6 +19,7 @@ from .config import (
     USE_GT_STAGE_HINT_TRAIN, MASK_GLOBAL_RECON,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
     AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT,
+    ABLATION_STEP,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
@@ -711,6 +712,14 @@ def train_prompt_residual_braak(
         stage_ord_running, braak_running, delta_out_running, alpha_running = 0.0, 0.0, 0.0, 0.0
         w_global_running, w_roi_running, w_gan_running = 0.0, 0.0, 0.0
         grad_recon_running, grad_roi_running, grad_gan_running = 0.0, 0.0, 0.0
+        # D(real)/D(fake) tracking
+        d_real_running, d_fake_running = 0.0, 0.0
+        # Residual branch tracking
+        delta_in_cortex_running, delta_out_cortex_running = 0.0, 0.0
+        pet_diff_running = 0.0
+        # Gradient conflict tracking (recon vs aux on shared params)
+        grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
+        has_aux_grads = (ABLATION_STEP >= 4 and (LAMBDA_STAGE_ORD > 0 or LAMBDA_BRAAK > 0))
 
         G.train()
         D.train()
@@ -757,6 +766,9 @@ def train_prompt_residual_braak(
                 loss_D_real = adv_criterion(out_real, torch.ones_like(out_real))
                 loss_D_fake = adv_criterion(out_fake, torch.zeros_like(out_fake))
                 loss_D = 0.5 * (loss_D_real + loss_D_fake)
+
+            d_real_running += out_real.detach().mean().item()
+            d_fake_running += out_fake.detach().mean().item()
 
             scaler.scale(loss_D).backward()
             scaler.unscale_(opt_D)
@@ -872,15 +884,63 @@ def train_prompt_residual_braak(
                         + LAMBDA_BRAAK * loss_braak
                         + LAMBDA_DELTA_OUT * loss_delta_out)
 
+            # ---- Residual branch behavior ----
+            with torch.no_grad():
+                delta_abs = delta_pet.float().abs()
+                if cortex5 is not None:
+                    cortex_f = cortex5.float()
+                    outside_f = (1.0 - cortex_f)
+                    n_in = cortex_f.sum().clamp(min=1)
+                    n_out = outside_f.sum().clamp(min=1)
+                    delta_in_cortex_running += (delta_abs * cortex_f).sum().item() / n_in.item()
+                    delta_out_cortex_running += (delta_abs * outside_f).sum().item() / n_out.item()
+                else:
+                    delta_in_cortex_running += delta_abs.mean().item()
+                    delta_out_cortex_running += delta_abs.mean().item()
+                pet_diff_running += (pet_hat_f32 - aux["pet_base"].float()).abs().mean().item()
+
             # Combined backward: MGDA direction + aux
             # NOTE: both backward passes are in float32 (MGDA grads are float32,
             # aux losses are cast to float32), so we skip the scaler for G to
             # avoid mixing scaled/unscaled gradients.
             opt_G.zero_grad(set_to_none=True)
-            # First: MGDA direction through pet_hat (retain graph for aux)
-            pet_hat.backward(v_final, retain_graph=True)
-            # Second: aux losses (shares computation graph with pet_hat)
-            loss_aux.backward()
+
+            # ---- Gradient conflict monitoring (recon vs aux on shared params) ----
+            if has_aux_grads:
+                # First: compute recon grads on shared (base) params
+                pet_hat.backward(v_final, retain_graph=True)
+                recon_grads = torch.cat([
+                    p.grad.detach().flatten() for p in base_params
+                    if p.grad is not None
+                ])
+
+                # Save recon grads, zero, then compute aux grads
+                opt_G.zero_grad(set_to_none=True)
+                loss_aux.backward()
+                aux_grads = torch.cat([
+                    p.grad.detach().flatten() for p in base_params
+                    if p.grad is not None
+                ])
+
+                # Cosine similarity and norms
+                recon_norm = recon_grads.norm().item()
+                aux_norm = aux_grads.norm().item()
+                cos_sim = (torch.dot(recon_grads, aux_grads) /
+                           (recon_norm * aux_norm + 1e-12)).item()
+                grad_cos_running += cos_sim
+                grad_norm_recon_shared_running += recon_norm
+                grad_norm_aux_shared_running += aux_norm
+
+                # Re-apply both gradients combined
+                opt_G.zero_grad(set_to_none=True)
+                pet_hat.backward(v_final, retain_graph=True)
+                loss_aux.backward()
+            else:
+                # No aux conflict monitoring needed
+                # First: MGDA direction through pet_hat (retain graph for aux)
+                pet_hat.backward(v_final, retain_graph=True)
+                # Second: aux losses (shares computation graph with pet_hat)
+                loss_aux.backward()
 
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
@@ -907,6 +967,14 @@ def train_prompt_residual_braak(
         avg_w_global = w_global_running / nb
         avg_w_roi = w_roi_running / nb
         avg_w_gan = w_gan_running / nb
+        avg_d_real = d_real_running / nb
+        avg_d_fake = d_fake_running / nb
+        avg_delta_in = delta_in_cortex_running / nb
+        avg_delta_out = delta_out_cortex_running / nb
+        avg_pet_diff = pet_diff_running / nb
+        avg_grad_cos = grad_cos_running / nb if has_aux_grads else None
+        avg_grad_recon_shared = grad_norm_recon_shared_running / nb if has_aux_grads else None
+        avg_grad_aux_shared = grad_norm_aux_shared_running / nb if has_aux_grads else None
 
         hist["train_G"].append(avg_g)
         hist["train_D"].append(avg_d)
@@ -920,11 +988,17 @@ def train_prompt_residual_braak(
         val_roi_epoch: Optional[float] = None
         val_score_epoch: Optional[float] = None
         val_braak_epoch: Optional[float] = None
+        val_stage_acc_epoch: Optional[float] = None
+        val_braak_mae_epoch: Optional[List[float]] = None
+        val_braak_corr_epoch: Optional[List[float]] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
                 val_recon, val_roi_sum, val_braak_sum, v_batches = 0.0, 0.0, 0.0, 0
+                # Stage accuracy and Braak MAE/correlation collectors
+                all_stage_pred, all_stage_gt = [], []
+                all_braak_pred, all_braak_gt = [], []
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
                         mri, pet, meta = batch
@@ -959,6 +1033,18 @@ def train_prompt_residual_braak(
                         if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
                             val_roi_sum += _masked_l1_high_uptake(fake_eval, pet_eval, cortex5_v.float()).item()
                         val_braak_sum += F.smooth_l1_loss(aux_v["braak_pred"].float(), braak_v.float()).item()
+
+                        # Collect stage predictions (ablation >= 4)
+                        if ABLATION_STEP >= 4:
+                            stage_probs = aux_v["stage_probs"].float()  # [B, 4]
+                            stage_pred_cls = stage_probs.argmax(dim=1)  # [B]
+                            all_stage_pred.append(stage_pred_cls.cpu())
+                            all_stage_gt.append(stage_v.cpu())
+
+                        # Collect Braak predictions (ablation >= 5)
+                        if ABLATION_STEP >= 5:
+                            all_braak_pred.append(aux_v["braak_pred"].float().cpu())
+                            all_braak_gt.append(braak_v.float().cpu())
                     else:
                         # Fallback: T1-only
                         with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
@@ -981,6 +1067,26 @@ def train_prompt_residual_braak(
                 hist["val_roi"].append(val_roi_sum)
                 hist["val_score"].append(val_score)
                 hist["val_braak"].append(val_braak_sum)
+
+                # Stage accuracy
+                if all_stage_pred:
+                    sp = torch.cat(all_stage_pred)
+                    sg = torch.cat(all_stage_gt)
+                    val_stage_acc_epoch = float((sp == sg).float().mean().item())
+
+                # Braak MAE + Pearson correlation per component
+                if all_braak_pred:
+                    bp = torch.cat(all_braak_pred)  # [N, 3]
+                    bg = torch.cat(all_braak_gt)    # [N, 3]
+                    val_braak_mae_epoch = [(bp[:, i] - bg[:, i]).abs().mean().item() for i in range(3)]
+                    val_braak_corr_epoch = []
+                    for i in range(3):
+                        p, g = bp[:, i], bg[:, i]
+                        if p.std() > 1e-6 and g.std() > 1e-6:
+                            r = float(torch.corrcoef(torch.stack([p, g]))[0, 1].item())
+                        else:
+                            r = 0.0
+                        val_braak_corr_epoch.append(r)
 
                 # LR scheduler step on combined val_score
                 scheduler.step(val_score)
@@ -1020,6 +1126,29 @@ def train_prompt_residual_braak(
                     f"[MGDA] w_g={avg_w_global:.3f} w_r={avg_w_roi:.3f} w_a={avg_w_gan:.3f}  "
                     f"[AUX] stage={avg_stage:.4f} braak={avg_braak:.4f} dout={avg_dout:.4f}"
                 )
+                print(
+                    f"      [GAN] D(real)={avg_d_real:.4f}  D(fake)={avg_d_fake:.4f}  "
+                    f"[RESID] |delta|_in={avg_delta_in:.4f} |delta|_out={avg_delta_out:.4f} "
+                    f"|hat-base|={avg_pet_diff:.4f}"
+                )
+                if has_aux_grads:
+                    print(
+                        f"      [GRAD-CONFLICT] cos(recon,aux)={avg_grad_cos:.4f}  "
+                        f"||recon||={avg_grad_recon_shared:.3e}  ||aux||={avg_grad_aux_shared:.3e}  "
+                        f"ratio=||aux||/||recon||={avg_grad_aux_shared / (avg_grad_recon_shared + 1e-12):.3f}"
+                    )
+                if val_stage_acc_epoch is not None:
+                    print(f"      [VAL-STAGE] acc={val_stage_acc_epoch:.4f}")
+                if val_braak_mae_epoch is not None:
+                    print(
+                        f"      [VAL-BRAAK] MAE: B12={val_braak_mae_epoch[0]:.4f} "
+                        f"B34={val_braak_mae_epoch[1]:.4f} B56={val_braak_mae_epoch[2]:.4f}"
+                    )
+                if val_braak_corr_epoch is not None:
+                    print(
+                        f"      [VAL-BRAAK] Pearson r: B12={val_braak_corr_epoch[0]:.4f} "
+                        f"B34={val_braak_corr_epoch[1]:.4f} B56={val_braak_corr_epoch[2]:.4f}"
+                    )
 
             G.train()
 
@@ -1034,8 +1163,15 @@ def train_prompt_residual_braak(
                 f"Epoch [{epoch:03d}/{epochs}]  "
                 f"G: {avg_g:.4f}  D: {avg_d:.4f}  alpha={avg_alpha:.4f}  | {dt:.1f}s"
             )
+            print(
+                f"      [GAN] D(real)={avg_d_real:.4f}  D(fake)={avg_d_fake:.4f}  "
+                f"[RESID] |delta|_in={avg_delta_in:.4f} |delta|_out={avg_delta_out:.4f} "
+                f"|hat-base|={avg_pet_diff:.4f}"
+            )
 
         if log_to_wandb and wandb.run is not None:
+            cur_lr_base = opt_G.param_groups[0]["lr"]
+            cur_lr_new = opt_G.param_groups[1]["lr"]
             log_dict = {
                 "epoch": epoch,
                 "train/G_loss": avg_g,
@@ -1044,13 +1180,32 @@ def train_prompt_residual_braak(
                 "train/braak_loss": avg_braak,
                 "train/delta_out_loss": avg_dout,
                 "train/alpha": avg_alpha,
+                # LR / freeze status
+                "optim/lr_base": cur_lr_base,
+                "optim/lr_new": cur_lr_new,
+                "optim/base_frozen": 1 if epoch <= FREEZE_BASE_EPOCHS else 0,
+                # GAN health
+                "gan/D_real": avg_d_real,
+                "gan/D_fake": avg_d_fake,
+                # MGDA
                 "mgda/w_recon_global": avg_w_global,
                 "mgda/w_recon_roi": avg_w_roi,
                 "mgda/w_gan": avg_w_gan,
                 "mgda/grad_recon_global_norm": grad_recon_running / nb,
                 "mgda/grad_recon_roi_norm": grad_roi_running / nb,
                 "mgda/grad_gan_norm": grad_gan_running / nb,
+                # Residual branch
+                "residual/delta_in_cortex": avg_delta_in,
+                "residual/delta_out_cortex": avg_delta_out,
+                "residual/in_out_ratio": avg_delta_in / (avg_delta_out + 1e-12),
+                "residual/pet_hat_minus_base": avg_pet_diff,
             }
+            # Gradient conflict (only when aux losses active)
+            if has_aux_grads:
+                log_dict["grad_conflict/cos_recon_vs_aux"] = avg_grad_cos
+                log_dict["grad_conflict/norm_recon_shared"] = avg_grad_recon_shared
+                log_dict["grad_conflict/norm_aux_shared"] = avg_grad_aux_shared
+                log_dict["grad_conflict/ratio_aux_over_recon"] = avg_grad_aux_shared / (avg_grad_recon_shared + 1e-12)
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
             if val_roi_epoch is not None:
@@ -1060,6 +1215,16 @@ def train_prompt_residual_braak(
                 log_dict["val/best_score"] = best_val
             if val_braak_epoch is not None:
                 log_dict["val/braak_loss"] = val_braak_epoch
+            if val_stage_acc_epoch is not None:
+                log_dict["val/stage_acc"] = val_stage_acc_epoch
+            if val_braak_mae_epoch is not None:
+                log_dict["val/braak_mae_B12"] = val_braak_mae_epoch[0]
+                log_dict["val/braak_mae_B34"] = val_braak_mae_epoch[1]
+                log_dict["val/braak_mae_B56"] = val_braak_mae_epoch[2]
+            if val_braak_corr_epoch is not None:
+                log_dict["val/braak_corr_B12"] = val_braak_corr_epoch[0]
+                log_dict["val/braak_corr_B34"] = val_braak_corr_epoch[1]
+                log_dict["val/braak_corr_B56"] = val_braak_corr_epoch[2]
             wandb.log(log_dict, step=epoch)
 
     # Load best weights
