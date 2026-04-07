@@ -16,12 +16,12 @@ os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
 
-RESIZE_TO: Optional[Tuple[int,int,int]] = (96, 96, 96)
+RESIZE_TO: Optional[Tuple[int,int,int]] = (128, 128, 128)
 RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "8"))
+BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "1"))
 EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "1"))
 NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "2"))
 PIN_MEMORY     = True
@@ -139,7 +139,7 @@ PROMPT_HIDDEN_DIM = _env_int("PROMPT_HIDDEN_DIM", 128)
 # 3: + Clinical FiLM
 # 4: + Stage prompt bank + CORAL ordinal loss
 # 5: + Braak regression loss (full model)
-ABLATION_STEP = _env_int("ABLATION_STEP", 5)
+ABLATION_STEP = _env_int("ABLATION_STEP", 1)
 USE_FLAIR = _env_bool("USE_FLAIR", ABLATION_STEP >= 2)
 USE_CLINICAL = _env_bool("USE_CLINICAL", ABLATION_STEP >= 3)
 USE_STAGE_PROMPT = _env_bool("USE_STAGE_PROMPT", ABLATION_STEP >= 4)
