@@ -719,7 +719,7 @@ def train_prompt_residual_braak(
         pet_diff_running = 0.0
         # Gradient conflict tracking (recon vs aux on shared params)
         grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
-        has_aux_grads = (ABLATION_STEP >= 4 and (LAMBDA_STAGE_ORD > 0 or LAMBDA_BRAAK > 0))
+        has_aux_grads = (LAMBDA_STAGE_ORD > 0 or LAMBDA_BRAAK > 0 or LAMBDA_DELTA_OUT > 0)
 
         G.train()
         D.train()
@@ -907,40 +907,38 @@ def train_prompt_residual_braak(
 
             # ---- Gradient conflict monitoring (recon vs aux on shared params) ----
             if has_aux_grads:
-                # First: compute recon grads on shared (base) params
-                pet_hat.backward(v_final, retain_graph=True)
-                recon_grads = torch.cat([
-                    p.grad.detach().flatten() for p in base_params
-                    if p.grad is not None
-                ])
+                # Use torch.autograd.grad to probe without consuming the graph
+                shared_params = [p for p in G.parameters() if p.requires_grad]
+                if shared_params:
+                    recon_grads_tuple = torch.autograd.grad(
+                        outputs=pet_hat, inputs=shared_params,
+                        grad_outputs=v_final,
+                        retain_graph=True, allow_unused=True,
+                    )
+                    aux_grads_tuple = torch.autograd.grad(
+                        outputs=loss_aux, inputs=shared_params,
+                        retain_graph=True, allow_unused=True,
+                    )
+                    # Flatten and concatenate (replace None with zeros)
+                    recon_flat = torch.cat([
+                        g.detach().flatten() if g is not None else torch.zeros(p.numel(), device=device)
+                        for g, p in zip(recon_grads_tuple, shared_params)
+                    ])
+                    aux_flat = torch.cat([
+                        g.detach().flatten() if g is not None else torch.zeros(p.numel(), device=device)
+                        for g, p in zip(aux_grads_tuple, shared_params)
+                    ])
+                    recon_norm = recon_flat.norm().item()
+                    aux_norm = aux_flat.norm().item()
+                    cos_sim = (torch.dot(recon_flat, aux_flat) /
+                               (recon_norm * aux_norm + 1e-12)).item()
+                    grad_cos_running += cos_sim
+                    grad_norm_recon_shared_running += recon_norm
+                    grad_norm_aux_shared_running += aux_norm
 
-                # Save recon grads, zero, then compute aux grads
-                opt_G.zero_grad(set_to_none=True)
-                loss_aux.backward()
-                aux_grads = torch.cat([
-                    p.grad.detach().flatten() for p in base_params
-                    if p.grad is not None
-                ])
-
-                # Cosine similarity and norms
-                recon_norm = recon_grads.norm().item()
-                aux_norm = aux_grads.norm().item()
-                cos_sim = (torch.dot(recon_grads, aux_grads) /
-                           (recon_norm * aux_norm + 1e-12)).item()
-                grad_cos_running += cos_sim
-                grad_norm_recon_shared_running += recon_norm
-                grad_norm_aux_shared_running += aux_norm
-
-                # Re-apply both gradients combined
-                opt_G.zero_grad(set_to_none=True)
-                pet_hat.backward(v_final, retain_graph=True)
-                loss_aux.backward()
-            else:
-                # No aux conflict monitoring needed
-                # First: MGDA direction through pet_hat (retain graph for aux)
-                pet_hat.backward(v_final, retain_graph=True)
-                # Second: aux losses (shares computation graph with pet_hat)
-                loss_aux.backward()
+            # Actual backward: MGDA direction + aux (single pass)
+            pet_hat.backward(v_final, retain_graph=True)
+            loss_aux.backward()
 
             torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
             opt_G.step()
@@ -1141,7 +1139,7 @@ def train_prompt_residual_braak(
                     print(f"      [VAL-STAGE] acc={val_stage_acc_epoch:.4f}")
                 if val_braak_mae_epoch is not None:
                     print(
-                        f"      [VAL-BRAAK] MAE: B12={val_braak_mae_epoch[0]:.4f} "
+                        f"      [VAL-BRAAK] MAE(norm): B12={val_braak_mae_epoch[0]:.4f} "
                         f"B34={val_braak_mae_epoch[1]:.4f} B56={val_braak_mae_epoch[2]:.4f}"
                     )
                 if val_braak_corr_epoch is not None:
@@ -1218,9 +1216,9 @@ def train_prompt_residual_braak(
             if val_stage_acc_epoch is not None:
                 log_dict["val/stage_acc"] = val_stage_acc_epoch
             if val_braak_mae_epoch is not None:
-                log_dict["val/braak_mae_B12"] = val_braak_mae_epoch[0]
-                log_dict["val/braak_mae_B34"] = val_braak_mae_epoch[1]
-                log_dict["val/braak_mae_B56"] = val_braak_mae_epoch[2]
+                log_dict["val/braak_mae_norm_B12"] = val_braak_mae_epoch[0]
+                log_dict["val/braak_mae_norm_B34"] = val_braak_mae_epoch[1]
+                log_dict["val/braak_mae_norm_B56"] = val_braak_mae_epoch[2]
             if val_braak_corr_epoch is not None:
                 log_dict["val/braak_corr_B12"] = val_braak_corr_epoch[0]
                 log_dict["val/braak_corr_B34"] = val_braak_corr_epoch[1]

@@ -201,7 +201,8 @@ if __name__ == "__main__":
 
     print("-" * 70)
     print("DATA SANITY CHECK")
-    train_stage, train_clin, train_braak = _data_sanity_log(train_loader, "train")
+    print("  (NOTE: train counts reflect sampled distribution if oversampling is on)")
+    train_stage, train_clin, train_braak = _data_sanity_log(train_loader, "train(sampled)")
     val_stage, _, _ = _data_sanity_log(val_loader, "val")
     test_stage, _, _ = _data_sanity_log(test_loader, "test")
 
