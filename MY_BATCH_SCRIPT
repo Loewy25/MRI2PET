@@ -29,11 +29,11 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="promt_step5_alpha15_batch1_128_fold4_os5_aug_5"
-export FOLD_INDEX=3
+export RUN_NAME="promt_step5_alpha15_batch1_128_fold3_os5_aug_5"
+export FOLD_INDEX=2
 
 export MODEL_VARIANT="prompt_residual_braak"
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold4_os5_aug_5/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold3_os5_aug_5/checkpoints/best_G.pth"
 export ABLATION_STEP=5
 export RESIDUAL_ALPHA_INIT=-1.5
 
