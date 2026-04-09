@@ -65,7 +65,7 @@ python audit_fold_metrics.py \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold4.csv \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold5.csv \
   --roi-root /scratch/l.peiwang/kari_flair_all \
-  --out-dir /scratch/l.peiwang/step5_metric_audit \
+  --out-dir /scratch/l.peiwang/SHIT \
   --strict-affine
 
 
