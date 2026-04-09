@@ -145,16 +145,16 @@ pip install pydicom
 python eval_taupet_comprehensive.py \
   --roi-root /scratch/l.peiwang/kari_flair_all\
   --vols-roots \
-    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold1_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold2_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold3_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold4_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold5_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/promt_step2_batch1_128_fold1_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/promt_step2_batch1_128_fold2_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/promt_step2_batch1_128_fold3_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/promt_step2_batch1_128_fold4_os5_aug_5/volumes \
+    /home/l.peiwang/MRI2PET/promt_step2_batch1_128_fold5_os5_aug_5/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/new_baseline_test
+  --out /scratch/l.peiwang/new_baseline_test1
 
 #python build_kari_flair_all.py
 #python new_class.py \
