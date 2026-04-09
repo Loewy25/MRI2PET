@@ -51,7 +51,7 @@ pip install pydicom
 
 
 
-python /mnt/data/audit_fold_metrics.py \
+python audit_fold_metrics.py \
   --run-dirs \
     /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold1_os5_aug_5 \
     /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold2_os5_aug_5 \
