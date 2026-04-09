@@ -289,7 +289,13 @@ if __name__ == "__main__":
     save_history_csv(out["history"], csv_path)
     print(f"Saved training log CSV to: {csv_path}")
 
-    # Evaluate + Save
+    # Evaluate + Save — clear VOL_DIR first to avoid stale leftovers from prior runs
+    import shutil
+    if os.path.isdir(VOL_DIR):
+        shutil.rmtree(VOL_DIR)
+        print(f"Cleared old VOL_DIR: {VOL_DIR}")
+    os.makedirs(VOL_DIR, exist_ok=True)
+
     metrics = evaluate_and_save(
         G, test_loader, device=device,
         out_dir=VOL_DIR, data_range=DATA_RANGE,
