@@ -53,11 +53,11 @@ pip install pydicom
 
 python audit_fold_metrics.py \
   --run-dirs \
-    /home/l.peiwang/MRI2PET/promt_step5_batch1_128_fold1_os5_aug_5 \
-    /home/l.peiwang/MRI2PET/promt_step5_batch1_128_fold2_os5_aug_5 \
-    /home/l.peiwang/MRI2PET/promt_step5_batch1_128_fold3_os5_aug_5 \
-    /home/l.peiwang/MRI2PET/promt_step5_batch1_128_fold4_os5_aug_5 \
-    /home/l.peiwang/MRI2PET/promt_step5_batch1_128_fold5_os5_aug_5 \
+    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold1_os5_aug_5 \
+    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold2_os5_aug_5 \
+    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold3_os5_aug_5 \
+    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold4_os5_aug_5 \
+    /home/l.peiwang/MRI2PET/batch1_128_new_baseline_fold5_os5_aug_5 \
   --fold-csvs \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold1.csv \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold2.csv \
@@ -65,7 +65,7 @@ python audit_fold_metrics.py \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold4.csv \
     /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold5.csv \
   --roi-root /scratch/l.peiwang/kari_flair_all \
-  --out-dir /scratch/l.peiwang/SHIT1 \
+  --out-dir /scratch/l.peiwang/SHIT \
   --strict-affine
 
 
