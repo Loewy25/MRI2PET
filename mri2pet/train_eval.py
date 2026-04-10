@@ -22,7 +22,7 @@ from .config import (
     ABLATION_STEP,
 )
 
-from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
+from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 from .models import build_stage_onehot, ordinal_logits_to_stage_probs
 import wandb
@@ -1401,13 +1401,13 @@ def evaluate_and_save(
         else:
             brain = (pet_for_metric > 0).float()
 
-        fake_m = fake_t.float() * brain
-        pet_m  = pet_for_metric.float() * brain
+        fake_f = fake_t.float()
+        pet_f  = pet_for_metric.float()
 
-        ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
-        psnr_val = psnr(fake_m,  pet_m, data_range=data_range)
-        mse_val  = F.mse_loss(fake_m, pet_m).item()
-        mmd_val  = mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
+        ssim_val = ssim3d_masked(fake_f, pet_f, brain, data_range=data_range).item()
+        psnr_val = masked_psnr(fake_f, pet_f, brain, data_range=data_range)
+        mse_val  = masked_mse(fake_f, pet_f, brain).item()
+        mmd_val  = mmd_gaussian(pet_f, fake_f, num_voxels=mmd_voxels, mask=brain)
 
         ssim_list.append(ssim_val)
         psnr_list.append(psnr_val)

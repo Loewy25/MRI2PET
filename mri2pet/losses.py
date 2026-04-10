@@ -54,6 +54,41 @@ def l1_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 def mse_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return F.mse_loss(x, y)
 
+def ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
+                  ksize: int = 3, k1: float = 0.01, k2: float = 0.03,
+                  data_range: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
+    pad = ksize // 2
+    k = torch.ones((1, 1, ksize, ksize, ksize), device=x.device, dtype=x.dtype)
+    def wavg(z):
+        z_sum = F.conv3d(z * mask, k, padding=pad)
+        m_sum = F.conv3d(mask,     k, padding=pad).clamp_min(eps)
+        return z_sum / m_sum
+    mu_x = wavg(x); mu_y = wavg(y)
+    mu_x2 = mu_x * mu_x; mu_y2 = mu_y * mu_y; mu_xy = mu_x * mu_y
+    sigma_x  = wavg(x * x) - mu_x2
+    sigma_y  = wavg(y * y) - mu_y2
+    sigma_xy = wavg(x * y) - mu_xy
+    C1 = (k1 * data_range) ** 2
+    C2 = (k2 * data_range) ** 2
+    num = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
+    den = (mu_x2 + mu_y2 + C1) * (sigma_x + sigma_y + C2)
+    ssim_map = num / (den + eps)
+    win_hits = (F.conv3d(mask, k, padding=pad) > 0).to(x.dtype)
+    return (ssim_map * win_hits).sum() / win_hits.sum().clamp_min(eps)
+
+def masked_mse(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
+               eps: float = 1e-6) -> torch.Tensor:
+    num = (((x - y) ** 2) * mask).sum()
+    den = mask.sum().clamp_min(eps)
+    return num / den
+
+def masked_psnr(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
+                data_range: float = 1.0, eps: float = 1e-6) -> float:
+    mse = masked_mse(x, y, mask, eps=eps)
+    if mse.item() == 0:
+        return float('inf')
+    return 10.0 * log10((data_range ** 2) / mse.item())
+
 @torch.no_grad()
 def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> float:
     mse = F.mse_loss(x, y).item()
