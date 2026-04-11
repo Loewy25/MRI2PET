@@ -23,7 +23,7 @@ TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
 BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "4"))
 EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "1"))
-NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "0"))
+NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "1"))
 PIN_MEMORY     = True
 
 EPOCHS      = 150
