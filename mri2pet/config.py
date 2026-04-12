@@ -149,7 +149,7 @@ LAMBDA_STAGE_ORD = _env_float("LAMBDA_STAGE_ORD", 0.2 if ABLATION_STEP >= 4 else
 LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.5 if ABLATION_STEP >= 5 else 0.0)
 
 RESIDUAL_ALPHA_INIT = _env_float("RESIDUAL_ALPHA_INIT", -4.0)
-USE_GT_STAGE_HINT_TRAIN = _env_bool("USE_GT_STAGE_HINT_TRAIN", True)
+USE_GT_STAGE_HINT_TRAIN = _env_bool("USE_GT_STAGE_HINT_TRAIN", False)
 MASK_GLOBAL_RECON = _env_bool("MASK_GLOBAL_RECON", True)
 
 # =========================
