@@ -21,6 +21,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 import nibabel as nib
+from scipy.ndimage import zoom as nd_zoom
 
 import torch
 import torch.nn.functional as F
@@ -423,9 +424,8 @@ def compute_subject_all(subj_for_paths: str,
             return
         roi_img, roi_np = load_nii(roi_path)
         if roi_np.shape != fake_np.shape:
-            means[f"{roi_name}_GT"] = float("nan")
-            means[f"{roi_name}_Fake"] = float("nan")
-            return
+            zf = tuple(f / r for f, r in zip(fake_np.shape, roi_np.shape))
+            roi_np = (nd_zoom(roi_np.astype(np.float32), zf, order=0) > 0.5).astype(np.uint8)
         if strict_affine and not affines_close(roi_img, fake_img):
             means[f"{roi_name}_GT"] = float("nan")
             means[f"{roi_name}_Fake"] = float("nan")

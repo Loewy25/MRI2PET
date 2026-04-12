@@ -34,6 +34,7 @@ from typing import Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
+from scipy.ndimage import zoom as nd_zoom
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -200,8 +201,11 @@ def compute_saved_metrics_for_subject(
     gt_img, gt_np = load_nii(gt_p)
     mask_img, mask_np = load_nii(mask_p)
 
-    if fake_np.shape != gt_np.shape or fake_np.shape != mask_np.shape:
+    if fake_np.shape != gt_np.shape:
         return None
+    if fake_np.shape != mask_np.shape:
+        zf = tuple(f / r for f, r in zip(fake_np.shape, mask_np.shape))
+        mask_np = (nd_zoom(mask_np.astype(np.float32), zf, order=0) > 0.5).astype(np.uint8)
     if strict_affine and (not affines_close(fake_img, gt_img) or not affines_close(fake_img, mask_img)):
         return None
 
