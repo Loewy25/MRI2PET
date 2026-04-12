@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .config import (
-    DETACH_BASE_LATENT_FOR_AUX, RESIDUAL_ALPHA_INIT,
+    DETACH_BASE_LATENT_FOR_AUX,
     USE_FLAIR, USE_CLINICAL, USE_STAGE_PROMPT,
 )
 from .utils import _pad_or_crop_to
@@ -492,8 +492,6 @@ class PromptResidualBraakGenerator(nn.Module):
         self.prompt_bank = StagePromptBank()
         self.residual_decoder = ResidualDecoder3D()
 
-        self.alpha_logit = nn.Parameter(torch.tensor(float(RESIDUAL_ALPHA_INIT)))
-
     def forward(
         self,
         t1: torch.Tensor,
@@ -546,8 +544,7 @@ class PromptResidualBraakGenerator(nn.Module):
         delta_pet = self.residual_decoder(feats, pf, film, stage_prompts)
 
         # 8. Combine
-        alpha = torch.sigmoid(self.alpha_logit)
-        pet_hat = pet_base + alpha * delta_pet
+        pet_hat = pet_base + delta_pet
 
         if not return_aux:
             return pet_hat
@@ -555,7 +552,6 @@ class PromptResidualBraakGenerator(nn.Module):
         aux: Dict[str, Any] = {
             "pet_base": pet_base,
             "delta_pet": delta_pet,
-            "alpha": alpha,
             "stage_logits": stage_logits,
             "stage_probs": stage_probs,
             "braak_pred": braak_pred,

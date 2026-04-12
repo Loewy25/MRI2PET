@@ -687,7 +687,7 @@ def train_prompt_residual_braak(
     hist: Dict[str, list] = {
         "train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": [],
         "train_stage_ord": [], "train_braak": [], "train_delta_out": [],
-        "train_alpha": [], "val_braak": [],
+        "val_braak": [],
     }
 
     avg_norm_recon_global = 0.0
@@ -709,14 +709,13 @@ def train_prompt_residual_braak(
 
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
-        stage_ord_running, braak_running, delta_out_running, alpha_running = 0.0, 0.0, 0.0, 0.0
+        stage_ord_running, braak_running, delta_out_running = 0.0, 0.0, 0.0
         w_global_running, w_roi_running, w_gan_running = 0.0, 0.0, 0.0
         grad_recon_running, grad_roi_running, grad_gan_running = 0.0, 0.0, 0.0
         # D(real)/D(fake) tracking
         d_real_running, d_fake_running = 0.0, 0.0
         # Residual branch tracking
         delta_in_cortex_running, delta_out_cortex_running = 0.0, 0.0
-        alpha_delta_in_cortex_running, alpha_delta_out_cortex_running = 0.0, 0.0
         pet_diff_running = 0.0
         # Gradient conflict tracking (recon vs aux on shared params)
         grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
@@ -948,16 +947,12 @@ def train_prompt_residual_braak(
             opt_G.step()
 
             # Logging accumulators
-            alpha_val = float(aux["alpha"].detach().item())
             loss_G_log = (loss_recon_global + (loss_recon_roi if use_roi else 0.0) + loss_gan).detach().item()
             g_running += float(loss_G_log)
             d_running += loss_D.item()
             stage_ord_running += loss_stage_ord.detach().item()
             braak_running += loss_braak.detach().item()
             delta_out_running += loss_delta_out.detach().item()
-            alpha_running += alpha_val
-            alpha_delta_in_cortex_running += alpha_val * batch_delta_in
-            alpha_delta_out_cortex_running += alpha_val * batch_delta_out
             n_batches += 1
 
         # ---- Epoch aggregates ----
@@ -967,7 +962,6 @@ def train_prompt_residual_braak(
         avg_stage = stage_ord_running / nb
         avg_braak = braak_running / nb
         avg_dout = delta_out_running / nb
-        avg_alpha = alpha_running / nb
         avg_w_global = w_global_running / nb
         avg_w_roi = w_roi_running / nb
         avg_w_gan = w_gan_running / nb
@@ -975,8 +969,6 @@ def train_prompt_residual_braak(
         avg_d_fake = d_fake_running / nb
         avg_delta_in = delta_in_cortex_running / nb
         avg_delta_out = delta_out_cortex_running / nb
-        avg_alpha_delta_in = alpha_delta_in_cortex_running / nb
-        avg_alpha_delta_out = alpha_delta_out_cortex_running / nb
         avg_pet_diff = pet_diff_running / nb
         avg_grad_cos = grad_cos_running / nb if has_aux_grads else None
         avg_grad_recon_shared = grad_norm_recon_shared_running / nb if has_aux_grads else None
@@ -987,7 +979,6 @@ def train_prompt_residual_braak(
         hist["train_stage_ord"].append(avg_stage)
         hist["train_braak"].append(avg_braak)
         hist["train_delta_out"].append(avg_dout)
-        hist["train_alpha"].append(avg_alpha)
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
@@ -1144,8 +1135,7 @@ def train_prompt_residual_braak(
                     f"| {dt:.1f}s"
                 )
                 print(
-                    f"      alpha={avg_alpha:.4f}  base={frozen_str}  "
-                    f"lr_new={cur_lr_new:.1e}  "
+                    f"      base={frozen_str}  lr_new={cur_lr_new:.1e}  "
                     f"[MGDA] w_g={avg_w_global:.3f} w_r={avg_w_roi:.3f} w_a={avg_w_gan:.3f}  "
                     f"[AUX] stage={avg_stage:.4f} braak={avg_braak:.4f} dout={avg_dout:.4f}"
                 )
@@ -1184,7 +1174,7 @@ def train_prompt_residual_braak(
             dt = time.time() - t0
             print(
                 f"Epoch [{epoch:03d}/{epochs}]  "
-                f"G: {avg_g:.4f}  D: {avg_d:.4f}  alpha={avg_alpha:.4f}  | {dt:.1f}s"
+                f"G: {avg_g:.4f}  D: {avg_d:.4f}  | {dt:.1f}s"
             )
             print(
                 f"      [GAN] D(real)={avg_d_real:.4f}  D(fake)={avg_d_fake:.4f}  "
@@ -1202,7 +1192,6 @@ def train_prompt_residual_braak(
                 "train/stage_ord_loss": avg_stage,
                 "train/braak_loss": avg_braak,
                 "train/delta_out_loss": avg_dout,
-                "train/alpha": avg_alpha,
                 # LR / freeze status
                 "optim/lr_base": cur_lr_base,
                 "optim/lr_new": cur_lr_new,
@@ -1220,8 +1209,6 @@ def train_prompt_residual_braak(
                 # Residual branch
                 "residual/delta_in_cortex": avg_delta_in,
                 "residual/delta_out_cortex": avg_delta_out,
-                "residual/alpha_delta_in_cortex": avg_alpha_delta_in,
-                "residual/alpha_delta_out_cortex": avg_alpha_delta_out,
                 "residual/in_out_ratio": avg_delta_in / (avg_delta_out + 1e-12),
                 "residual/pet_hat_minus_base": avg_pet_diff,
             }
@@ -1393,7 +1380,6 @@ def evaluate_and_save(
                 # Save base and delta
                 pet_base_np = aux["pet_base"].squeeze(0).squeeze(0).float().cpu().numpy()
                 delta_np = aux["delta_pet"].squeeze(0).squeeze(0).float().cpu().numpy()
-                alpha_v = float(aux["alpha"].item())
                 stage_probs_np = aux["stage_probs"].squeeze(0).float().cpu().numpy()
                 braak_pred_np = aux["braak_pred"].squeeze(0).float().cpu().numpy()
 
@@ -1401,7 +1387,6 @@ def evaluate_and_save(
 
                 aux_rows.append({
                     "sid": sid,
-                    "alpha": alpha_v,
                     "stage_pred_0": float(stage_probs_np[0]),
                     "stage_pred_12": float(stage_probs_np[1]),
                     "stage_pred_34": float(stage_probs_np[2]),
@@ -1509,7 +1494,7 @@ def evaluate_and_save(
     if is_prompt_residual and aux_rows:
         aux_csv = os.path.join(run_dir, "per_subject_aux.csv")
         aux_cols = [
-            "sid", "alpha",
+            "sid",
             "stage_pred_0", "stage_pred_12", "stage_pred_34", "stage_pred_56",
             "braak_pred_12", "braak_pred_34", "braak_pred_56",
             "braak_raw_gt_12", "braak_raw_gt_34", "braak_raw_gt_56",
