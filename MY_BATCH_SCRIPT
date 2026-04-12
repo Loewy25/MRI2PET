@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="batch1_128_step1_fold5_os5_aug_5"
+export RUN_NAME="batch1_128_step2_fold5_os5_aug_5"
 export FOLD_INDEX=4
 
 export MODEL_VARIANT="prompt_residual_braak"
@@ -39,7 +39,7 @@ export MODEL_VARIANT="prompt_residual_braak"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold4_os65_aug_5/checkpoints/best_G.pth"
 export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold5_os65_aug_5/checkpoints/best_G.pth"
 
-export ABLATION_STEP=1
+export ABLATION_STEP=2
 export RESIDUAL_ALPHA_INIT=-3.0
 
 # Oversampling (train only)
