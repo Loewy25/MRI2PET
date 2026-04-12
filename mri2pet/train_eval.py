@@ -716,6 +716,7 @@ def train_prompt_residual_braak(
         d_real_running, d_fake_running = 0.0, 0.0
         # Residual branch tracking
         delta_in_cortex_running, delta_out_cortex_running = 0.0, 0.0
+        alpha_delta_in_cortex_running, alpha_delta_out_cortex_running = 0.0, 0.0
         pet_diff_running = 0.0
         # Gradient conflict tracking (recon vs aux on shared params)
         grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
@@ -894,11 +895,13 @@ def train_prompt_residual_braak(
                     outside_f = (1.0 - cortex_f)
                     n_in = cortex_f.sum().clamp(min=1)
                     n_out = outside_f.sum().clamp(min=1)
-                    delta_in_cortex_running += (delta_abs * cortex_f).sum().item() / n_in.item()
-                    delta_out_cortex_running += (delta_abs * outside_f).sum().item() / n_out.item()
+                    batch_delta_in = (delta_abs * cortex_f).sum().item() / n_in.item()
+                    batch_delta_out = (delta_abs * outside_f).sum().item() / n_out.item()
                 else:
-                    delta_in_cortex_running += delta_abs.mean().item()
-                    delta_out_cortex_running += delta_abs.mean().item()
+                    batch_delta_in = delta_abs.mean().item()
+                    batch_delta_out = delta_abs.mean().item()
+                delta_in_cortex_running += batch_delta_in
+                delta_out_cortex_running += batch_delta_out
                 pet_diff_running += (pet_hat_f32 - aux["pet_base"].float()).abs().mean().item()
 
             # Combined backward: MGDA direction + aux
@@ -953,6 +956,8 @@ def train_prompt_residual_braak(
             braak_running += loss_braak.detach().item()
             delta_out_running += loss_delta_out.detach().item()
             alpha_running += alpha_val
+            alpha_delta_in_cortex_running += alpha_val * batch_delta_in
+            alpha_delta_out_cortex_running += alpha_val * batch_delta_out
             n_batches += 1
 
         # ---- Epoch aggregates ----
@@ -970,6 +975,8 @@ def train_prompt_residual_braak(
         avg_d_fake = d_fake_running / nb
         avg_delta_in = delta_in_cortex_running / nb
         avg_delta_out = delta_out_cortex_running / nb
+        avg_alpha_delta_in = alpha_delta_in_cortex_running / nb
+        avg_alpha_delta_out = alpha_delta_out_cortex_running / nb
         avg_pet_diff = pet_diff_running / nb
         avg_grad_cos = grad_cos_running / nb if has_aux_grads else None
         avg_grad_recon_shared = grad_norm_recon_shared_running / nb if has_aux_grads else None
@@ -986,6 +993,8 @@ def train_prompt_residual_braak(
         val_recon_epoch: Optional[float] = None
         val_roi_epoch: Optional[float] = None
         val_score_epoch: Optional[float] = None
+        val_base_score_epoch: Optional[float] = None
+        val_hat_minus_base_score_epoch: Optional[float] = None
         val_braak_epoch: Optional[float] = None
         val_stage_acc_epoch: Optional[float] = None
         val_braak_mae_epoch: Optional[List[float]] = None
@@ -995,6 +1004,7 @@ def train_prompt_residual_braak(
             G.eval()
             with torch.no_grad():
                 val_recon, val_roi_sum, val_braak_sum, v_batches = 0.0, 0.0, 0.0, 0
+                val_base_recon, val_base_roi_sum, v_base_batches = 0.0, 0.0, 0
                 # Stage accuracy and Braak MAE/correlation collectors
                 all_stage_pred, all_stage_gt = [], []
                 all_braak_pred, all_braak_gt = [], []
@@ -1021,16 +1031,24 @@ def train_prompt_residual_braak(
                                                  stage_prompt_weights=None,
                                                  return_aux=True)
                         fake_eval = pet_hat_v.float()
+                        base_eval = aux_v["pet_base"].float()
                         pet_eval = pet5v.float()
                         if MASK_GLOBAL_RECON and brain5_v is not None:
-                            fake_eval = fake_eval * brain5_v.float()
-                            pet_eval = pet_eval * brain5_v.float()
+                            brain_mask_v = brain5_v.float()
+                            fake_eval = fake_eval * brain_mask_v
+                            base_eval = base_eval * brain_mask_v
+                            pet_eval = pet_eval * brain_mask_v
                         loss_l1_v = l1_loss(fake_eval, pet_eval)
+                        base_loss_l1_v = l1_loss(base_eval, pet_eval)
                         ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
+                        base_ssim_v = ssim3d(base_eval, pet_eval, data_range=data_range)
                         val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
+                        val_base_recon += (base_loss_l1_v + (1.0 - base_ssim_v)).item()
+                        v_base_batches += 1
                         # Val ROI loss
                         if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
                             val_roi_sum += _masked_l1_high_uptake(fake_eval, pet_eval, cortex5_v.float()).item()
+                            val_base_roi_sum += _masked_l1_high_uptake(base_eval, pet_eval, cortex5_v.float()).item()
                         val_braak_sum += F.smooth_l1_loss(aux_v["braak_pred"].float(), braak_v.float()).item()
 
                         # Collect stage predictions (ablation >= 4)
@@ -1061,6 +1079,12 @@ def train_prompt_residual_braak(
                 val_recon_epoch = val_recon
                 val_roi_epoch = val_roi_sum
                 val_score_epoch = val_score
+                if v_base_batches > 0:
+                    val_base_recon /= v_base_batches
+                    val_base_roi_sum /= v_base_batches
+                    val_base_score = val_base_recon + VAL_ROI_WEIGHT * val_base_roi_sum
+                    val_base_score_epoch = val_base_score
+                    val_hat_minus_base_score_epoch = val_score - val_base_score
                 val_braak_epoch = val_braak_sum
                 hist["val_recon"].append(val_recon)
                 hist["val_roi"].append(val_roi_sum)
@@ -1196,6 +1220,8 @@ def train_prompt_residual_braak(
                 # Residual branch
                 "residual/delta_in_cortex": avg_delta_in,
                 "residual/delta_out_cortex": avg_delta_out,
+                "residual/alpha_delta_in_cortex": avg_alpha_delta_in,
+                "residual/alpha_delta_out_cortex": avg_alpha_delta_out,
                 "residual/in_out_ratio": avg_delta_in / (avg_delta_out + 1e-12),
                 "residual/pet_hat_minus_base": avg_pet_diff,
             }
@@ -1211,7 +1237,12 @@ def train_prompt_residual_braak(
                 log_dict["val/roi_loss"] = val_roi_epoch
             if val_score_epoch is not None:
                 log_dict["val/score"] = val_score_epoch
+                log_dict["val/hat_score"] = val_score_epoch
                 log_dict["val/best_score"] = best_val
+            if val_base_score_epoch is not None:
+                log_dict["val/base_score"] = val_base_score_epoch
+            if val_hat_minus_base_score_epoch is not None:
+                log_dict["val/hat_minus_base_score"] = val_hat_minus_base_score_epoch
             if val_braak_epoch is not None:
                 log_dict["val/braak_loss"] = val_braak_epoch
             if val_stage_acc_epoch is not None:
