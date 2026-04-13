@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="batch1_128_new_sup7_braak5_fold5_os5_aug_5"
+export RUN_NAME="batch1_128_new_sup9_braak5_fold5_os5_aug_5"
 export FOLD_INDEX=4
 
 export MODEL_VARIANT="prompt_residual_braak"
@@ -43,7 +43,7 @@ export ABLATION_STEP=5
 export LAMBDA_STAGE_ORD=0.0
 export LAMBDA_DELTA_OUT=0.0
 export LAMBDA_BRAAK=0.5
-export LAMBDA_DELTA_SUP=0.7
+export LAMBDA_DELTA_SUP=0.9
 export USE_GT_STAGE_HINT_TRAIN=0
 
 # Oversampling (train only)
