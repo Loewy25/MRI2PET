@@ -4,11 +4,24 @@ import matplotlib.pyplot as plt
 from typing import Dict, Sequence
 import csv
 
+def _has_series(history: Dict[str, Sequence[float]], key: str, require_nonzero: bool = False) -> bool:
+    vals = history.get(key, [])
+    if len(vals) == 0:
+        return False
+    if not require_nonzero:
+        return True
+    return any(abs(float(v)) > 1e-12 for v in vals)
+
 def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     n_plots = 1
-    has_aux = any(k in history for k in ("train_stage_ord", "train_braak", "train_delta_out", "train_alpha"))
+    has_aux = (
+        _has_series(history, "train_braak")
+        or _has_series(history, "train_delta_sup")
+        or _has_series(history, "train_stage_ord", require_nonzero=True)
+        or _has_series(history, "train_delta_out", require_nonzero=True)
+    )
     if has_aux:
-        n_plots = 3
+        n_plots = 2
 
     fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 5))
     if n_plots == 1:
@@ -34,27 +47,18 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     if has_aux:
         # Panel 2: Aux losses
         ax2 = axes[1]
-        if "train_stage_ord" in history:
-            ax2.plot(history["train_stage_ord"], label="Stage Ord (BCE)")
-        if "train_braak" in history:
+        if _has_series(history, "train_braak"):
             ax2.plot(history["train_braak"], label="Braak (SmoothL1)")
-        if "train_delta_out" in history:
+        if _has_series(history, "train_delta_sup"):
+            ax2.plot(history["train_delta_sup"], label="Delta Sup")
+        if _has_series(history, "train_stage_ord", require_nonzero=True):
+            ax2.plot(history["train_stage_ord"], label="Stage Ord (BCE)")
+        if _has_series(history, "train_delta_out", require_nonzero=True):
             ax2.plot(history["train_delta_out"], label="Delta Out Reg")
-        if "val_braak" in history and len(history["val_braak"]) > 0:
-            ax2.plot(history["val_braak"], label="Val Braak")
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Loss")
         ax2.set_title("Auxiliary Losses")
         ax2.legend()
-
-        # Panel 3: Alpha
-        ax3 = axes[2]
-        if "train_alpha" in history:
-            ax3.plot(history["train_alpha"], label="Alpha (sigmoid)")
-        ax3.set_xlabel("Epoch")
-        ax3.set_ylabel("Value")
-        ax3.set_title("Residual Alpha")
-        ax3.legend()
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)

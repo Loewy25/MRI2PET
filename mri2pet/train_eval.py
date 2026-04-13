@@ -687,6 +687,9 @@ def train_prompt_residual_braak(
     hist: Dict[str, list] = {
         "train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": [],
         "train_stage_ord": [], "train_braak": [], "train_delta_out": [], "train_delta_sup": [],
+        "train_recon_global": [], "train_recon_roi": [], "train_gan": [], "train_aux": [],
+        "val_base_recon": [], "val_base_roi": [],
+        "val_hat_minus_base_recon": [], "val_hat_minus_base_roi": [],
         "val_braak": [],
     }
 
@@ -710,6 +713,7 @@ def train_prompt_residual_braak(
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
         stage_ord_running, braak_running, delta_out_running, delta_sup_running = 0.0, 0.0, 0.0, 0.0
+        recon_global_running, recon_roi_running, gan_running, aux_running = 0.0, 0.0, 0.0, 0.0
         w_global_running, w_roi_running, w_gan_running = 0.0, 0.0, 0.0
         grad_recon_running, grad_roi_running, grad_gan_running = 0.0, 0.0, 0.0
         # D(real)/D(fake) tracking
@@ -969,6 +973,10 @@ def train_prompt_residual_braak(
             braak_running += loss_braak.detach().item()
             delta_out_running += loss_delta_out.detach().item()
             delta_sup_running += loss_delta_sup.detach().item()
+            recon_global_running += loss_recon_global.detach().item()
+            recon_roi_running += loss_recon_roi.detach().item()
+            gan_running += loss_gan.detach().item()
+            aux_running += loss_aux.detach().item()
             n_batches += 1
 
         # ---- Epoch aggregates ----
@@ -979,6 +987,10 @@ def train_prompt_residual_braak(
         avg_braak = braak_running / nb
         avg_dout = delta_out_running / nb
         avg_dsup = delta_sup_running / nb
+        avg_recon_global = recon_global_running / nb
+        avg_recon_roi = recon_roi_running / nb
+        avg_gan = gan_running / nb
+        avg_aux = aux_running / nb
         avg_w_global = w_global_running / nb
         avg_w_roi = w_roi_running / nb
         avg_w_gan = w_gan_running / nb
@@ -997,11 +1009,19 @@ def train_prompt_residual_braak(
         hist["train_braak"].append(avg_braak)
         hist["train_delta_out"].append(avg_dout)
         hist["train_delta_sup"].append(avg_dsup)
+        hist["train_recon_global"].append(avg_recon_global)
+        hist["train_recon_roi"].append(avg_recon_roi)
+        hist["train_gan"].append(avg_gan)
+        hist["train_aux"].append(avg_aux)
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
         val_roi_epoch: Optional[float] = None
         val_score_epoch: Optional[float] = None
+        val_base_recon_epoch: Optional[float] = None
+        val_base_roi_epoch: Optional[float] = None
+        val_hat_minus_base_recon_epoch: Optional[float] = None
+        val_hat_minus_base_roi_epoch: Optional[float] = None
         val_base_score_epoch: Optional[float] = None
         val_hat_minus_base_score_epoch: Optional[float] = None
         val_braak_epoch: Optional[float] = None
@@ -1091,6 +1111,10 @@ def train_prompt_residual_braak(
                 if v_base_batches > 0:
                     val_base_recon /= v_base_batches
                     val_base_roi_sum /= v_base_batches
+                    val_base_recon_epoch = val_base_recon
+                    val_base_roi_epoch = val_base_roi_sum
+                    val_hat_minus_base_recon_epoch = val_recon - val_base_recon
+                    val_hat_minus_base_roi_epoch = val_roi_sum - val_base_roi_sum
                     val_base_score = val_base_recon + VAL_ROI_WEIGHT * val_base_roi_sum
                     val_base_score_epoch = val_base_score
                     val_hat_minus_base_score_epoch = val_score - val_base_score
@@ -1098,6 +1122,14 @@ def train_prompt_residual_braak(
                 hist["val_recon"].append(val_recon)
                 hist["val_roi"].append(val_roi_sum)
                 hist["val_score"].append(val_score)
+                if val_base_recon_epoch is not None:
+                    hist["val_base_recon"].append(val_base_recon_epoch)
+                if val_base_roi_epoch is not None:
+                    hist["val_base_roi"].append(val_base_roi_epoch)
+                if val_hat_minus_base_recon_epoch is not None:
+                    hist["val_hat_minus_base_recon"].append(val_hat_minus_base_recon_epoch)
+                if val_hat_minus_base_roi_epoch is not None:
+                    hist["val_hat_minus_base_roi"].append(val_hat_minus_base_roi_epoch)
                 hist["val_braak"].append(val_braak_sum)
 
                 # Stage accuracy
@@ -1212,6 +1244,10 @@ def train_prompt_residual_braak(
                 "train/braak_loss": avg_braak,
                 "train/delta_out_loss": avg_dout,
                 "train/delta_sup_loss": avg_dsup,
+                "train/recon_global_loss": avg_recon_global,
+                "train/recon_roi_loss": avg_recon_roi,
+                "train/gan_loss": avg_gan,
+                "train/aux_loss": avg_aux,
                 # LR / freeze status
                 "optim/lr_base": cur_lr_base,
                 "optim/lr_new": cur_lr_new,
@@ -1242,6 +1278,14 @@ def train_prompt_residual_braak(
                 log_dict["val/recon_loss"] = val_recon_epoch
             if val_roi_epoch is not None:
                 log_dict["val/roi_loss"] = val_roi_epoch
+            if val_base_recon_epoch is not None:
+                log_dict["val/base_recon_loss"] = val_base_recon_epoch
+            if val_base_roi_epoch is not None:
+                log_dict["val/base_roi_loss"] = val_base_roi_epoch
+            if val_hat_minus_base_recon_epoch is not None:
+                log_dict["val/hat_minus_base_recon"] = val_hat_minus_base_recon_epoch
+            if val_hat_minus_base_roi_epoch is not None:
+                log_dict["val/hat_minus_base_roi"] = val_hat_minus_base_roi_epoch
             if val_score_epoch is not None:
                 log_dict["val/score"] = val_score_epoch
                 log_dict["val/hat_score"] = val_score_epoch

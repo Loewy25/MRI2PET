@@ -101,6 +101,25 @@ def init_wandb_run():
         return None
 
 
+def log_wandb_output_files(wandb_run, run_name: str, paths):
+    if wandb_run is None:
+        return
+    safe_name = run_name.replace("/", "_")
+    artifact = wandb.Artifact(f"{safe_name}-outputs", type="run_outputs")
+    added = []
+    for path in paths:
+        if path and os.path.isfile(path):
+            artifact.add_file(path, name=os.path.basename(path))
+            added.append(os.path.basename(path))
+    if not added:
+        return
+    try:
+        wandb_run.log_artifact(artifact)
+        print(f"Logged W&B output artifact with files: {', '.join(added)}")
+    except Exception as exc:
+        print(f"[WARN] Failed to log W&B output artifact: {exc}")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("MRI2PET Training Run")
@@ -320,4 +339,14 @@ if __name__ == "__main__":
     print(f"Saved test metrics to: {metrics_txt}")
 
     if wandb_run is not None:
+        output_files = [
+            curves_path,
+            csv_path,
+            os.path.join(OUT_RUN, "per_subject_metrics.csv"),
+            os.path.join(OUT_RUN, "per_subject_aux.csv"),
+            os.path.join(OUT_RUN, "test_metrics_summary.json"),
+            os.path.join(CKPT_DIR, "best_G.pth"),
+            os.path.join(CKPT_DIR, "best_D.pth"),
+        ]
+        log_wandb_output_files(wandb_run, RUN_NAME, output_files)
         wandb.finish()
