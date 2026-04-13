@@ -40,7 +40,11 @@ export MODEL_VARIANT="prompt_residual_braak"
 export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold5_os65_aug_5/checkpoints/best_G.pth"
 
 export ABLATION_STEP=5
-export RESIDUAL_ALPHA_INIT=-3.0
+export LAMBDA_STAGE_ORD=0.0
+export LAMBDA_DELTA_OUT=0.0
+export LAMBDA_BRAAK=0.25
+export LAMBDA_DELTA_SUP=0.5
+export USE_GT_STAGE_HINT_TRAIN=0
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
@@ -63,6 +67,5 @@ export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
 python -u main.py
-
 
 

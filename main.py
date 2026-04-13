@@ -14,7 +14,7 @@ from mri2pet.config import (
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
     MODEL_VARIANT, BASE_PRETRAIN_CKPT,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT,
-    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
+    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
@@ -73,6 +73,7 @@ def init_wandb_run():
             "lambda_stage_ord": LAMBDA_STAGE_ORD,
             "lambda_braak": LAMBDA_BRAAK,
             "lambda_delta_out": LAMBDA_DELTA_OUT,
+            "lambda_delta_sup": LAMBDA_DELTA_SUP,
             "clinical_dim": CLINICAL_DIM,
             "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
             "use_checkpoint": USE_CHECKPOINT,
@@ -121,7 +122,10 @@ if __name__ == "__main__":
         print(f"Ablation step:  {ABLATION_STEP} ({step_desc.get(ABLATION_STEP, '?')})")
         print(f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  USE_STAGE_PROMPT={USE_STAGE_PROMPT}")
         print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
-        print(f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  delta_out: {LAMBDA_DELTA_OUT}")
+        print(
+            f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  "
+            f"delta_out: {LAMBDA_DELTA_OUT}  delta_sup: {LAMBDA_DELTA_SUP}"
+        )
         print(f"Mask global:    {MASK_GLOBAL_RECON}  GT stage hint: {USE_GT_STAGE_HINT_TRAIN}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
     print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")

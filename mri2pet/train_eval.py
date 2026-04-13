@@ -15,7 +15,7 @@ from .config import (
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT,
-    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT,
+    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT, LAMBDA_DELTA_SUP,
     USE_GT_STAGE_HINT_TRAIN, MASK_GLOBAL_RECON,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
     AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT,
@@ -686,7 +686,7 @@ def train_prompt_residual_braak(
 
     hist: Dict[str, list] = {
         "train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": [],
-        "train_stage_ord": [], "train_braak": [], "train_delta_out": [],
+        "train_stage_ord": [], "train_braak": [], "train_delta_out": [], "train_delta_sup": [],
         "val_braak": [],
     }
 
@@ -709,7 +709,7 @@ def train_prompt_residual_braak(
 
         t0 = time.time()
         g_running, d_running, n_batches = 0.0, 0.0, 0
-        stage_ord_running, braak_running, delta_out_running = 0.0, 0.0, 0.0
+        stage_ord_running, braak_running, delta_out_running, delta_sup_running = 0.0, 0.0, 0.0, 0.0
         w_global_running, w_roi_running, w_gan_running = 0.0, 0.0, 0.0
         grad_recon_running, grad_roi_running, grad_gan_running = 0.0, 0.0, 0.0
         # D(real)/D(fake) tracking
@@ -719,7 +719,12 @@ def train_prompt_residual_braak(
         pet_diff_running = 0.0
         # Gradient conflict tracking (recon vs aux on shared params)
         grad_cos_running, grad_norm_recon_shared_running, grad_norm_aux_shared_running = 0.0, 0.0, 0.0
-        has_aux_grads = (LAMBDA_STAGE_ORD > 0 or LAMBDA_BRAAK > 0 or LAMBDA_DELTA_OUT > 0)
+        has_aux_grads = (
+            LAMBDA_STAGE_ORD > 0
+            or LAMBDA_BRAAK > 0
+            or LAMBDA_DELTA_OUT > 0
+            or LAMBDA_DELTA_SUP > 0
+        )
         # Precompute trainable params for gradient conflict monitoring (changes at epoch boundaries only)
         shared_params_for_conflict = [p for p in G.parameters() if p.requires_grad] if has_aux_grads else []
 
@@ -882,9 +887,19 @@ def train_prompt_residual_braak(
             else:
                 loss_delta_out = delta_pet.float().abs().mean() * 0.01
 
+            # Direct residual supervision toward the base model's error
+            pet_base = aux["pet_base"].float()
+            delta_pred = delta_pet.float()
+            delta_gt = pet5_f32 - pet_base.detach()
+            brain_w = brain5.float() if brain5 is not None else torch.ones_like(delta_gt)
+            cortex_w = cortex5.float() if cortex5 is not None else torch.zeros_like(delta_gt)
+            delta_sup_w = (0.2 * brain_w) + (0.8 * cortex_w)
+            loss_delta_sup = ((delta_pred - delta_gt).abs() * delta_sup_w).sum() / (delta_sup_w.sum() + 1e-8)
+
             loss_aux = (LAMBDA_STAGE_ORD * loss_stage_ord
                         + LAMBDA_BRAAK * loss_braak
-                        + LAMBDA_DELTA_OUT * loss_delta_out)
+                        + LAMBDA_DELTA_OUT * loss_delta_out
+                        + LAMBDA_DELTA_SUP * loss_delta_sup)
 
             # ---- Residual branch behavior ----
             with torch.no_grad():
@@ -953,6 +968,7 @@ def train_prompt_residual_braak(
             stage_ord_running += loss_stage_ord.detach().item()
             braak_running += loss_braak.detach().item()
             delta_out_running += loss_delta_out.detach().item()
+            delta_sup_running += loss_delta_sup.detach().item()
             n_batches += 1
 
         # ---- Epoch aggregates ----
@@ -962,6 +978,7 @@ def train_prompt_residual_braak(
         avg_stage = stage_ord_running / nb
         avg_braak = braak_running / nb
         avg_dout = delta_out_running / nb
+        avg_dsup = delta_sup_running / nb
         avg_w_global = w_global_running / nb
         avg_w_roi = w_roi_running / nb
         avg_w_gan = w_gan_running / nb
@@ -979,6 +996,7 @@ def train_prompt_residual_braak(
         hist["train_stage_ord"].append(avg_stage)
         hist["train_braak"].append(avg_braak)
         hist["train_delta_out"].append(avg_dout)
+        hist["train_delta_sup"].append(avg_dsup)
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
@@ -1137,7 +1155,8 @@ def train_prompt_residual_braak(
                 print(
                     f"      base={frozen_str}  lr_new={cur_lr_new:.1e}  "
                     f"[MGDA] w_g={avg_w_global:.3f} w_r={avg_w_roi:.3f} w_a={avg_w_gan:.3f}  "
-                    f"[AUX] stage={avg_stage:.4f} braak={avg_braak:.4f} dout={avg_dout:.4f}"
+                    f"[AUX] stage={avg_stage:.4f} braak={avg_braak:.4f} "
+                    f"dout={avg_dout:.4f} dsup={avg_dsup:.4f}"
                 )
                 print(
                     f"      [GAN] D(real)={avg_d_real:.4f}  D(fake)={avg_d_fake:.4f}  "
@@ -1192,6 +1211,7 @@ def train_prompt_residual_braak(
                 "train/stage_ord_loss": avg_stage,
                 "train/braak_loss": avg_braak,
                 "train/delta_out_loss": avg_dout,
+                "train/delta_sup_loss": avg_dsup,
                 # LR / freeze status
                 "optim/lr_base": cur_lr_base,
                 "optim/lr_new": cur_lr_new,
