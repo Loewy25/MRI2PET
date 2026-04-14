@@ -32,19 +32,24 @@ export WANDB__SERVICE_WAIT=300
 export RUN_NAME="batch1_128_new_sup5_braak25_fold5_os5_aug_5"
 export FOLD_INDEX=4
 
-export MODEL_VARIANT="prompt_residual_braak"
+export MODEL_VARIANT="residual_spatial_prior"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch1_128_fold1_os65_aug_5/checkpoints/best_G.pth"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold2_os65_aug_5/checkpoints/best_G.pth"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold3_os65_aug_5/checkpoints/best_G.pth"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold4_os65_aug_5/checkpoints/best_G.pth"
 export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold5_os65_aug_5/checkpoints/best_G.pth"
 
-export ABLATION_STEP=5
-export LAMBDA_STAGE_ORD=0.0
-export LAMBDA_DELTA_OUT=0.0
+export USE_FLAIR=1
+export USE_CLINICAL=1
+export USE_BRAAK_HEAD=1
+export USE_SPATIAL_PRIOR=1
 export LAMBDA_BRAAK=0.25
 export LAMBDA_DELTA_SUP=0.5
-export USE_GT_STAGE_HINT_TRAIN=0
+export SPATIAL_PRIOR_K=4
+export SPATIAL_PRIOR_LR_MULT=3.0
+export PRIOR_GAIN_INIT_B=0.10
+export PRIOR_GAIN_INIT_X4=0.10
+export PRIOR_GAIN_INIT_X3=0.05
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
@@ -67,5 +72,4 @@ export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
 python -u main.py
-
 

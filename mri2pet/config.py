@@ -118,39 +118,39 @@ DEMOGRAPHICS_CSV = os.environ.get(
 # =========================
 # Model Variant
 # =========================
-MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "baseline")
+MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "residual_spatial_prior")
 BASE_PRETRAIN_CKPT = os.environ.get("BASE_PRETRAIN_CKPT", "")
 
 # =========================
-# Prompt-Residual-Braak settings
+# Residual-Spatial-Prior settings
 # =========================
 FREEZE_BASE_EPOCHS = _env_int("FREEZE_BASE_EPOCHS", 10)
 BASE_LR_MULT = _env_float("BASE_LR_MULT", 0.25)
-DETACH_BASE_LATENT_FOR_AUX = _env_bool("DETACH_BASE_LATENT_FOR_AUX", True)
+DETACH_BASE_LATENT_FOR_PRIOR = _env_bool(
+    "DETACH_BASE_LATENT_FOR_PRIOR",
+    _env_bool("DETACH_BASE_LATENT_FOR_AUX", True),
+)
 
 CLINICAL_DIM = _env_int("CLINICAL_DIM", 10)
 PROMPT_HIDDEN_DIM = _env_int("PROMPT_HIDDEN_DIM", 128)
 
 # =========================
-# Ablation Step (1-5)
+# Residual-side conditioning
 # =========================
-# 1: base + residual decoder only (T1)
-# 2: + FLAIR spatial prompts
-# 3: + Clinical FiLM
-# 4: + Stage prompt bank + CORAL ordinal loss
-# 5: + Braak regression loss (full model)
-ABLATION_STEP = _env_int("ABLATION_STEP", 1)
-USE_FLAIR = _env_bool("USE_FLAIR", ABLATION_STEP >= 2)
-USE_CLINICAL = _env_bool("USE_CLINICAL", ABLATION_STEP >= 3)
-USE_STAGE_PROMPT = _env_bool("USE_STAGE_PROMPT", ABLATION_STEP >= 4)
+USE_FLAIR = _env_bool("USE_FLAIR", True)
+USE_CLINICAL = _env_bool("USE_CLINICAL", True)
+USE_BRAAK_HEAD = _env_bool("USE_BRAAK_HEAD", True)
+USE_SPATIAL_PRIOR = _env_bool("USE_SPATIAL_PRIOR", True)
 
-LAMBDA_DELTA_OUT = _env_float("LAMBDA_DELTA_OUT", 0.0)
-LAMBDA_STAGE_ORD = _env_float("LAMBDA_STAGE_ORD", 0.0)
-LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.25 if ABLATION_STEP >= 5 else 0.0)
+LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.25)
 LAMBDA_DELTA_SUP = _env_float("LAMBDA_DELTA_SUP", 0.5)
-
-USE_GT_STAGE_HINT_TRAIN = _env_bool("USE_GT_STAGE_HINT_TRAIN", False)
 MASK_GLOBAL_RECON = _env_bool("MASK_GLOBAL_RECON", True)
+
+SPATIAL_PRIOR_K = _env_int("SPATIAL_PRIOR_K", 4)
+SPATIAL_PRIOR_LR_MULT = _env_float("SPATIAL_PRIOR_LR_MULT", 3.0)
+PRIOR_GAIN_INIT_B = _env_float("PRIOR_GAIN_INIT_B", 0.10)
+PRIOR_GAIN_INIT_X4 = _env_float("PRIOR_GAIN_INIT_X4", 0.10)
+PRIOR_GAIN_INIT_X3 = _env_float("PRIOR_GAIN_INIT_X3", 0.05)
 
 # =========================
 # Validation Score

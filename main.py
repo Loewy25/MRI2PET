@@ -13,20 +13,22 @@ from mri2pet.config import (
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
     MODEL_VARIANT, BASE_PRETRAIN_CKPT,
-    FREEZE_BASE_EPOCHS, BASE_LR_MULT,
-    LAMBDA_STAGE_ORD, LAMBDA_BRAAK, LAMBDA_DELTA_OUT, LAMBDA_DELTA_SUP,
+    FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
+    LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
+    USE_FLAIR, USE_CLINICAL, USE_BRAAK_HEAD, USE_SPATIAL_PRIOR,
+    SPATIAL_PRIOR_K, SPATIAL_PRIOR_LR_MULT,
+    PRIOR_GAIN_INIT_B, PRIOR_GAIN_INIT_X4, PRIOR_GAIN_INIT_X3,
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
-    MASK_GLOBAL_RECON, USE_GT_STAGE_HINT_TRAIN,
-    ABLATION_STEP, USE_FLAIR, USE_CLINICAL, USE_STAGE_PROMPT,
+    MASK_GLOBAL_RECON,
 )
 
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
-from mri2pet.models import Generator, CondPatchDiscriminator3D, PromptResidualBraakGenerator
-from mri2pet.train_eval import train_paggan, train_prompt_residual_braak, evaluate_and_save
+from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator
+from mri2pet.train_eval import train_paggan, train_residual_spatial_prior, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
 from mri2pet.data import CLINICAL_FEATURE_NAMES
 
@@ -66,13 +68,12 @@ def init_wandb_run():
         "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
     }
 
-    if MODEL_VARIANT == "prompt_residual_braak":
+    if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
         wandb_config.update({
             "freeze_base_epochs": FREEZE_BASE_EPOCHS,
             "base_lr_mult": BASE_LR_MULT,
-            "lambda_stage_ord": LAMBDA_STAGE_ORD,
+            "detach_base_latent_for_prior": DETACH_BASE_LATENT_FOR_PRIOR,
             "lambda_braak": LAMBDA_BRAAK,
-            "lambda_delta_out": LAMBDA_DELTA_OUT,
             "lambda_delta_sup": LAMBDA_DELTA_SUP,
             "clinical_dim": CLINICAL_DIM,
             "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
@@ -81,10 +82,15 @@ def init_wandb_run():
             "lr_plateau_patience": LR_PLATEAU_PATIENCE,
             "early_stop_patience": EARLY_STOP_PATIENCE,
             "val_roi_weight": VAL_ROI_WEIGHT,
-            "ablation_step": ABLATION_STEP,
             "use_flair": USE_FLAIR,
             "use_clinical": USE_CLINICAL,
-            "use_stage_prompt": USE_STAGE_PROMPT,
+            "use_braak_head": USE_BRAAK_HEAD,
+            "use_spatial_prior": USE_SPATIAL_PRIOR,
+            "spatial_prior_k": SPATIAL_PRIOR_K,
+            "spatial_prior_lr_mult": SPATIAL_PRIOR_LR_MULT,
+            "prior_gain_init_b": PRIOR_GAIN_INIT_B,
+            "prior_gain_init_x4": PRIOR_GAIN_INIT_X4,
+            "prior_gain_init_x3": PRIOR_GAIN_INIT_X3,
         })
 
     try:
@@ -136,16 +142,22 @@ if __name__ == "__main__":
     print(f"Epochs:         {EPOCHS}")
     print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
     print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
-    if MODEL_VARIANT == "prompt_residual_braak":
-        step_desc = {1: "base+residual", 2: "+FLAIR", 3: "+Clinical", 4: "+Stage/CORAL", 5: "+Braak(full)"}
-        print(f"Ablation step:  {ABLATION_STEP} ({step_desc.get(ABLATION_STEP, '?')})")
-        print(f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  USE_STAGE_PROMPT={USE_STAGE_PROMPT}")
+    if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
+        print("Residual spatial prior model:")
+        print(
+            f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  "
+            f"USE_BRAAK_HEAD={USE_BRAAK_HEAD}  USE_SPATIAL_PRIOR={USE_SPATIAL_PRIOR}"
+        )
         print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
         print(
-            f"Lambda stage:   {LAMBDA_STAGE_ORD}  braak: {LAMBDA_BRAAK}  "
-            f"delta_out: {LAMBDA_DELTA_OUT}  delta_sup: {LAMBDA_DELTA_SUP}"
+            f"Detach z_t1:    {DETACH_BASE_LATENT_FOR_PRIOR}  braak: {LAMBDA_BRAAK}  "
+            f"delta_sup: {LAMBDA_DELTA_SUP}"
         )
-        print(f"Mask global:    {MASK_GLOBAL_RECON}  GT stage hint: {USE_GT_STAGE_HINT_TRAIN}")
+        print(
+            f"Spatial prior:  K={SPATIAL_PRIOR_K}  lr_mult={SPATIAL_PRIOR_LR_MULT}  "
+            f"gain_b={PRIOR_GAIN_INIT_B}  gain_x4={PRIOR_GAIN_INIT_X4}  gain_x3={PRIOR_GAIN_INIT_X3}"
+        )
+        print(f"Mask global:    {MASK_GLOBAL_RECON}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
     print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")
     print(f"Augmentation:   {AUG_ENABLE} (prob={AUG_PROB})")
@@ -243,10 +255,10 @@ if __name__ == "__main__":
     print("-" * 70)
 
     # Instantiate models
-    is_prompt_residual = (MODEL_VARIANT == "prompt_residual_braak")
+    is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
 
     if is_prompt_residual:
-        G = PromptResidualBraakGenerator(
+        G = ResidualSpatialPriorGenerator(
             in_ch=1, out_ch=1,
             use_checkpoint=USE_CHECKPOINT,
             clinical_dim=CLINICAL_DIM,
@@ -284,7 +296,7 @@ if __name__ == "__main__":
 
     # Train
     if is_prompt_residual:
-        out = train_prompt_residual_braak(
+        out = train_residual_spatial_prior(
             G, D, train_loader, val_loader,
             device=device, epochs=EPOCHS, gamma=GAMMA,
             data_range=DATA_RANGE,

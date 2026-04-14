@@ -7,8 +7,15 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .config import (
-    DETACH_BASE_LATENT_FOR_AUX,
-    USE_FLAIR, USE_CLINICAL, USE_STAGE_PROMPT,
+    DETACH_BASE_LATENT_FOR_PRIOR,
+    PRIOR_GAIN_INIT_B,
+    PRIOR_GAIN_INIT_X3,
+    PRIOR_GAIN_INIT_X4,
+    SPATIAL_PRIOR_K,
+    USE_BRAAK_HEAD,
+    USE_CLINICAL,
+    USE_FLAIR,
+    USE_SPATIAL_PRIOR,
 )
 from .utils import _pad_or_crop_to
 
@@ -236,7 +243,7 @@ class CondPatchDiscriminator3D(nn.Module):
 
 
 # =========================================================================
-# NEW: Prompt-Residual-Braak modules
+# NEW: Residual-spatial-prior modules
 # =========================================================================
 
 # --- A. FlairPromptEncoder3D ---
@@ -327,35 +334,139 @@ class ClinicalFiLMConditioner(nn.Module):
         return z, film
 
 
-# --- C. OrdinalStageHead ---
-class OrdinalStageHead(nn.Module):
+# --- C. BraakHead ---
+class BraakHead(nn.Module):
     def __init__(self, in_dim: int = 128):
         super().__init__()
-        self.stage_logits = nn.Linear(in_dim, 3)
-        self.braak_head = nn.Linear(in_dim, 3)
+        self.head = nn.Linear(in_dim, 3)
 
-    def forward(self, z_fuse: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.stage_logits(z_fuse), self.braak_head(z_fuse)
+    def forward(self, z_fuse: torch.Tensor) -> torch.Tensor:
+        return self.head(z_fuse)
 
 
-# --- D. StagePromptBank ---
-class StagePromptBank(nn.Module):
-    def __init__(self):
+# --- D. CortexSpatialPrior ---
+class CortexSpatialPrior(nn.Module):
+    def __init__(self, z_dim: int = 128, num_basis: int = SPATIAL_PRIOR_K):
         super().__init__()
-        self.bank_b = nn.Parameter(torch.randn(4, 128) * 0.01)
-        self.bank_d1 = nn.Parameter(torch.randn(4, 128) * 0.01)
-        self.bank_d2 = nn.Parameter(torch.randn(4, 64) * 0.01)
-        self.bank_d3 = nn.Parameter(torch.randn(4, 32) * 0.01)
-        self.bank_d4 = nn.Parameter(torch.randn(4, 16) * 0.01)
+        self.router = nn.Linear(z_dim, num_basis)
+        self.basis_low = nn.Parameter(torch.randn(num_basis, 1, 8, 8, 8) * 0.01)
+        self.proj_b = nn.Conv3d(1, 128, kernel_size=1, bias=True)
+        self.proj_x4 = nn.Conv3d(1, 128, kernel_size=1, bias=True)
+        self.proj_x3 = nn.Conv3d(1, 64, kernel_size=1, bias=True)
+        self.gain_b = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_B)))
+        self.gain_x4 = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_X4)))
+        self.gain_x3 = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_X3)))
 
-    def forward(self, stage_weights: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return {
-            "b": stage_weights @ self.bank_b,
-            "d1": stage_weights @ self.bank_d1,
-            "d2": stage_weights @ self.bank_d2,
-            "d3": stage_weights @ self.bank_d3,
-            "d4": stage_weights @ self.bank_d4,
+        for proj in [self.proj_b, self.proj_x4, self.proj_x3]:
+            nn.init.normal_(proj.weight, mean=0.0, std=0.02)
+            nn.init.zeros_(proj.bias)
+
+    def zero_prior_maps(self, feats: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        dev = feats["b"].device
+        dtype = feats["b"].dtype
+        B = feats["b"].size(0)
+        prior_maps = {
+            "b": torch.zeros(B, 128, *feats["b"].shape[2:], device=dev, dtype=dtype),
+            "x4": torch.zeros(B, 128, *feats["x4"].shape[2:], device=dev, dtype=dtype),
+            "x3": torch.zeros(B, 64, *feats["x3"].shape[2:], device=dev, dtype=dtype),
         }
+        zero = torch.zeros((), device=dev, dtype=torch.float32)
+        prior_stats = {
+            "in_cortex_mag": zero,
+            "out_cortex_mag": zero,
+            "router_entropy": zero,
+            "router_top1_mean": zero,
+        }
+        return prior_maps, prior_stats
+
+    def _resize_mask(
+        self,
+        mask: Optional[torch.Tensor],
+        size: Tuple[int, int, int],
+        B: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        fill: float,
+    ) -> torch.Tensor:
+        if mask is None:
+            return torch.full((B, 1, *size), fill, device=device, dtype=dtype)
+        return F.interpolate(mask.float(), size=size, mode="nearest").to(device=device, dtype=dtype)
+
+    def _mix_basis(
+        self,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.einsum("bk,kcdhw->bcdhw", weights, self.basis_low.to(dtype=weights.dtype))
+
+    def _build_prior(
+        self,
+        prior_low: torch.Tensor,
+        proj: nn.Conv3d,
+        gain: nn.Parameter,
+        feat: torch.Tensor,
+        brain_mask: Optional[torch.Tensor],
+        cortex_mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B = feat.size(0)
+        size = tuple(feat.shape[2:])
+        device = feat.device
+        dtype = feat.dtype
+        brain_s = self._resize_mask(brain_mask, size, B, device, dtype, fill=1.0)
+        cortex_s = self._resize_mask(cortex_mask, size, B, device, dtype, fill=0.0)
+        gate_s = (0.2 * brain_s) + (0.8 * cortex_s)
+        prior_s = prior_low
+        if prior_s.shape[2:] != size:
+            prior_s = F.interpolate(prior_s.float(), size=size, mode="trilinear", align_corners=False).to(dtype=dtype)
+        prior_s = proj(prior_s * gate_s)
+        prior_s = gain.to(device=device, dtype=prior_s.dtype) * prior_s
+        outside_s = torch.clamp(brain_s - cortex_s, min=0.0)
+        return prior_s, cortex_s, outside_s
+
+    def forward(
+        self,
+        z_fuse: torch.Tensor,
+        brain_mask: Optional[torch.Tensor],
+        cortex_mask: Optional[torch.Tensor],
+        feats: Dict[str, torch.Tensor],
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        weights = torch.softmax(self.router(z_fuse.float()), dim=1).to(dtype=feats["b"].dtype)
+        prior_low = self._mix_basis(weights)
+
+        prior_b, cortex_b, outside_b = self._build_prior(
+            prior_low, self.proj_b, self.gain_b, feats["b"], brain_mask, cortex_mask
+        )
+        prior_x4, cortex_x4, outside_x4 = self._build_prior(
+            prior_low, self.proj_x4, self.gain_x4, feats["x4"], brain_mask, cortex_mask
+        )
+        prior_x3, cortex_x3, outside_x3 = self._build_prior(
+            prior_low, self.proj_x3, self.gain_x3, feats["x3"], brain_mask, cortex_mask
+        )
+
+        def _masked_mag(prior: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            denom = (mask.sum() * prior.size(1)).clamp(min=1.0)
+            return (prior.abs() * mask).sum() / denom
+
+        in_mag = torch.stack([
+            _masked_mag(prior_b, cortex_b),
+            _masked_mag(prior_x4, cortex_x4),
+            _masked_mag(prior_x3, cortex_x3),
+        ]).mean()
+        out_mag = torch.stack([
+            _masked_mag(prior_b, outside_b),
+            _masked_mag(prior_x4, outside_x4),
+            _masked_mag(prior_x3, outside_x3),
+        ]).mean()
+        router_entropy = -(weights.float() * torch.log(weights.float() + 1e-8)).sum(dim=1).mean()
+        router_top1_mean = weights.float().max(dim=1).values.mean()
+
+        prior_maps = {"b": prior_b, "x4": prior_x4, "x3": prior_x3}
+        prior_stats = {
+            "in_cortex_mag": in_mag.detach().float(),
+            "out_cortex_mag": out_mag.detach().float(),
+            "router_entropy": router_entropy.detach().float(),
+            "router_top1_mean": router_top1_mean.detach().float(),
+        }
+        return prior_maps, prior_stats
 
 
 # --- E. PromptFusionBlock ---
@@ -378,7 +489,6 @@ class PromptFusionBlock(nn.Module):
         base_feat: torch.Tensor,
         flair_prompt: Optional[torch.Tensor],
         film: Tuple[torch.Tensor, torch.Tensor],
-        stage_prompt: torch.Tensor,
     ) -> torch.Tensor:
         gamma, beta = film
         bp = self.proj_base(base_feat)
@@ -391,7 +501,6 @@ class PromptFusionBlock(nn.Module):
         gate = torch.sigmoid(self.gate_conv(torch.cat([bp, fp], dim=1)))
         fused = bp + gate * fp
         fused = fused * (1.0 + gamma[..., None, None, None]) + beta[..., None, None, None]
-        fused = fused + stage_prompt[..., None, None, None]
         fused = fused + self.res_conv(fused)
         return F.relu(fused)
 
@@ -422,57 +531,34 @@ class ResidualDecoder3D(nn.Module):
         feats: Dict[str, torch.Tensor],
         pf: Dict[str, torch.Tensor],
         film: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
-        stage_prompts: Dict[str, torch.Tensor],
+        prior_maps: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
         def _up(t, ref):
             return _pad_or_crop_to(self.up(t.float()).to(t.dtype), ref)
 
-        rb = self.fuse_b(feats["b"], pf["pb"], film["b"], stage_prompts["b"])
-        s4 = self.fuse_s4(feats["x4"], pf["p4"], film["d1"], stage_prompts["d1"])
+        rb = self.fuse_b(feats["b"], pf["pb"], film["b"])
+        rb = rb + _pad_or_crop_to(prior_maps["b"], rb)
+        s4 = self.fuse_s4(feats["x4"], pf["p4"], film["d1"])
+        s4 = s4 + _pad_or_crop_to(prior_maps["x4"], s4)
         d1 = self.conv_d1(torch.cat([_up(rb, s4), s4], dim=1))
 
-        s3 = self.fuse_s3(feats["x3"], pf["p3"], film["d2"], stage_prompts["d2"])
+        s3 = self.fuse_s3(feats["x3"], pf["p3"], film["d2"])
+        s3 = s3 + _pad_or_crop_to(prior_maps["x3"], s3)
         d2 = self.conv_d2(torch.cat([_up(d1, s3), s3], dim=1))
 
-        s2 = self.fuse_s2(feats["x2"], pf["p2"], film["d3"], stage_prompts["d3"])
+        s2 = self.fuse_s2(feats["x2"], pf["p2"], film["d3"])
         d3 = self.conv_d3(torch.cat([_up(d2, s2), s2], dim=1))
 
-        s1 = self.fuse_s1(feats["x1"], pf["p1"], film["d4"], stage_prompts["d4"])
+        s1 = self.fuse_s1(feats["x1"], pf["p1"], film["d4"])
         d4 = self.conv_d4(torch.cat([_up(d3, s1), s1], dim=1))
 
         return self.delta_out(d4)
 
 
 # =========================================================================
-# Utility: ordinal logits → stage probabilities
+# G. ResidualSpatialPriorGenerator — top-level wrapper
 # =========================================================================
-def ordinal_logits_to_stage_probs(logits: torch.Tensor) -> torch.Tensor:
-    p_ge1 = torch.sigmoid(logits[:, 0])
-    p_ge2 = torch.sigmoid(logits[:, 1])
-    p_ge3 = torch.sigmoid(logits[:, 2])
-
-    # enforce ordinal monotonicity: P(>=k+1) <= P(>=k)
-    p_ge2 = torch.minimum(p_ge2, p_ge1)
-    p_ge3 = torch.minimum(p_ge3, p_ge2)
-
-    w0 = 1.0 - p_ge1
-    w1 = p_ge1 - p_ge2
-    w2 = p_ge2 - p_ge3
-    w3 = p_ge3
-
-    w = torch.stack([w0, w1, w2, w3], dim=1)
-    w = torch.clamp(w, min=0.0)
-    return w / (w.sum(dim=1, keepdim=True) + 1e-8)
-
-
-def build_stage_onehot(stage_ord: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
-    return F.one_hot(stage_ord.long(), num_classes).float()
-
-
-# =========================================================================
-# G. PromptResidualBraakGenerator — top-level wrapper
-# =========================================================================
-class PromptResidualBraakGenerator(nn.Module):
+class ResidualSpatialPriorGenerator(nn.Module):
     def __init__(self, in_ch: int = 1, out_ch: int = 1, use_checkpoint: bool = False,
                  clinical_dim: int = 10, prompt_z_dim: int = 128):
         super().__init__()
@@ -488,8 +574,8 @@ class PromptResidualBraakGenerator(nn.Module):
             nn.Linear(256, prompt_z_dim),
             nn.ReLU(inplace=True),
         )
-        self.stage_head = OrdinalStageHead(in_dim=prompt_z_dim)
-        self.prompt_bank = StagePromptBank()
+        self.braak_head = BraakHead(in_dim=prompt_z_dim)
+        self.spatial_prior = CortexSpatialPrior(z_dim=prompt_z_dim)
         self.residual_decoder = ResidualDecoder3D()
 
     def forward(
@@ -497,7 +583,8 @@ class PromptResidualBraakGenerator(nn.Module):
         t1: torch.Tensor,
         flair: torch.Tensor,
         clinical: torch.Tensor,
-        stage_prompt_weights: Optional[torch.Tensor] = None,
+        brain_mask: Optional[torch.Tensor],
+        cortex_mask: Optional[torch.Tensor],
         return_aux: bool = False,
     ):
         B = t1.size(0)
@@ -520,30 +607,24 @@ class PromptResidualBraakGenerator(nn.Module):
 
         # 4. Fuse latents for auxiliary heads
         z_t1 = self.gap(feats["b"]).flatten(1)  # [B, 512]
-        z_t1_aux = z_t1.detach() if DETACH_BASE_LATENT_FOR_AUX else z_t1
+        z_t1_aux = z_t1.detach() if DETACH_BASE_LATENT_FOR_PRIOR else z_t1
         z_fuse = self.fusion_mlp(torch.cat([z_t1_aux, pf["z_flair"], z_clin], dim=1))
 
-        # 5. Auxiliary heads
-        stage_logits, braak_pred = self.stage_head(z_fuse)
-        stage_probs = ordinal_logits_to_stage_probs(stage_logits)
-
-        # 6. Stage prompt weights (or true zeros if ablation step < 4)
-        if USE_STAGE_PROMPT:
-            weights = stage_prompt_weights if stage_prompt_weights is not None else stage_probs
-            stage_prompts = self.prompt_bank(weights)
+        # 5. Braak head + spatial prior
+        if USE_BRAAK_HEAD:
+            braak_pred = self.braak_head(z_fuse)
         else:
-            stage_prompts = {
-                "b":  torch.zeros(B, 128, device=dev, dtype=dtype),
-                "d1": torch.zeros(B, 128, device=dev, dtype=dtype),
-                "d2": torch.zeros(B, 64,  device=dev, dtype=dtype),
-                "d3": torch.zeros(B, 32,  device=dev, dtype=dtype),
-                "d4": torch.zeros(B, 16,  device=dev, dtype=dtype),
-            }
+            braak_pred = torch.zeros(B, 3, device=dev, dtype=dtype)
 
-        # 7. Residual decoder
-        delta_pet = self.residual_decoder(feats, pf, film, stage_prompts)
+        if USE_SPATIAL_PRIOR:
+            prior_maps, prior_stats = self.spatial_prior(z_fuse, brain_mask, cortex_mask, feats)
+        else:
+            prior_maps, prior_stats = self.spatial_prior.zero_prior_maps(feats)
 
-        # 8. Combine
+        # 6. Residual decoder
+        delta_pet = self.residual_decoder(feats, pf, film, prior_maps)
+
+        # 7. Combine
         pet_hat = pet_base + delta_pet
 
         if not return_aux:
@@ -552,9 +633,11 @@ class PromptResidualBraakGenerator(nn.Module):
         aux: Dict[str, Any] = {
             "pet_base": pet_base,
             "delta_pet": delta_pet,
-            "stage_logits": stage_logits,
-            "stage_probs": stage_probs,
             "braak_pred": braak_pred,
             "z_fuse": z_fuse,
+            "prior_stats": prior_stats,
         }
         return pet_hat, aux
+
+
+PromptResidualBraakGenerator = ResidualSpatialPriorGenerator

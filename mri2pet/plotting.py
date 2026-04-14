@@ -17,11 +17,18 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     has_aux = (
         _has_series(history, "train_braak")
         or _has_series(history, "train_delta_sup")
-        or _has_series(history, "train_stage_ord", require_nonzero=True)
-        or _has_series(history, "train_delta_out", require_nonzero=True)
+    )
+    has_prior = (
+        _has_series(history, "train_prior_in")
+        or _has_series(history, "train_prior_out")
+        or _has_series(history, "train_prior_ratio")
+        or _has_series(history, "train_router_entropy")
+        or _has_series(history, "train_router_top1")
     )
     if has_aux:
         n_plots = 2
+    if has_prior:
+        n_plots += 1
 
     fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 5))
     if n_plots == 1:
@@ -51,14 +58,28 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
             ax2.plot(history["train_braak"], label="Braak (SmoothL1)")
         if _has_series(history, "train_delta_sup"):
             ax2.plot(history["train_delta_sup"], label="Delta Sup")
-        if _has_series(history, "train_stage_ord", require_nonzero=True):
-            ax2.plot(history["train_stage_ord"], label="Stage Ord (BCE)")
-        if _has_series(history, "train_delta_out", require_nonzero=True):
-            ax2.plot(history["train_delta_out"], label="Delta Out Reg")
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Loss")
         ax2.set_title("Auxiliary Losses")
         ax2.legend()
+
+    if has_prior:
+        ax_idx = 2 if has_aux else 1
+        ax3 = axes[ax_idx]
+        if _has_series(history, "train_prior_in"):
+            ax3.plot(history["train_prior_in"], label="Prior In Cortex")
+        if _has_series(history, "train_prior_out"):
+            ax3.plot(history["train_prior_out"], label="Prior Out Cortex")
+        if _has_series(history, "train_prior_ratio"):
+            ax3.plot(history["train_prior_ratio"], label="Prior In/Out Ratio", linestyle="--")
+        if _has_series(history, "train_router_entropy"):
+            ax3.plot(history["train_router_entropy"], label="Router Entropy")
+        if _has_series(history, "train_router_top1"):
+            ax3.plot(history["train_router_top1"], label="Router Top1 Mean")
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("Value")
+        ax3.set_title("Spatial Prior Activity")
+        ax3.legend()
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
