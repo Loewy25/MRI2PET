@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="batch1_128_new_sup7_braak25_k4_mul3_b43_1105_fold1_os5_aug_5"
+export RUN_NAME="batch1_128_new_sup7_braak25_k4_mul5_b43_1105_fold1_os5_aug_5"
 export FOLD_INDEX=0
 
 export MODEL_VARIANT="residual_spatial_prior"
@@ -46,7 +46,7 @@ export USE_SPATIAL_PRIOR=1
 export LAMBDA_BRAAK=0.25
 export LAMBDA_DELTA_SUP=0.7
 export SPATIAL_PRIOR_K=4
-export SPATIAL_PRIOR_LR_MULT=3.0
+export SPATIAL_PRIOR_LR_MULT=5.0
 export PRIOR_GAIN_INIT_B=0.10
 export PRIOR_GAIN_INIT_X4=0.10
 export PRIOR_GAIN_INIT_X3=0.05
