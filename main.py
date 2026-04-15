@@ -19,6 +19,7 @@ from mri2pet.config import (
     USE_FLAIR, USE_CLINICAL, USE_BRAAK_HEAD, USE_SPATIAL_PRIOR,
     SPATIAL_PRIOR_K, SPATIAL_PRIOR_LR_MULT,
     PRIOR_GAIN_INIT_B, PRIOR_GAIN_INIT_X4, PRIOR_GAIN_INIT_X3,
+    DIRECT_GAN_START_EPOCH,
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
     MASK_GLOBAL_RECON,
@@ -27,8 +28,18 @@ from mri2pet.config import (
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
-from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator
-from mri2pet.train_eval import train_paggan, train_residual_spatial_prior, evaluate_and_save
+from mri2pet.models import (
+    Generator,
+    CondPatchDiscriminator3D,
+    ResidualSpatialPriorGenerator,
+    DirectMMConditionalGenerator,
+)
+from mri2pet.train_eval import (
+    train_paggan,
+    train_residual_spatial_prior,
+    train_direct_mm_conditional,
+    evaluate_and_save,
+)
 from mri2pet.plotting import save_loss_curves, save_history_csv
 from mri2pet.data import CLINICAL_FEATURE_NAMES
 
@@ -91,6 +102,27 @@ def init_wandb_run():
             "prior_gain_init_b": PRIOR_GAIN_INIT_B,
             "prior_gain_init_x4": PRIOR_GAIN_INIT_X4,
             "prior_gain_init_x3": PRIOR_GAIN_INIT_X3,
+        })
+    elif MODEL_VARIANT == "direct_mm_conditional":
+        wandb_config.update({
+            "clinical_dim": CLINICAL_DIM,
+            "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
+            "use_flair": USE_FLAIR,
+            "use_clinical": USE_CLINICAL,
+            "use_braak_head": USE_BRAAK_HEAD,
+            "use_spatial_prior": USE_SPATIAL_PRIOR,
+            "lambda_braak": LAMBDA_BRAAK,
+            "direct_gan_start_epoch": DIRECT_GAN_START_EPOCH,
+            "spatial_prior_k": SPATIAL_PRIOR_K,
+            "spatial_prior_lr_mult": SPATIAL_PRIOR_LR_MULT,
+            "prior_gain_init_b": PRIOR_GAIN_INIT_B,
+            "prior_gain_init_x4": PRIOR_GAIN_INIT_X4,
+            "prior_gain_init_x3": PRIOR_GAIN_INIT_X3,
+            "use_checkpoint": USE_CHECKPOINT,
+            "amp_enable": AMP_ENABLE,
+            "lr_plateau_patience": LR_PLATEAU_PATIENCE,
+            "early_stop_patience": EARLY_STOP_PATIENCE,
+            "val_roi_weight": VAL_ROI_WEIGHT,
         })
 
     try:
@@ -157,6 +189,19 @@ if __name__ == "__main__":
             f"Spatial prior:  K={SPATIAL_PRIOR_K}  lr_mult={SPATIAL_PRIOR_LR_MULT}  "
             f"gain_b={PRIOR_GAIN_INIT_B}  gain_x4={PRIOR_GAIN_INIT_X4}  gain_x3={PRIOR_GAIN_INIT_X3}"
         )
+        print(f"Mask global:    {MASK_GLOBAL_RECON}")
+        print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
+    elif MODEL_VARIANT == "direct_mm_conditional":
+        print("Direct multimodal conditional model:")
+        print(
+            f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  "
+            f"USE_BRAAK_HEAD={USE_BRAAK_HEAD}  USE_SPATIAL_PRIOR={USE_SPATIAL_PRIOR}"
+        )
+        print(
+            f"Regional mod:   K={SPATIAL_PRIOR_K}  lr_mult={SPATIAL_PRIOR_LR_MULT}  "
+            f"gain_b={PRIOR_GAIN_INIT_B}  gain_x4={PRIOR_GAIN_INIT_X4}  gain_x3={PRIOR_GAIN_INIT_X3}"
+        )
+        print(f"GAN start:      epoch {DIRECT_GAN_START_EPOCH}")
         print(f"Mask global:    {MASK_GLOBAL_RECON}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
     print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")
@@ -256,6 +301,7 @@ if __name__ == "__main__":
 
     # Instantiate models
     is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
+    is_direct_mm = MODEL_VARIANT == "direct_mm_conditional"
 
     if is_prompt_residual:
         G = ResidualSpatialPriorGenerator(
@@ -274,10 +320,18 @@ if __name__ == "__main__":
             raise FileNotFoundError(
                 f"BASE_PRETRAIN_CKPT not found: {BASE_PRETRAIN_CKPT}"
             )
+    elif is_direct_mm:
+        G = DirectMMConditionalGenerator(
+            in_ch=1,
+            flair_ch=1,
+            out_ch=1,
+            clinical_dim=CLINICAL_DIM,
+            prompt_z_dim=PROMPT_HIDDEN_DIM,
+        )
     else:
         G = Generator(in_ch=1, out_ch=1)
 
-    D = CondPatchDiscriminator3D(in_ch=2)
+    D = CondPatchDiscriminator3D(in_ch=3 if is_direct_mm else 2)
 
     def _count_params(m):
         return sum(p.numel() for p in m.parameters())
@@ -297,6 +351,14 @@ if __name__ == "__main__":
     # Train
     if is_prompt_residual:
         out = train_residual_spatial_prior(
+            G, D, train_loader, val_loader,
+            device=device, epochs=EPOCHS, gamma=GAMMA,
+            data_range=DATA_RANGE,
+            verbose=True,
+            log_to_wandb=(wandb_run is not None),
+        )
+    elif is_direct_mm:
+        out = train_direct_mm_conditional(
             G, D, train_loader, val_loader,
             device=device, epochs=EPOCHS, gamma=GAMMA,
             data_range=DATA_RANGE,
@@ -333,6 +395,7 @@ if __name__ == "__main__":
         out_dir=VOL_DIR, data_range=DATA_RANGE,
         mmd_voxels=2048,
         is_prompt_residual=is_prompt_residual,
+        model_variant=MODEL_VARIANT,
     )
     print("Test metrics:", metrics)
 

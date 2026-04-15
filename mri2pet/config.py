@@ -153,6 +153,11 @@ PRIOR_GAIN_INIT_X4 = _env_float("PRIOR_GAIN_INIT_X4", 0.10)
 PRIOR_GAIN_INIT_X3 = _env_float("PRIOR_GAIN_INIT_X3", 0.05)
 
 # =========================
+# Direct Multimodal Conditional settings
+# =========================
+DIRECT_GAN_START_EPOCH = _env_int("DIRECT_GAN_START_EPOCH", 31)
+
+# =========================
 # Validation Score
 # =========================
 VAL_ROI_WEIGHT = _env_float("VAL_ROI_WEIGHT", 0.02)

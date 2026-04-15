@@ -22,6 +22,9 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
         _has_series(history, "train_prior_in")
         or _has_series(history, "train_prior_out")
         or _has_series(history, "train_prior_ratio")
+        or _has_series(history, "train_mod_in")
+        or _has_series(history, "train_mod_out")
+        or _has_series(history, "train_mod_ratio")
         or _has_series(history, "train_router_entropy")
         or _has_series(history, "train_router_top1")
     )
@@ -68,17 +71,23 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
         ax3 = axes[ax_idx]
         if _has_series(history, "train_prior_in"):
             ax3.plot(history["train_prior_in"], label="Prior In Cortex")
+        if _has_series(history, "train_mod_in"):
+            ax3.plot(history["train_mod_in"], label="Mod In Cortex")
         if _has_series(history, "train_prior_out"):
             ax3.plot(history["train_prior_out"], label="Prior Out Cortex")
+        if _has_series(history, "train_mod_out"):
+            ax3.plot(history["train_mod_out"], label="Mod Out Cortex")
         if _has_series(history, "train_prior_ratio"):
             ax3.plot(history["train_prior_ratio"], label="Prior In/Out Ratio", linestyle="--")
+        if _has_series(history, "train_mod_ratio"):
+            ax3.plot(history["train_mod_ratio"], label="Mod In/Out Ratio", linestyle="--")
         if _has_series(history, "train_router_entropy"):
             ax3.plot(history["train_router_entropy"], label="Router Entropy")
         if _has_series(history, "train_router_top1"):
             ax3.plot(history["train_router_top1"], label="Router Top1 Mean")
         ax3.set_xlabel("Epoch")
         ax3.set_ylabel("Value")
-        ax3.set_title("Spatial Prior Activity")
+        ax3.set_title("Regional Modulation Activity")
         ax3.legend()
 
     plt.tight_layout()
