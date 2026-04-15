@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="batch1_128_direct_mm_conditional_fold1_os5_aug_5"
+export RUN_NAME="batch1_128_21direct_mm_conditional_fold1_os5_aug_5"
 export FOLD_INDEX=0
 
 export MODEL_VARIANT="direct_mm_conditional"
@@ -44,7 +44,7 @@ export SPATIAL_PRIOR_LR_MULT=3.0
 export PRIOR_GAIN_INIT_B=0.10
 export PRIOR_GAIN_INIT_X4=0.10
 export PRIOR_GAIN_INIT_X3=0.05
-export DIRECT_GAN_START_EPOCH=31
+export DIRECT_GAN_START_EPOCH=21
 
 
 # Oversampling (train only)
