@@ -21,8 +21,8 @@ pip install wandb
 export WANDB__SERVICE_WAIT=300
 # export WANDB_API_KEY="your_key_here"
 
-export RUN_NAME="batch1_128_new_baseline_fold5_os5_aug_5_rerun_false"
-export FOLD_INDEX=4
+export RUN_NAME="batch1_128_new_baseline_fold3_os5_aug_5_rerun_false"
+export FOLD_INDEX=2
 
 export MODEL_VARIANT="baseline"
 
