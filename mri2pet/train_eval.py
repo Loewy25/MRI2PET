@@ -20,7 +20,7 @@ from .config import (
     DIRECT_GAN_START_EPOCH, USE_FLAIR, USE_BRAAK_HEAD,
 )
 
-from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
+from .losses import l1_loss, masked_l1, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 import wandb
 
@@ -757,8 +757,8 @@ def train_direct_mm_conditional(
             pet5_f32 = pet5.float()
             if MASK_GLOBAL_RECON and brain5 is not None:
                 brain_mask = brain5.float()
-                loss_l1 = l1_loss(pet_hat_f32 * brain_mask, pet5_f32 * brain_mask)
-                ssim_val = ssim3d(pet_hat_f32 * brain_mask, pet5_f32 * brain_mask, data_range=data_range)
+                loss_l1 = masked_l1(pet_hat_f32, pet5_f32, brain_mask)
+                ssim_val = ssim3d_masked(pet_hat_f32, pet5_f32, brain_mask, data_range=data_range)
             else:
                 loss_l1 = l1_loss(pet_hat_f32, pet5_f32)
                 ssim_val = ssim3d(pet_hat_f32, pet5_f32, data_range=data_range)
@@ -921,11 +921,11 @@ def train_direct_mm_conditional(
                     pet_eval = pet5v.float()
                     if MASK_GLOBAL_RECON and brain5_v is not None:
                         brain_mask_v = brain5_v.float()
-                        fake_eval = fake_eval * brain_mask_v
-                        pet_eval = pet_eval * brain_mask_v
-
-                    loss_l1_v = l1_loss(fake_eval, pet_eval)
-                    ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
+                        loss_l1_v = masked_l1(fake_eval, pet_eval, brain_mask_v)
+                        ssim_v = ssim3d_masked(fake_eval, pet_eval, brain_mask_v, data_range=data_range)
+                    else:
+                        loss_l1_v = l1_loss(fake_eval, pet_eval)
+                        ssim_v = ssim3d(fake_eval, pet_eval, data_range=data_range)
                     val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
                     if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
                         val_roi_sum += _masked_l1_high_uptake(fake_eval, pet_eval, cortex5_v.float()).item()

@@ -51,6 +51,12 @@ def ms_ssim3d(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0,
 def l1_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(x, y)
 
+def masked_l1(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
+              eps: float = 1e-6) -> torch.Tensor:
+    num = ((x - y).abs() * mask).sum()
+    den = mask.sum().clamp_min(eps)
+    return num / den
+
 def mse_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return F.mse_loss(x, y)
 
