@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .config import (
-    DETACH_BASE_LATENT_FOR_PRIOR,
     PRIOR_GAIN_INIT_B,
     PRIOR_GAIN_INIT_X3,
     PRIOR_GAIN_INIT_X4,
@@ -247,98 +246,6 @@ class CondPatchDiscriminator3D(nn.Module):
         return self.head(self.features(x))
 
 
-# =========================================================================
-# NEW: Residual-spatial-prior modules
-# =========================================================================
-
-# --- A. FlairPromptEncoder3D ---
-class FlairPromptEncoder3D(nn.Module):
-    def __init__(self, in_ch: int = 1, z_dim: int = 128):
-        super().__init__()
-        self.pool = nn.MaxPool3d(2, 2)
-        self.enc1 = _double_conv(in_ch, 16)   # p1
-        self.enc2 = _double_conv(16, 32)       # p2
-        self.enc3 = _double_conv(32, 64)       # p3
-        self.enc4 = _double_conv(64, 64)       # p4
-        self.enc_b = _double_conv(64, 64)      # pb
-        self.gap = nn.AdaptiveAvgPool3d(1)
-        self.proj = nn.Linear(64, z_dim)
-
-    def forward(self, x: torch.Tensor) -> Dict[str, Any]:
-        p1 = self.enc1(x)
-        p2 = self.enc2(self.pool(p1))
-        p3 = self.enc3(self.pool(p2))
-        p4 = self.enc4(self.pool(p3))
-        pb = self.enc_b(self.pool(p4))
-        z_flair = self.proj(self.gap(pb).flatten(1))
-        return {"p1": p1, "p2": p2, "p3": p3, "p4": p4, "pb": pb, "z_flair": z_flair}
-
-    def zero_prompts(self, B: int, device: torch.device, dtype: torch.dtype) -> Dict[str, Any]:
-        """Return None spatial prompts (ablation: no FLAIR). Skips proj_prompt conv entirely."""
-        return {
-            "p1": None,
-            "p2": None,
-            "p3": None,
-            "p4": None,
-            "pb": None,
-            "z_flair": torch.zeros(B, self.proj.out_features, device=device, dtype=dtype),
-        }
-
-
-# --- B. ClinicalFiLMConditioner ---
-class ClinicalFiLMConditioner(nn.Module):
-    def __init__(self, clinical_dim: int = 10, z_dim: int = 128):
-        super().__init__()
-        self.z_dim = z_dim
-        self.trunk = nn.Sequential(
-            nn.LayerNorm(clinical_dim),
-            nn.Linear(clinical_dim, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, z_dim),
-            nn.ReLU(inplace=True),
-        )
-        # FiLM heads: (gamma, beta) pairs for each decoder scale
-        self.film_b = nn.Linear(z_dim, 128 * 2)
-        self.film_d1 = nn.Linear(z_dim, 128 * 2)
-        self.film_d2 = nn.Linear(z_dim, 64 * 2)
-        self.film_d3 = nn.Linear(z_dim, 32 * 2)
-        self.film_d4 = nn.Linear(z_dim, 16 * 2)
-
-        # Zero-init all FiLM heads → identity modulation at start
-        for head in [self.film_b, self.film_d1, self.film_d2, self.film_d3, self.film_d4]:
-            nn.init.zeros_(head.weight)
-            nn.init.zeros_(head.bias)
-
-    def forward(self, clinical: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
-        z = self.trunk(clinical)
-
-        def _split(head, ch):
-            out = head(z)
-            return out[:, :ch], out[:, ch:]
-
-        film = {
-            "b": _split(self.film_b, 128),
-            "d1": _split(self.film_d1, 128),
-            "d2": _split(self.film_d2, 64),
-            "d3": _split(self.film_d3, 32),
-            "d4": _split(self.film_d4, 16),
-        }
-        return z, film
-
-    def identity(self, B: int, device: torch.device, dtype: torch.dtype
-                 ) -> Tuple[torch.Tensor, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
-        """Return identity FiLM (gamma=0, beta=0) and zero z_clin (ablation: no clinical)."""
-        z = torch.zeros(B, self.z_dim, device=device, dtype=dtype)
-        film = {
-            "b":  (torch.zeros(B, 128, device=device, dtype=dtype), torch.zeros(B, 128, device=device, dtype=dtype)),
-            "d1": (torch.zeros(B, 128, device=device, dtype=dtype), torch.zeros(B, 128, device=device, dtype=dtype)),
-            "d2": (torch.zeros(B, 64,  device=device, dtype=dtype), torch.zeros(B, 64,  device=device, dtype=dtype)),
-            "d3": (torch.zeros(B, 32,  device=device, dtype=dtype), torch.zeros(B, 32,  device=device, dtype=dtype)),
-            "d4": (torch.zeros(B, 16,  device=device, dtype=dtype), torch.zeros(B, 16,  device=device, dtype=dtype)),
-        }
-        return z, film
-
-
 class DirectClinicalConditioner(nn.Module):
     def __init__(self, clinical_dim: int = 10, z_dim: int = 128):
         super().__init__()
@@ -393,7 +300,6 @@ class DirectClinicalConditioner(nn.Module):
         return z, film
 
 
-# --- C. BraakHead ---
 class BraakHead(nn.Module):
     def __init__(self, in_dim: int = 128):
         super().__init__()
@@ -401,42 +307,6 @@ class BraakHead(nn.Module):
 
     def forward(self, z_fuse: torch.Tensor) -> torch.Tensor:
         return self.head(z_fuse)
-
-
-# --- D. CortexSpatialPrior ---
-class CortexSpatialPrior(nn.Module):
-    def __init__(self, z_dim: int = 128, num_basis: int = SPATIAL_PRIOR_K):
-        super().__init__()
-        self.router = nn.Linear(z_dim, num_basis)
-        self.basis_low = nn.Parameter(torch.randn(num_basis, 1, 8, 8, 8) * 0.01)
-        self.proj_b = nn.Conv3d(1, 128, kernel_size=1, bias=True)
-        self.proj_x4 = nn.Conv3d(1, 128, kernel_size=1, bias=True)
-        self.proj_x3 = nn.Conv3d(1, 64, kernel_size=1, bias=True)
-        self.gain_b = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_B)))
-        self.gain_x4 = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_X4)))
-        self.gain_x3 = nn.Parameter(torch.tensor(float(PRIOR_GAIN_INIT_X3)))
-
-        for proj in [self.proj_b, self.proj_x4, self.proj_x3]:
-            nn.init.normal_(proj.weight, mean=0.0, std=0.02)
-            nn.init.zeros_(proj.bias)
-
-    def zero_prior_maps(self, feats: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-        dev = feats["b"].device
-        dtype = feats["b"].dtype
-        B = feats["b"].size(0)
-        prior_maps = {
-            "b": torch.zeros(B, 128, *feats["b"].shape[2:], device=dev, dtype=dtype),
-            "x4": torch.zeros(B, 128, *feats["x4"].shape[2:], device=dev, dtype=dtype),
-            "x3": torch.zeros(B, 64, *feats["x3"].shape[2:], device=dev, dtype=dtype),
-        }
-        zero = torch.zeros((), device=dev, dtype=torch.float32)
-        prior_stats = {
-            "in_cortex_mag": zero,
-            "out_cortex_mag": zero,
-            "router_entropy": zero,
-            "router_top1_mean": zero,
-        }
-        return prior_maps, prior_stats
 
 
 class ShallowImageStem(nn.Module):
@@ -593,180 +463,6 @@ class RegionalModulator(nn.Module):
             "router_top1_mean": router_top1_mean.detach().float(),
         }
         return mod_maps, stats
-
-
-# --- E. PromptFusionBlock ---
-class PromptFusionBlock(nn.Module):
-    def __init__(self, c_base: int, c_prompt: int, c_out: int):
-        super().__init__()
-        self.proj_base = nn.Conv3d(c_base, c_out, 1) if c_base != c_out else nn.Identity()
-        self.proj_prompt = nn.Conv3d(c_prompt, c_out, 1)
-        self.gate_conv = nn.Conv3d(2 * c_out, c_out, 1)
-        self.res_conv = nn.Sequential(
-            nn.Conv3d(c_out, c_out, 3, padding=1, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(c_out, c_out, 3, padding=1, bias=True),
-        )
-        nn.init.zeros_(self.gate_conv.weight)
-        nn.init.zeros_(self.gate_conv.bias)
-
-    def forward(
-        self,
-        base_feat: torch.Tensor,
-        flair_prompt: Optional[torch.Tensor],
-        film: Tuple[torch.Tensor, torch.Tensor],
-    ) -> torch.Tensor:
-        gamma, beta = film
-        bp = self.proj_base(base_feat)
-        if flair_prompt is None:
-            fp = torch.zeros_like(bp)
-        else:
-            fp = self.proj_prompt(flair_prompt)
-            if fp.shape[2:] != bp.shape[2:]:
-                fp = _pad_or_crop_to(fp, bp)
-        gate = torch.sigmoid(self.gate_conv(torch.cat([bp, fp], dim=1)))
-        fused = bp + gate * fp
-        fused = fused * (1.0 + gamma[..., None, None, None]) + beta[..., None, None, None]
-        fused = fused + self.res_conv(fused)
-        return F.relu(fused)
-
-
-# --- F. ResidualDecoder3D ---
-class ResidualDecoder3D(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fuse_b = PromptFusionBlock(512, 64, 128)
-        self.fuse_s4 = PromptFusionBlock(512, 64, 128)
-        self.fuse_s3 = PromptFusionBlock(512, 64, 64)
-        self.fuse_s2 = PromptFusionBlock(256, 32, 32)
-        self.fuse_s1 = PromptFusionBlock(192, 16, 16)
-
-        self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-
-        self.conv_d1 = _double_conv(128 + 128, 128)
-        self.conv_d2 = _double_conv(128 + 64, 64)
-        self.conv_d3 = _double_conv(64 + 32, 32)
-        self.conv_d4 = _double_conv(32 + 16, 16)
-
-        self.delta_out = nn.Conv3d(16, 1, kernel_size=3, padding=1, bias=True)
-        nn.init.zeros_(self.delta_out.weight)
-        nn.init.zeros_(self.delta_out.bias)
-
-    def forward(
-        self,
-        feats: Dict[str, torch.Tensor],
-        pf: Dict[str, torch.Tensor],
-        film: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
-        prior_maps: Dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        def _up(t, ref):
-            return _pad_or_crop_to(self.up(t.float()).to(t.dtype), ref)
-
-        rb = self.fuse_b(feats["b"], pf["pb"], film["b"])
-        rb = rb + _pad_or_crop_to(prior_maps["b"], rb)
-        s4 = self.fuse_s4(feats["x4"], pf["p4"], film["d1"])
-        s4 = s4 + _pad_or_crop_to(prior_maps["x4"], s4)
-        d1 = self.conv_d1(torch.cat([_up(rb, s4), s4], dim=1))
-
-        s3 = self.fuse_s3(feats["x3"], pf["p3"], film["d2"])
-        s3 = s3 + _pad_or_crop_to(prior_maps["x3"], s3)
-        d2 = self.conv_d2(torch.cat([_up(d1, s3), s3], dim=1))
-
-        s2 = self.fuse_s2(feats["x2"], pf["p2"], film["d3"])
-        d3 = self.conv_d3(torch.cat([_up(d2, s2), s2], dim=1))
-
-        s1 = self.fuse_s1(feats["x1"], pf["p1"], film["d4"])
-        d4 = self.conv_d4(torch.cat([_up(d3, s1), s1], dim=1))
-
-        return self.delta_out(d4)
-
-
-# =========================================================================
-# G. ResidualSpatialPriorGenerator — top-level wrapper
-# =========================================================================
-class ResidualSpatialPriorGenerator(nn.Module):
-    def __init__(self, in_ch: int = 1, out_ch: int = 1, use_checkpoint: bool = False,
-                 clinical_dim: int = 10, prompt_z_dim: int = 128):
-        super().__init__()
-        self.base = Generator(in_ch=in_ch, out_ch=out_ch, use_checkpoint=use_checkpoint)
-        self.flair_encoder = FlairPromptEncoder3D(in_ch=1, z_dim=prompt_z_dim)
-        self.clinical_conditioner = ClinicalFiLMConditioner(clinical_dim=clinical_dim, z_dim=prompt_z_dim)
-        self.gap = nn.AdaptiveAvgPool3d(1)
-
-        # Fusion MLP: z_t1(512) + z_flair(128) + z_clin(128) → 128
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(512 + prompt_z_dim + prompt_z_dim, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, prompt_z_dim),
-            nn.ReLU(inplace=True),
-        )
-        self.braak_head = BraakHead(in_dim=prompt_z_dim)
-        self.spatial_prior = CortexSpatialPrior(z_dim=prompt_z_dim)
-        self.residual_decoder = ResidualDecoder3D()
-
-    def forward(
-        self,
-        t1: torch.Tensor,
-        flair: torch.Tensor,
-        clinical: torch.Tensor,
-        brain_mask: Optional[torch.Tensor],
-        cortex_mask: Optional[torch.Tensor],
-        return_aux: bool = False,
-    ):
-        B = t1.size(0)
-        dev, dtype = t1.device, t1.dtype
-
-        # 1. Base T1-only generator
-        pet_base, feats = self.base(t1, return_features=True)
-
-        # 2. FLAIR prompt pyramid (or zeros if ablation step < 2)
-        if USE_FLAIR:
-            pf = self.flair_encoder(flair)
-        else:
-            pf = self.flair_encoder.zero_prompts(B, dev, dtype)
-
-        # 3. Clinical FiLM (or identity if ablation step < 3)
-        if USE_CLINICAL:
-            z_clin, film = self.clinical_conditioner(clinical)
-        else:
-            z_clin, film = self.clinical_conditioner.identity(B, dev, dtype)
-
-        # 4. Fuse latents for auxiliary heads
-        z_t1 = self.gap(feats["b"]).flatten(1)  # [B, 512]
-        z_t1_aux = z_t1.detach() if DETACH_BASE_LATENT_FOR_PRIOR else z_t1
-        z_fuse = self.fusion_mlp(torch.cat([z_t1_aux, pf["z_flair"], z_clin], dim=1))
-
-        # 5. Braak head + spatial prior
-        if USE_BRAAK_HEAD:
-            braak_pred = self.braak_head(z_fuse)
-        else:
-            braak_pred = torch.zeros(B, 3, device=dev, dtype=dtype)
-
-        if USE_SPATIAL_PRIOR:
-            prior_maps, prior_stats = self.spatial_prior(z_fuse, brain_mask, cortex_mask, feats)
-        else:
-            prior_maps, prior_stats = self.spatial_prior.zero_prior_maps(feats)
-
-        # 6. Residual decoder
-        delta_pet = self.residual_decoder(feats, pf, film, prior_maps)
-
-        # 7. Combine
-        pet_hat = pet_base + delta_pet
-
-        if not return_aux:
-            return pet_hat
-
-        aux: Dict[str, Any] = {
-            "pet_base": pet_base,
-            "delta_pet": delta_pet,
-            "braak_pred": braak_pred,
-            "z_fuse": z_fuse,
-            "prior_stats": prior_stats,
-        }
-        return pet_hat, aux
-
-
-PromptResidualBraakGenerator = ResidualSpatialPriorGenerator
 
 
 class DirectMMConditionalGenerator(nn.Module):

@@ -12,9 +12,8 @@ from mri2pet.config import (
     AUG_SCALE_MIN, AUG_SCALE_MAX,
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
-    MODEL_VARIANT, BASE_PRETRAIN_CKPT,
-    FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
-    LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
+    MODEL_VARIANT,
+    LAMBDA_BRAAK,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
     USE_FLAIR, USE_CLINICAL, USE_BRAAK_HEAD, USE_SPATIAL_PRIOR,
     SPATIAL_PRIOR_K, SPATIAL_PRIOR_LR_MULT,
@@ -31,12 +30,10 @@ from mri2pet.data import build_loaders_from_fold_csv
 from mri2pet.models import (
     Generator,
     CondPatchDiscriminator3D,
-    ResidualSpatialPriorGenerator,
     DirectMMConditionalGenerator,
 )
 from mri2pet.train_eval import (
     train_paggan,
-    train_residual_spatial_prior,
     train_direct_mm_conditional,
     evaluate_and_save,
 )
@@ -79,31 +76,7 @@ def init_wandb_run():
         "roi_hi_min_voxels": ROI_HI_MIN_VOXELS,
     }
 
-    if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
-        wandb_config.update({
-            "freeze_base_epochs": FREEZE_BASE_EPOCHS,
-            "base_lr_mult": BASE_LR_MULT,
-            "detach_base_latent_for_prior": DETACH_BASE_LATENT_FOR_PRIOR,
-            "lambda_braak": LAMBDA_BRAAK,
-            "lambda_delta_sup": LAMBDA_DELTA_SUP,
-            "clinical_dim": CLINICAL_DIM,
-            "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
-            "use_checkpoint": USE_CHECKPOINT,
-            "amp_enable": AMP_ENABLE,
-            "lr_plateau_patience": LR_PLATEAU_PATIENCE,
-            "early_stop_patience": EARLY_STOP_PATIENCE,
-            "val_roi_weight": VAL_ROI_WEIGHT,
-            "use_flair": USE_FLAIR,
-            "use_clinical": USE_CLINICAL,
-            "use_braak_head": USE_BRAAK_HEAD,
-            "use_spatial_prior": USE_SPATIAL_PRIOR,
-            "spatial_prior_k": SPATIAL_PRIOR_K,
-            "spatial_prior_lr_mult": SPATIAL_PRIOR_LR_MULT,
-            "prior_gain_init_b": PRIOR_GAIN_INIT_B,
-            "prior_gain_init_x4": PRIOR_GAIN_INIT_X4,
-            "prior_gain_init_x3": PRIOR_GAIN_INIT_X3,
-        })
-    elif MODEL_VARIANT == "direct_mm_conditional":
+    if MODEL_VARIANT == "direct_mm_conditional":
         wandb_config.update({
             "clinical_dim": CLINICAL_DIM,
             "prompt_hidden_dim": PROMPT_HIDDEN_DIM,
@@ -124,6 +97,8 @@ def init_wandb_run():
             "early_stop_patience": EARLY_STOP_PATIENCE,
             "val_roi_weight": VAL_ROI_WEIGHT,
         })
+    elif MODEL_VARIANT != "baseline":
+        raise ValueError(f"Unsupported MODEL_VARIANT: {MODEL_VARIANT}")
 
     try:
         return wandb.init(
@@ -168,30 +143,12 @@ if __name__ == "__main__":
     print(f"Run dir:        {OUT_RUN}")
     print(f"Model variant:  {MODEL_VARIANT}")
     print(f"Fold CSV:       {FOLD_CSV}")
-    print(f"Base ckpt:      {BASE_PRETRAIN_CKPT or '(none, training from scratch)'}")
     print(f"Resize to:      {RESIZE_TO}")
     print(f"Batch size:     {BATCH_SIZE}  (eval: {EVAL_BATCH_SIZE})")
     print(f"Epochs:         {EPOCHS}")
     print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
     print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
-    if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
-        print("Residual spatial prior model:")
-        print(
-            f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  "
-            f"USE_BRAAK_HEAD={USE_BRAAK_HEAD}  USE_SPATIAL_PRIOR={USE_SPATIAL_PRIOR}"
-        )
-        print(f"Freeze base:    {FREEZE_BASE_EPOCHS} epochs, then lr_mult={BASE_LR_MULT}")
-        print(
-            f"Detach z_t1:    {DETACH_BASE_LATENT_FOR_PRIOR}  braak: {LAMBDA_BRAAK}  "
-            f"delta_sup: {LAMBDA_DELTA_SUP}"
-        )
-        print(
-            f"Spatial prior:  K={SPATIAL_PRIOR_K}  lr_mult={SPATIAL_PRIOR_LR_MULT}  "
-            f"gain_b={PRIOR_GAIN_INIT_B}  gain_x4={PRIOR_GAIN_INIT_X4}  gain_x3={PRIOR_GAIN_INIT_X3}"
-        )
-        print(f"Mask global:    {MASK_GLOBAL_RECON}")
-        print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
-    elif MODEL_VARIANT == "direct_mm_conditional":
+    if MODEL_VARIANT == "direct_mm_conditional":
         print("Direct multimodal conditional model:")
         print(
             f"  USE_FLAIR={USE_FLAIR}  USE_CLINICAL={USE_CLINICAL}  "
@@ -300,27 +257,8 @@ if __name__ == "__main__":
     print("-" * 70)
 
     # Instantiate models
-    is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
     is_direct_mm = MODEL_VARIANT == "direct_mm_conditional"
-
-    if is_prompt_residual:
-        G = ResidualSpatialPriorGenerator(
-            in_ch=1, out_ch=1,
-            use_checkpoint=USE_CHECKPOINT,
-            clinical_dim=CLINICAL_DIM,
-            prompt_z_dim=PROMPT_HIDDEN_DIM,
-        )
-        # Load base pretrain checkpoint if specified
-        if BASE_PRETRAIN_CKPT and os.path.isfile(BASE_PRETRAIN_CKPT):
-            print(f"Loading base pretrain checkpoint: {BASE_PRETRAIN_CKPT}")
-            ckpt = torch.load(BASE_PRETRAIN_CKPT, map_location="cpu")
-            G.base.load_state_dict(ckpt, strict=True)
-            print("Base weights loaded successfully.")
-        elif BASE_PRETRAIN_CKPT:
-            raise FileNotFoundError(
-                f"BASE_PRETRAIN_CKPT not found: {BASE_PRETRAIN_CKPT}"
-            )
-    elif is_direct_mm:
+    if is_direct_mm:
         G = DirectMMConditionalGenerator(
             in_ch=1,
             flair_ch=1,
@@ -339,9 +277,6 @@ if __name__ == "__main__":
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
     print(f"Generator params:     {_count_params(G):,} ({_count_trainable(G):,} trainable)")
     print(f"Discriminator params: {_count_params(D):,}")
-    if is_prompt_residual:
-        print(f"  Base params:        {_count_params(G.base):,}")
-        print(f"  New branch params:  {_count_params(G) - _count_params(G.base):,}")
     print("=" * 70)
 
     if wandb_run is not None:
@@ -349,15 +284,7 @@ if __name__ == "__main__":
         wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
-    if is_prompt_residual:
-        out = train_residual_spatial_prior(
-            G, D, train_loader, val_loader,
-            device=device, epochs=EPOCHS, gamma=GAMMA,
-            data_range=DATA_RANGE,
-            verbose=True,
-            log_to_wandb=(wandb_run is not None),
-        )
-    elif is_direct_mm:
+    if is_direct_mm:
         out = train_direct_mm_conditional(
             G, D, train_loader, val_loader,
             device=device, epochs=EPOCHS, gamma=GAMMA,
@@ -394,7 +321,6 @@ if __name__ == "__main__":
         G, test_loader, device=device,
         out_dir=VOL_DIR, data_range=DATA_RANGE,
         mmd_voxels=2048,
-        is_prompt_residual=is_prompt_residual,
         model_variant=MODEL_VARIANT,
     )
     print("Test metrics:", metrics)

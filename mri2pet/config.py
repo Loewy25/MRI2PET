@@ -118,24 +118,13 @@ DEMOGRAPHICS_CSV = os.environ.get(
 # =========================
 # Model Variant
 # =========================
-MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "residual_spatial_prior")
-BASE_PRETRAIN_CKPT = os.environ.get("BASE_PRETRAIN_CKPT", "")
-
-# =========================
-# Residual-Spatial-Prior settings
-# =========================
-FREEZE_BASE_EPOCHS = _env_int("FREEZE_BASE_EPOCHS", 10)
-BASE_LR_MULT = _env_float("BASE_LR_MULT", 0.25)
-DETACH_BASE_LATENT_FOR_PRIOR = _env_bool(
-    "DETACH_BASE_LATENT_FOR_PRIOR",
-    _env_bool("DETACH_BASE_LATENT_FOR_AUX", True),
-)
+MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "direct_mm_conditional")
 
 CLINICAL_DIM = _env_int("CLINICAL_DIM", 10)
 PROMPT_HIDDEN_DIM = _env_int("PROMPT_HIDDEN_DIM", 128)
 
 # =========================
-# Residual-side conditioning
+# Direct multimodal conditioning
 # =========================
 USE_FLAIR = _env_bool("USE_FLAIR", True)
 USE_CLINICAL = _env_bool("USE_CLINICAL", True)
@@ -143,7 +132,6 @@ USE_BRAAK_HEAD = _env_bool("USE_BRAAK_HEAD", True)
 USE_SPATIAL_PRIOR = _env_bool("USE_SPATIAL_PRIOR", True)
 
 LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.25)
-LAMBDA_DELTA_SUP = _env_float("LAMBDA_DELTA_SUP", 0.5)
 MASK_GLOBAL_RECON = _env_bool("MASK_GLOBAL_RECON", True)
 
 SPATIAL_PRIOR_K = _env_int("SPATIAL_PRIOR_K", 4)
