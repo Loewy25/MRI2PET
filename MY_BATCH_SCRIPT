@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --exclude=gpu02
+#SBATCH --exclude=gpu02,gpua405
 #SBATCH --output=slurm-%A_baseline.out
 #SBATCH --error=slurm-%A_baseline.err
 
@@ -47,5 +47,4 @@ export ROI_HI_LAMBDA=2.5
 export ROI_HI_MIN_VOXELS=32
 
 python main.py
-
 
