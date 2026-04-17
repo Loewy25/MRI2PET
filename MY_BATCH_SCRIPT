@@ -31,46 +31,7 @@ export WANDB__SERVICE_WAIT=300
 # ---- NEW: per-job config ----
 export RUN_NAME="batch1_128_new_sup7_braak25_k4_mul3_b43_1105_detach0_fold5_os5_aug_5"
 export FOLD_INDEX=4
+export INFER_CKPT="/home/l.peiwang/MRI2PET/${RUN_NAME}/checkpoints/best_G.pth"
+export CLEAR_CUDA_CACHE_EVERY=8
 
-export MODEL_VARIANT="residual_spatial_prior"
-#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch1_128_fold1_os65_aug_5/checkpoints/best_G.pth"
-#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold2_os65_aug_5/checkpoints/best_G.pth"
-#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold3_os65_aug_5/checkpoints/best_G.pth"
-#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold4_os65_aug_5/checkpoints/best_G.pth"
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/batch2_128_fold5_os65_aug_5/checkpoints/best_G.pth"
-
-export USE_FLAIR=1
-export USE_CLINICAL=1
-export USE_BRAAK_HEAD=1
-export USE_SPATIAL_PRIOR=1
-export LAMBDA_BRAAK=0.25
-export LAMBDA_DELTA_SUP=0.7
-export SPATIAL_PRIOR_K=4
-export SPATIAL_PRIOR_LR_MULT=3.0
-export PRIOR_GAIN_INIT_B=0.10
-export PRIOR_GAIN_INIT_X4=0.10
-export PRIOR_GAIN_INIT_X3=0.05
-export DETACH_BASE_LATENT_FOR_PRIOR=0
-
-
-# Oversampling (train only)
-export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.5
-
-# Augmentation (train only)
-export AUG_ENABLE=1
-export AUG_PROB=0.5
-export AUG_FLIP_PROB=0.5
-export AUG_INTENSITY_PROB=0.8
-export AUG_NOISE_STD=0.03
-export AUG_SCALE_MIN=0.9
-export AUG_SCALE_MAX=1.1
-export AUG_SHIFT_MIN=-0.05
-export AUG_SHIFT_MAX=0.05
-
-# High-uptake ROI loss (inside cortex mask)
-export ROI_HI_Q=0.85
-export ROI_HI_LAMBDA=2.5
-export ROI_HI_MIN_VOXELS=32
-
-python -u main.py
+python -u infer_train_fold_prompt_residual.py
