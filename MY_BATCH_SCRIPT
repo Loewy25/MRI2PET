@@ -29,9 +29,9 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="infer5"
-export FOLD_INDEX=4
-export INFER_CKPT="/home/l.peiwang/MRI2PET/promptresidual_flair_new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold5_os65_aug_5/checkpoints/best_G.pth"
+export RUN_NAME="infer4"
+export FOLD_INDEX=3
+export INFER_CKPT="/home/l.peiwang/MRI2PET/promptresidual_flair_new_all_deeper_uptake_kernel3_skip_spatial_nohierachy_fold4_os65_aug_5/checkpoints/best_G.pth"
 export CLEAR_CUDA_CACHE_EVERY=8
 
 python -u infer_train_fold_prompt_residual.py
