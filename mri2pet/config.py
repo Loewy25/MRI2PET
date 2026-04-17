@@ -36,16 +36,11 @@ DATA_RANGE  = 3.5
 torch.backends.cudnn.benchmark = True
 
 SPLITS_DIR = os.environ.get("SPLITS_DIR", os.path.join(ROOT_DIR, "CV5_braak_strat"))
-BASELINE_SPLITS_DIR = os.environ.get(
-    "BASELINE_SPLITS_DIR",
-    "/scratch/l.peiwang/braak_merged_kari_all/CV5_braak_strat",
-)
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
 
 FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
-BASELINE_FOLD_CSV = os.path.join(BASELINE_SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
 
 # =========================
 # Imbalance / Oversampling

@@ -22,16 +22,11 @@ from mri2pet.config import (
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
     MASK_GLOBAL_RECON,
-    BASELINE_FOLD_CSV,
 )
 
-from mri2pet.data import (
-    build_loaders,
-    build_loaders_baseline,
-    build_loaders_from_fold_csv,
-    build_loaders_from_fold_csv_baseline,
-)
+from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
+from mri2pet.data import build_loaders_from_fold_csv
 from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator
 from mri2pet.train_eval import train_paggan, train_residual_spatial_prior, evaluate_and_save
 from mri2pet.plotting import save_loss_curves, save_history_csv
@@ -132,9 +127,6 @@ def log_wandb_output_files(wandb_run, run_name: str, paths):
 
 
 if __name__ == "__main__":
-    is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
-    active_fold_csv = FOLD_CSV if is_prompt_residual else BASELINE_FOLD_CSV
-
     print("=" * 70)
     print("MRI2PET Training Run")
     print("=" * 70)
@@ -143,7 +135,7 @@ if __name__ == "__main__":
     print(f"Run name:       {RUN_NAME}")
     print(f"Run dir:        {OUT_RUN}")
     print(f"Model variant:  {MODEL_VARIANT}")
-    print(f"Fold CSV:       {active_fold_csv}")
+    print(f"Fold CSV:       {FOLD_CSV}")
     print(f"Base ckpt:      {BASE_PRETRAIN_CKPT or '(none, training from scratch)'}")
     print(f"Resize to:      {RESIZE_TO}")
     print(f"Batch size:     {BATCH_SIZE}  (eval: {EVAL_BATCH_SIZE})")
@@ -167,10 +159,7 @@ if __name__ == "__main__":
         )
         print(f"Mask global:    {MASK_GLOBAL_RECON}")
         print(f"LR patience:    {LR_PLATEAU_PATIENCE}  Early stop: {EARLY_STOP_PATIENCE}")
-    if is_prompt_residual:
-        print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")
-    else:
-        print("Val score:      baseline uses val_recon only")
+    print(f"Val score:      val_recon + {VAL_ROI_WEIGHT} * val_roi")
     print(f"Augmentation:   {AUG_ENABLE} (prob={AUG_PROB})")
     print(f"Oversample:     {OVERSAMPLE_ENABLE} (target_p3={OVERSAMPLE_LABEL3_TARGET})")
     print("=" * 70)
@@ -183,18 +172,12 @@ if __name__ == "__main__":
     wandb_run = init_wandb_run()
 
     # Build loaders
-    if os.path.isfile(active_fold_csv):
-        print(f"Using fold CSV: {active_fold_csv}")
-        if is_prompt_residual:
-            train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(active_fold_csv)
-        else:
-            train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv_baseline(active_fold_csv)
+    if os.path.isfile(FOLD_CSV):
+        print(f"Using fold CSV: {FOLD_CSV}")
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_from_fold_csv(FOLD_CSV)
     else:
         print("No fold CSV found; falling back to random split.")
-        if is_prompt_residual:
-            train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
-        else:
-            train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders_baseline()
+        train_loader, val_loader, test_loader, N, ntr, nva, nte = build_loaders()
     print(f"Subjects: total={N}, train={ntr}, val={nva}, test={nte}")
     with torch.no_grad():
         sample = next(iter(train_loader))
@@ -272,6 +255,8 @@ if __name__ == "__main__":
     print("-" * 70)
 
     # Instantiate models
+    is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
+
     if is_prompt_residual:
         G = ResidualSpatialPriorGenerator(
             in_ch=1, out_ch=1,
