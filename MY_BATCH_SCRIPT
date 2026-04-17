@@ -52,7 +52,7 @@ pip install pydicom
 
 
 python sync_missing_subject_files.py \
-  --source-root /scratch/l.peiwang/kari_flair_all \
+  --source-root /scratch/l.peiwang/kari_all_falir \
   --target-root /scratch/l.peiwang/kari_brainv33_top300
 
 
