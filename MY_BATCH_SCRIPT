@@ -50,6 +50,12 @@ pip install pydicom
 # 5) Run script
 
 
+
+python sync_missing_subject_files.py \
+  --source-root /scratch/l.peiwang/kari_flair_all \
+  --target-root /scratch/l.peiwang/kari_brainv33_top300
+
+
 #python summary_pet.py
 
 #python add_label.py
@@ -143,19 +149,19 @@ pip install pydicom
 
 
 
-python eval_taupet_comprehensive.py \
-  --roi-root /scratch/l.peiwang/kari_flair_all\
-  --vols-roots \
-    /home/l.peiwang/MRI2PET/batch1_128_fold1_os65_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_fold2_os65_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_fold3_os65_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_fold4_os65_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_fold5_os65_aug_5/volumes \
-  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session-col TAU_PET_Session \
-  --split-by braak \
-  --thr-braak 1.2 \
-  --out /scratch/l.peiwang/results_batch1_128_fold1_os65_aug_5
+#python eval_taupet_comprehensive.py \
+#  --roi-root /scratch/l.peiwang/kari_flair_all\
+#  --vols-roots \
+#    /home/l.peiwang/MRI2PET/batch1_128_fold1_os65_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_fold2_os65_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_fold3_os65_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_fold4_os65_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_fold5_os65_aug_5/volumes \
+#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --session-col TAU_PET_Session \
+#  --split-by braak \
+#  --thr-braak 1.2 \
+#  --out /scratch/l.peiwang/results_batch1_128_fold1_os65_aug_5
 
 #python build_kari_flair_all.py
 #python new_class.py \
