@@ -154,8 +154,10 @@ if __name__ == "__main__":
             subdir = os.path.join(VOL_DIR, sid)
             os.makedirs(subdir, exist_ok=True)
 
-            mri5 = mri.to(device, non_blocking=True)
-            pet5 = pet.to(device, non_blocking=True)
+            mri_t = mri.to(device, non_blocking=True)
+            pet_t = pet.to(device, non_blocking=True)
+            mri5 = mri_t if mri_t.dim() == 5 else mri_t.unsqueeze(0)
+            pet5 = pet_t if pet_t.dim() == 5 else pet_t.unsqueeze(0)
             metas_list = _meta_as_list(meta, 1)
             flair5, clinical, _ = _extract_new_variant_inputs(metas_list, device)
             brain5, cortex5 = _extract_masks(metas_list, device)
@@ -171,7 +173,7 @@ if __name__ == "__main__":
             save_subject(subdir, meta, mri_np, pet_np, fake_np, pet_base_np, delta_np)
             print(f"[{i}/{n_train}] saved {sid}")
 
-            del mri5, pet5, flair5, clinical, brain5, cortex5, pet_hat, aux
+            del mri_t, pet_t, mri5, pet5, flair5, clinical, brain5, cortex5, pet_hat, aux
             if device.type == "cuda" and (i % CLEAR_CUDA_CACHE_EVERY == 0 or i == n_train):
                 torch.cuda.empty_cache()
 
