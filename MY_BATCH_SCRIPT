@@ -38,7 +38,7 @@ export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Augmentation (train only)
 export AUG_ENABLE=1
-export AUG_PROB=0.7
+export AUG_PROB=0.5
 export AUG_FLIP_PROB=0.5
 export AUG_INTENSITY_PROB=0.8
 export AUG_NOISE_STD=0.03
