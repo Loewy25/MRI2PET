@@ -135,8 +135,10 @@ if __name__ == "__main__":
     )
     print("Loading generator checkpoint...")
     G.load_state_dict(torch.load(INFER_CKPT, map_location="cpu"), strict=True)
+    G.base.use_checkpoint = False
     G.to(device)
     G.eval()
+    print(f"Base use_checkpoint: {G.base.use_checkpoint}")
 
     if os.path.isdir(OUT_DIR):
         shutil.rmtree(OUT_DIR)
