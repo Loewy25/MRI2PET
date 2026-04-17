@@ -8,7 +8,6 @@ from scipy.ndimage import zoom as nd_zoom
 from torch.utils.data import DataLoader, Subset
 
 from mri2pet.config import (
-    AMP_ENABLE,
     CLINICAL_DIM,
     FOLD_CSV,
     NUM_WORKERS,
@@ -16,7 +15,6 @@ from mri2pet.config import (
     PROMPT_HIDDEN_DIM,
     RESAMPLE_BACK_TO_T1,
     ROOT_DIR,
-    USE_CHECKPOINT,
 )
 from mri2pet.data import (
     KariAV1451Dataset,
@@ -131,7 +129,7 @@ if __name__ == "__main__":
     G = ResidualSpatialPriorGenerator(
         in_ch=1,
         out_ch=1,
-        use_checkpoint=USE_CHECKPOINT,
+        use_checkpoint=False,
         clinical_dim=CLINICAL_DIM,
         prompt_z_dim=PROMPT_HIDDEN_DIM,
     )
@@ -144,11 +142,6 @@ if __name__ == "__main__":
         shutil.rmtree(OUT_DIR)
         print(f"Cleared old output dir: {OUT_DIR}")
     os.makedirs(VOL_DIR, exist_ok=True)
-
-    use_amp = AMP_ENABLE and device.type == "cuda"
-    amp_dtype = torch.float16
-    if use_amp and torch.cuda.is_bf16_supported():
-        amp_dtype = torch.bfloat16
 
     print("Starting inference...")
     with torch.inference_mode():
@@ -165,8 +158,7 @@ if __name__ == "__main__":
             flair5, clinical, _ = _extract_new_variant_inputs(metas_list, device)
             brain5, cortex5 = _extract_masks(metas_list, device)
 
-            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
-                pet_hat, aux = G(mri5, flair5, clinical, brain5, cortex5, return_aux=True)
+            pet_hat, aux = G(mri5, flair5, clinical, brain5, cortex5, return_aux=True)
 
             mri_np = mri5.squeeze(0).squeeze(0).cpu().numpy()
             pet_np = pet5.squeeze(0).squeeze(0).cpu().numpy()
