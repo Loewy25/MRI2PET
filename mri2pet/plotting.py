@@ -11,7 +11,11 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
     if "train_D" in history:
         plt.plot(history["train_D"], label="Train D")
     if "val_recon" in history and len(history["val_recon"]) > 0:
-        plt.plot(history["val_recon"], label="Val (L1 + 1-SSIM)")
+        plt.plot(history["val_recon"], label="Val Recon")
+    if "val_roi" in history and len(history["val_roi"]) > 0:
+        plt.plot(history["val_roi"], label="Val ROI")
+    if "val_score" in history and len(history["val_score"]) > 0:
+        plt.plot(history["val_score"], label="Val Score")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training / Validation Losses")
@@ -23,13 +27,17 @@ def save_loss_curves(history: Dict[str, Sequence[float]], out_path: str):
 def save_history_csv(history: Dict[str, Sequence[float]], out_csv: str):
     L = max(len(history.get("train_G", [])),
             len(history.get("train_D", [])),
-            len(history.get("val_recon", [])))
+            len(history.get("val_recon", [])),
+            len(history.get("val_roi", [])),
+            len(history.get("val_score", [])))
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["epoch", "train_G", "train_D", "val_recon"])
+        w.writerow(["epoch", "train_G", "train_D", "val_recon", "val_roi", "val_score"])
         for i in range(L):
             row = [i+1,
                    history.get("train_G",  [None]*L)[i] if i < len(history.get("train_G",[])) else "",
                    history.get("train_D",  [None]*L)[i] if i < len(history.get("train_D",[])) else "",
-                   history.get("val_recon",[None]*L)[i] if i < len(history.get("val_recon",[])) else ""]
+                   history.get("val_recon",[None]*L)[i] if i < len(history.get("val_recon",[])) else "",
+                   history.get("val_roi",  [None]*L)[i] if i < len(history.get("val_roi",[])) else "",
+                   history.get("val_score",[None]*L)[i] if i < len(history.get("val_score",[])) else ""]
             w.writerow(row)

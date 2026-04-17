@@ -6,6 +6,7 @@ import wandb  # <-- add this
 from mri2pet.config import (
     ROOT_DIR, OUT_DIR, RUN_NAME, OUT_RUN, CKPT_DIR, VOL_DIR,
     EPOCHS, GAMMA, DATA_RANGE, BATCH_SIZE, RESIZE_TO,
+    VAL_ROI_WEIGHT, LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
@@ -46,6 +47,9 @@ def init_wandb_run():
                 "data_range": DATA_RANGE,
                 "batch_size": BATCH_SIZE,
                 "resize_to": RESIZE_TO,
+                "val_roi_weight": VAL_ROI_WEIGHT,
+                "lr_plateau_patience": LR_PLATEAU_PATIENCE,
+                "early_stop_patience": EARLY_STOP_PATIENCE,
                 "oversample_enable": OVERSAMPLE_ENABLE,
                 "oversample_label3_target": OVERSAMPLE_LABEL3_TARGET,
                 "aug_enable": AUG_ENABLE,

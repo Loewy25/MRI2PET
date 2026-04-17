@@ -2,8 +2,8 @@ import os
 from typing import Optional, Tuple
 import torch
 
-ROOT_DIR   = os.environ.get("ROOT_DIR", "/scratch/l.peiwang/kari_flair_all")
-OUT_DIR    = os.environ.get("OUT_DIR", "/home/l.peiwang/MRI2PET")
+ROOT_DIR   = "/scratch/l.peiwang/kari_flair_all"
+OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
 # ---- NEW: allow override via environment variables ----
 # default name if env not set
@@ -16,14 +16,13 @@ os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
 
-RESIZE_TO: Optional[Tuple[int,int,int]] = (128, 128, 128)
+RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)
 RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
-BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "1"))
-EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "1"))
-NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "1"))
+BATCH_SIZE     = 1
+NUM_WORKERS    = 4
 PIN_MEMORY     = True
 
 EPOCHS      = 150
@@ -35,7 +34,7 @@ DATA_RANGE  = 3.5
 
 torch.backends.cudnn.benchmark = True
 
-SPLITS_DIR = os.environ.get("SPLITS_DIR", os.path.join(ROOT_DIR, "CV5_braak_strat"))
+SPLITS_DIR = os.path.join('/scratch/l.peiwang/braak_merged_kari_all', "CV5_braak_strat")
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
@@ -98,73 +97,8 @@ ROI_HI_LAMBDA = _env_float("ROI_HI_LAMBDA", 2.0)
 ROI_HI_MIN_VOXELS = _env_int("ROI_HI_MIN_VOXELS", 32)
 
 # =========================
-# CSV Data Sources
-# =========================
-BRAAK_THRESHOLD = _env_float("BRAAK_THRESHOLD", 1.2)
-
-MR_AMY_TAU_CDR_CSV = os.environ.get(
-    "MR_AMY_TAU_CDR_CSV",
-    "/scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv",
-)
-MR_COG_PET_CSV = os.environ.get(
-    "MR_COG_PET_CSV",
-    "/scratch/l.peiwang/MR_COG_PET_rsfMRI.csv",
-)
-DEMOGRAPHICS_CSV = os.environ.get(
-    "DEMOGRAPHICS_CSV",
-    "/scratch/l.peiwang/demographics.csv",
-)
-
-# =========================
-# Model Variant
-# =========================
-MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "residual_spatial_prior")
-BASE_PRETRAIN_CKPT = os.environ.get("BASE_PRETRAIN_CKPT", "")
-
-# =========================
-# Residual-Spatial-Prior settings
-# =========================
-FREEZE_BASE_EPOCHS = _env_int("FREEZE_BASE_EPOCHS", 10)
-BASE_LR_MULT = _env_float("BASE_LR_MULT", 0.25)
-DETACH_BASE_LATENT_FOR_PRIOR = _env_bool(
-    "DETACH_BASE_LATENT_FOR_PRIOR",
-    _env_bool("DETACH_BASE_LATENT_FOR_AUX", True),
-)
-
-CLINICAL_DIM = _env_int("CLINICAL_DIM", 10)
-PROMPT_HIDDEN_DIM = _env_int("PROMPT_HIDDEN_DIM", 128)
-
-# =========================
-# Residual-side conditioning
-# =========================
-USE_FLAIR = _env_bool("USE_FLAIR", True)
-USE_CLINICAL = _env_bool("USE_CLINICAL", True)
-USE_BRAAK_HEAD = _env_bool("USE_BRAAK_HEAD", True)
-USE_SPATIAL_PRIOR = _env_bool("USE_SPATIAL_PRIOR", True)
-
-LAMBDA_BRAAK = _env_float("LAMBDA_BRAAK", 0.25)
-LAMBDA_DELTA_SUP = _env_float("LAMBDA_DELTA_SUP", 0.5)
-MASK_GLOBAL_RECON = _env_bool("MASK_GLOBAL_RECON", True)
-
-SPATIAL_PRIOR_K = _env_int("SPATIAL_PRIOR_K", 4)
-SPATIAL_PRIOR_LR_MULT = _env_float("SPATIAL_PRIOR_LR_MULT", 3.0)
-PRIOR_GAIN_INIT_B = _env_float("PRIOR_GAIN_INIT_B", 0.10)
-PRIOR_GAIN_INIT_X4 = _env_float("PRIOR_GAIN_INIT_X4", 0.10)
-PRIOR_GAIN_INIT_X3 = _env_float("PRIOR_GAIN_INIT_X3", 0.05)
-
-# =========================
-# Validation Score
+# Validation Score / Scheduling
 # =========================
 VAL_ROI_WEIGHT = _env_float("VAL_ROI_WEIGHT", 0.02)
-
-# =========================
-# Validation Scheduling
-# =========================
 LR_PLATEAU_PATIENCE = _env_int("LR_PLATEAU_PATIENCE", 15)
 EARLY_STOP_PATIENCE = _env_int("EARLY_STOP_PATIENCE", 40)
-
-# =========================
-# Memory Saving
-# =========================
-USE_CHECKPOINT = _env_bool("USE_CHECKPOINT", True)
-AMP_ENABLE     = _env_bool("AMP_ENABLE", True)

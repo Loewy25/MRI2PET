@@ -59,14 +59,19 @@ def ssim3d_masked(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor,
                   data_range: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
     pad = ksize // 2
     k = torch.ones((1, 1, ksize, ksize, ksize), device=x.device, dtype=x.dtype)
+
     def wavg(z):
         z_sum = F.conv3d(z * mask, k, padding=pad)
-        m_sum = F.conv3d(mask,     k, padding=pad).clamp_min(eps)
+        m_sum = F.conv3d(mask, k, padding=pad).clamp_min(eps)
         return z_sum / m_sum
-    mu_x = wavg(x); mu_y = wavg(y)
-    mu_x2 = mu_x * mu_x; mu_y2 = mu_y * mu_y; mu_xy = mu_x * mu_y
-    sigma_x  = wavg(x * x) - mu_x2
-    sigma_y  = wavg(y * y) - mu_y2
+
+    mu_x = wavg(x)
+    mu_y = wavg(y)
+    mu_x2 = mu_x * mu_x
+    mu_y2 = mu_y * mu_y
+    mu_xy = mu_x * mu_y
+    sigma_x = wavg(x * x) - mu_x2
+    sigma_y = wavg(y * y) - mu_y2
     sigma_xy = wavg(x * y) - mu_xy
     C1 = (k1 * data_range) ** 2
     C2 = (k2 * data_range) ** 2
@@ -105,7 +110,6 @@ def mmd_gaussian(real: torch.Tensor,
     B = real.size(0)
     dev = real.device
     total = 0.0
-    n_valid = 0
     for i in range(B):
         r = real[i, 0].reshape(-1)
         f = fake[i, 0].reshape(-1)
@@ -114,7 +118,7 @@ def mmd_gaussian(real: torch.Tensor,
             m = (mask[i, 0].reshape(-1) > 0.5)
             idx_pool = torch.nonzero(m, as_tuple=False).reshape(-1)
             if idx_pool.numel() == 0:
-                continue
+                return 0.0
             S = min(num_voxels, idx_pool.numel())
             sel = idx_pool[torch.randint(0, idx_pool.numel(), (S,), device=dev)]
             r_s = r[sel].view(S, 1)
@@ -138,5 +142,4 @@ def mmd_gaussian(real: torch.Tensor,
             mmd += Krr.mean() + Kff.mean() - 2 * Krf.mean()
         mmd /= len(sigmas)
         total += mmd.item()
-        n_valid += 1
-    return total / max(1, n_valid)
+    return total / B
