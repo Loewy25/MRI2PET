@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 import nibabel as nib
-from nibabel.processing import resample_from_to
+from scipy.ndimage import zoom as nd_zoom
 
 import torch
 import torch.nn.functional as F
@@ -134,19 +134,6 @@ def affines_close(a: nib.Nifti1Image, b: nib.Nifti1Image, atol=ATOL_AFFINE) -> b
 
 def to_tensor_5d(x: np.ndarray, device: torch.device) -> torch.Tensor:
     return torch.from_numpy(x.astype(np.float32))[None, None, ...].to(device)
-
-def resample_mask_to_ref(mask_img: nib.Nifti1Image,
-                         ref_img: nib.Nifti1Image) -> np.ndarray:
-    """
-    Resample ROI masks into the PET reference grid using affine-aware nearest-neighbor
-    resampling. This keeps ROI evaluation in the actual image space instead of relying
-    on shape-only zooming.
-    """
-    if mask_img.shape == ref_img.shape and affines_close(mask_img, ref_img):
-        return np.asanyarray(mask_img.dataobj)
-
-    out = resample_from_to(mask_img, (ref_img.shape, ref_img.affine), order=0)
-    return np.asanyarray(out.dataobj)
 
 def safe_fname(s: str) -> str:
     s = str(s)
@@ -435,8 +422,14 @@ def compute_subject_all(subj_for_paths: str,
             means[f"{roi_name}_GT"] = float("nan")
             means[f"{roi_name}_Fake"] = float("nan")
             return
-        roi_img, _ = load_nii(roi_path)
-        roi_np = (resample_mask_to_ref(roi_img, fake_img) > 0.5).astype(np.uint8)
+        roi_img, roi_np = load_nii(roi_path)
+        if roi_np.shape != fake_np.shape:
+            zf = tuple(f / r for f, r in zip(fake_np.shape, roi_np.shape))
+            roi_np = (nd_zoom(roi_np.astype(np.float32), zf, order=0) > 0.5).astype(np.uint8)
+        if strict_affine and not affines_close(roi_img, fake_img):
+            means[f"{roi_name}_GT"] = float("nan")
+            means[f"{roi_name}_Fake"] = float("nan")
+            return
 
         mask = (roi_np > 0)
         if mask.sum() == 0:
