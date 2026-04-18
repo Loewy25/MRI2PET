@@ -29,12 +29,12 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="finaltry_resize_fold5_os65_prob5"
+export RUN_NAME="finaltry_resize_fold5_os5_prob5"
 export FOLD_INDEX=4
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.65
+export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Augmentation (train only)
 export AUG_ENABLE=1
