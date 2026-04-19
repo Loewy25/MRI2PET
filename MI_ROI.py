@@ -107,7 +107,7 @@ def compute_subject(subj_dir: str, bins: int, verbose: bool) -> List[Dict[str, s
 
     required = [t1_p, pt_p, bm_p]
     if not all(os.path.exists(p) for p in required):
-        print(f"[MISS] {sid}: missing one of {', '.join(os.path.basename(p) for p in required)}")
+        print(f"[MISS] {sid}: missing one of {', '.join(os.path.basename(p) for p in required)}", flush=True)
         return []
 
     t1  = load_nii(t1_p)
@@ -115,11 +115,11 @@ def compute_subject(subj_dir: str, bins: int, verbose: bool) -> List[Dict[str, s
     bm  = load_nii(bm_p)
 
     if t1.shape != pet.shape or bm.shape != t1.shape:
-        print(f"[WARN] {sid}: shape mismatch (T1 {t1.shape}, PET {pet.shape}, mask {bm.shape}); skipping.")
+        print(f"[WARN] {sid}: shape mismatch (T1 {t1.shape}, PET {pet.shape}, mask {bm.shape}); skipping.", flush=True)
         return []
 
     if verbose:
-        print(f"[DBG] {sid}: shape={t1.shape} | T1[min,max]=({t1.min():.4g},{t1.max():.4g}) | PET[min,max]=({pet.min():.4g},{pet.max():.4g})")
+        print(f"[DBG] {sid}: shape={t1.shape} | T1[min,max]=({t1.min():.4g},{t1.max():.4g}) | PET[min,max]=({pet.min():.4g},{pet.max():.4g})", flush=True)
 
     # Normalized counterparts (MRI z-score within brain; PET masked outside brain)
     t1n  = zscore_in_brain(t1, bm)
@@ -142,11 +142,11 @@ def compute_subject(subj_dir: str, bins: int, verbose: bool) -> List[Dict[str, s
     for roi_name, roi_file in ROI_FILES.items():
         rp = os.path.join(subj_dir, roi_file)
         if not os.path.exists(rp):
-            if verbose: print(f"[WARN] {sid}: missing {roi_file}")
+            if verbose: print(f"[WARN] {sid}: missing {roi_file}", flush=True)
             continue
         r = load_nii(rp)
         if r.shape != t1.shape:
-            print(f"[WARN] {sid}: {roi_file} shape {r.shape} != MRI {t1.shape}; skip.")
+            print(f"[WARN] {sid}: {roi_file} shape {r.shape} != MRI {t1.shape}; skip.", flush=True)
             continue
 
         mi_raw,  nmi_raw,  vox_r = mi_nmi_in_mask(t1,  pet,  r, bins=bins)
@@ -227,12 +227,12 @@ def main():
     subjects = [d for d in sorted(cand) if req.issubset(set(os.listdir(d)))]
     if args.limit: subjects = subjects[:args.limit]
 
-    print(f"[INFO] Found {len(subjects)} subjects under {args.root_dir}")
+    print(f"[INFO] Found {len(subjects)} subjects under {args.root_dir}", flush=True)
 
     all_rows: List[Dict[str, str]] = []
     for i, sd in enumerate(subjects, 1):
         sid = os.path.basename(sd.rstrip("/"))
-        print(f"[{i}/{len(subjects)}] {sid}")
+        print(f"[{i}/{len(subjects)}] {sid}", flush=True)
         rows = compute_subject(sd, bins=args.bins, verbose=args.verbose)
         if rows:
             sub_csv = os.path.join(sd, "mi_metrics.csv")
@@ -252,10 +252,10 @@ def main():
                           "N_NMI_raw","NMI_raw_mean","NMI_raw_std",
                           "N_MI_norm","MI_norm_mean_bits","MI_norm_std_bits",
                           "N_NMI_norm","NMI_norm_mean","NMI_norm_std"])
-        print(f"[INFO] Wrote {long_csv}")
-        print(f"[INFO] Wrote {summ_csv}")
+        print(f"[INFO] Wrote {long_csv}", flush=True)
+        print(f"[INFO] Wrote {summ_csv}", flush=True)
     else:
-        print("[WARN] No MI/NMI rows produced.")
+        print("[WARN] No MI/NMI rows produced.", flush=True)
 
 if __name__ == "__main__":
     main()
