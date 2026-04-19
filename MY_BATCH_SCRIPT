@@ -96,11 +96,11 @@ pip install pydicom
 #   --data-range 3.5 \
 #   --mmd-voxels 2048
 
-# python MI_ROI.py \
-#   --root-dir /scratch/l.peiwang/kari_brainv11 \
-#   --out /scratch/l.peiwang/kari_brainv11/mi_results_norm_vs_raw \
-#   --bins 64 \
-#   --verbose
+ python MI_ROI.py \
+   --root-dir /scratch/l.peiwang/kari_flair_all \
+   --out /scratch/l.peiwang/kari_flair_all/mi_results_norm_vs_raw \
+   --bins 64 \
+   --verbose
 # ------------------------------------------------------------
 #python summary_extra_modality.py
 # Actual job
@@ -145,19 +145,19 @@ pip install pydicom
 
 
 
-python eval_taupet_comprehensive.py \
-  --roi-root /scratch/l.peiwang/kari_flair_all\
-  --vols-roots \
-    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold1_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold2_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold3_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold4_os5_aug_5/volumes \
-    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold5_os5_aug_5/volumes \
-  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
-  --session-col TAU_PET_Session \
-  --split-by braak \
-  --thr-braak 1.2 \
-  --out /scratch/l.peiwang/batch1_128_direct_mm_conditional_fold1_os5_aug_5
+#python eval_taupet_comprehensive.py \
+#  --roi-root /scratch/l.peiwang/kari_flair_all\
+#  --vols-roots \
+#    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold1_os5_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold2_os5_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold3_os5_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold4_os5_aug_5/volumes \
+#    /home/l.peiwang/MRI2PET/batch1_128_direct_mm_conditional_fold5_os5_aug_5/volumes \
+#  --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
+#  --session-col TAU_PET_Session \
+#  --split-by braak \
+#  --thr-braak 1.2 \
+#  --out /scratch/l.peiwang/batch1_128_direct_mm_conditional_fold1_os5_aug_5
 
 #python build_kari_flair_all.py
 #python new_class.py \
