@@ -2,7 +2,7 @@ import os
 from typing import Optional, Tuple
 import torch
 
-ROOT_DIR   = "/scratch/l.peiwang/kari_flair_all"
+ROOT_DIR   = "/scratch/l.peiwang/kari_brainv33_top300"
 OUT_DIR    = "/home/l.peiwang/MRI2PET"
 
 # ---- NEW: allow override via environment variables ----
@@ -34,7 +34,7 @@ DATA_RANGE  = 3.5
 
 torch.backends.cudnn.benchmark = True
 
-SPLITS_DIR = os.path.join('/scratch/l.peiwang/kari_flair_all', "CV5_braak_strat")
+SPLITS_DIR = os.path.join('/scratch/l.peiwang/kari_brainv33_top300', "CV5_braak_strat")
 
 # ---- NEW: FOLD_INDEX also from env (0-based) ----
 FOLD_INDEX = int(os.environ.get("FOLD_INDEX", "0"))   # "0".."4"
