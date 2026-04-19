@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from .config import (
     EPOCHS, GAMMA, DATA_RANGE,
     LR_G, LR_D, CKPT_DIR, RESAMPLE_BACK_TO_T1,
-    VAL_ROI_WEIGHT, LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
     AUG_ENABLE, AUG_PROB, AUG_FLIP_PROB,
     AUG_INTENSITY_PROB, AUG_NOISE_STD,
     AUG_SCALE_MIN, AUG_SCALE_MAX,
@@ -17,7 +16,7 @@ from .config import (
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
 )
 
-from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
+from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
 from .utils import _safe_name, _save_nifti, _meta_unbatch
 import wandb
 
@@ -42,16 +41,12 @@ def train_paggan(
     opt_G = torch.optim.Adam(G.parameters(), lr=LR_G)
     opt_D = torch.optim.Adam(D.parameters(), lr=LR_D)
     adv_criterion = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE
-    )
 
     best_val = float("inf")
     best_G: Optional[Dict[str, torch.Tensor]] = None
     best_D: Optional[Dict[str, torch.Tensor]] = None
-    patience_counter = 0
 
-    hist = {"train_G": [], "train_D": [], "val_recon": [], "val_roi": [], "val_score": []}
+    hist = {"train_G": [], "train_D": [], "val_recon": []}
 
     # =========================================================================
     # [MGDA-UB STANDARDIZATION INIT]
@@ -451,67 +446,42 @@ def train_paggan(
 
         # ---- Validation ----
         val_recon_epoch: Optional[float] = None
-        val_roi_epoch: Optional[float] = None
-        val_score_epoch: Optional[float] = None
 
         if val_loader is not None:
             G.eval()
             with torch.no_grad():
-                val_recon, val_roi_sum, v_batches = 0.0, 0.0, 0
+                val_recon, v_batches = 0.0, 0
                 for batch in val_loader:
                     if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                        mri, pet, meta_v = batch
+                        mri, pet, _ = batch
                     else:
                         mri, pet = batch
-                        meta_v = {}
                     mri = mri.to(device, non_blocking=True)
                     pet = pet.to(device, non_blocking=True)
-                    Bv = mri.size(0) if mri.dim() == 5 else 1
-                    mri5v = mri if mri.dim() == 5 else mri.unsqueeze(0)
-                    pet5v = pet if pet.dim() == 5 else pet.unsqueeze(0)
-                    fake = G(mri5v)
-                    loss_l1_v = l1_loss(fake, pet5v)
-                    ssim_v = ssim3d(fake, pet5v, data_range=data_range)
+                    fake = G(mri if mri.dim() == 5 else mri.unsqueeze(0))
+                    pet_for_metric = pet if pet.dim() == 5 else pet.unsqueeze(0)
+                    loss_l1_v = l1_loss(fake, pet_for_metric)
+                    ssim_v = ssim3d(fake, pet_for_metric, data_range=data_range)
                     val_recon += (loss_l1_v + (1.0 - ssim_v)).item()
-
-                    cortex5_v = _meta_to_mask(meta_v, "cortex_mask", B_expected=Bv)
-                    if cortex5_v is not None and float(cortex5_v.sum().item()) > 0.0:
-                        val_roi_sum += _masked_l1_high_uptake(fake, pet5v, cortex5_v).item()
                     v_batches += 1
-
             val_recon /= max(1, v_batches)
-            val_roi_sum /= max(1, v_batches)
-            val_score = val_recon + VAL_ROI_WEIGHT * val_roi_sum
             val_recon_epoch = val_recon
-            val_roi_epoch = val_roi_sum
-            val_score_epoch = val_score
             hist["val_recon"].append(val_recon)
-            hist["val_roi"].append(val_roi_sum)
-            hist["val_score"].append(val_score)
 
-            scheduler.step(val_score)
-
-            if val_score < best_val:
-                best_val = val_score
-                patience_counter = 0
+            if val_recon < best_val:
+                best_val = val_recon
                 best_G = {k: v.detach().clone() for k, v in G.state_dict().items()}
                 best_D = {k: v.detach().clone() for k, v in D.state_dict().items()}
                 torch.save(best_G, os.path.join(CKPT_DIR, "best_G.pth"))
                 torch.save(best_D, os.path.join(CKPT_DIR, "best_D.pth"))
-            else:
-                patience_counter += 1
 
             if verbose:
                 dt = time.time() - t0
-                cur_lr = opt_G.param_groups[0]["lr"]
                 print(
                     f"Epoch [{epoch:03d}/{epochs}]  "
                     f"G: {avg_g:.4f}  D: {avg_d:.4f}  "
-                    f"ValRecon: {val_recon:.4f}  ValROI: {val_roi_sum:.4f}  "
-                    f"ValScore: {val_score:.4f}  "
-                    f"| best {best_val:.4f}  "
-                    f"patience={patience_counter}/{EARLY_STOP_PATIENCE}  "
-                    f"lr={cur_lr:.1e}  | {dt:.1f}s"
+                    f"ValRecon(L1 + 1-SSIM): {val_recon:.4f}  "
+                    f"| best {best_val:.4f}  | {dt:.1f}s"
                 )
                 print(
                     f"      [MGDA-UB-3] w_global={avg_w_global:.3f}  "
@@ -522,9 +492,6 @@ def train_paggan(
                 )
 
             G.train()
-            if patience_counter >= EARLY_STOP_PATIENCE:
-                print(f"Early stopping at epoch {epoch} (patience={EARLY_STOP_PATIENCE})")
-                break
         elif verbose:
             dt = time.time() - t0
             print(
@@ -558,11 +525,7 @@ def train_paggan(
             }
             if val_recon_epoch is not None:
                 log_dict["val/recon_loss"] = val_recon_epoch
-            if val_roi_epoch is not None:
-                log_dict["val/roi_loss"] = val_roi_epoch
-            if val_score_epoch is not None:
-                log_dict["val/score"] = val_score_epoch
-                log_dict["val/best_score"] = best_val
+                log_dict["val/best_recon_loss"] = best_val
             wandb.log(log_dict, step=epoch)
 
     # ---- Load best weights ----
@@ -610,12 +573,13 @@ def evaluate_paggan(
         else:
             raise TypeError("No Mask")
 
-        fake_f = fake.float()
-        pet_f = pet_for_metric.float()
-        ssim_sum += ssim3d_masked(fake_f, pet_f, brain, data_range=data_range).item()
-        psnr_sum += masked_psnr(fake_f, pet_f, brain, data_range=data_range)
-        mse_sum += masked_mse(fake_f, pet_f, brain).item()
-        mmd_sum += mmd_gaussian(pet_f, fake_f, num_voxels=mmd_voxels, mask=brain)
+        fake_m = fake * brain
+        pet_m  = pet_for_metric * brain
+
+        ssim_sum += ssim3d(fake_m, pet_m, data_range=data_range).item()
+        psnr_sum += psnr(fake_m, pet_m, data_range=data_range)
+        mse_sum  += F.mse_loss(fake_m, pet_m).item()
+        mmd_sum  += mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
         n += 1
 
     return {
@@ -685,14 +649,14 @@ def evaluate_and_save(
         else:
             brain = (pet_for_metric > 0).float()
 
-        fake_f = fake_t.float()
-        pet_f = pet_for_metric.float()
+        fake_m = fake_t * brain
+        pet_m  = pet_for_metric * brain
 
         # per-subject metrics
-        ssim_val = ssim3d_masked(fake_f, pet_f, brain, data_range=data_range).item()
-        psnr_val = masked_psnr(fake_f, pet_f, brain, data_range=data_range)
-        mse_val  = masked_mse(fake_f, pet_f, brain).item()
-        mmd_val  = mmd_gaussian(pet_f, fake_f, num_voxels=mmd_voxels, mask=brain)
+        ssim_val = ssim3d(fake_m, pet_m, data_range=data_range).item()
+        psnr_val = psnr(fake_m,  pet_m, data_range=data_range)
+        mse_val  = F.mse_loss(fake_m, pet_m).item()
+        mmd_val  = mmd_gaussian(pet_m, fake_m, num_voxels=mmd_voxels, mask=brain)
 
         ssim_list.append(ssim_val)
         psnr_list.append(psnr_val)

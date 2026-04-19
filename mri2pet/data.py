@@ -50,8 +50,7 @@ class KariAV1451Dataset(Dataset):
     """
     Loads pairs (T1_masked.nii.gz, PET_in_T1_masked.nii.gz) from AV1451 subject folders,
     normalizes, optional resize, returns (MRI, PET, meta) where MRI/PET are FloatTensors [1,D,H,W].
-    Restricts subjects to the same required-file set as the newer baseline pipeline:
-    T1, FLAIR, PET, brain mask, and cortex mask must all exist.
+    Uses aseg_brainmask.nii.gz if available for masking; otherwise T1>0 as mask.
     """
     def __init__(
         self,
@@ -70,12 +69,10 @@ class KariAV1451Dataset(Dataset):
         self.items: List[Tuple[str,str,Optional[str]]] = []
         for d in subjects:
             t1p  = os.path.join(d, "T1_masked.nii.gz")
-            flairp = os.path.join(d, "FLAIR_in_T1_masked.nii.gz")
             petp = os.path.join(d, "PET_in_T1_masked.nii.gz")
-            maskp = os.path.join(d, "aseg_brainmask.nii.gz")
-            cortexp = os.path.join(d, "mask_cortex.nii.gz")
-            if all(os.path.exists(p) for p in (t1p, flairp, petp, maskp, cortexp)):
-                self.items.append((t1p, petp, maskp))
+            if os.path.exists(t1p) and os.path.exists(petp):
+                maskp = os.path.join(d, "aseg_brainmask.nii.gz")
+                self.items.append((t1p, petp, maskp if os.path.exists(maskp) else None))
 
         if len(self.items) == 0:
             raise RuntimeError(f"No subject folders with required files under {root_dir}")

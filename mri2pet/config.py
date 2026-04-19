@@ -95,10 +95,3 @@ AUG_SHIFT_MAX = _env_float("AUG_SHIFT_MAX", 0.1)
 ROI_HI_Q = _env_float("ROI_HI_Q", 0.85)
 ROI_HI_LAMBDA = _env_float("ROI_HI_LAMBDA", 2.0)
 ROI_HI_MIN_VOXELS = _env_int("ROI_HI_MIN_VOXELS", 32)
-
-# =========================
-# Validation Score / Scheduling
-# =========================
-VAL_ROI_WEIGHT = _env_float("VAL_ROI_WEIGHT", 0.02)
-LR_PLATEAU_PATIENCE = _env_int("LR_PLATEAU_PATIENCE", 15)
-EARLY_STOP_PATIENCE = _env_int("EARLY_STOP_PATIENCE", 40)
