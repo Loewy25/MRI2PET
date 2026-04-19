@@ -97,8 +97,8 @@ pip install pydicom
 #   --mmd-voxels 2048
 
  python MI_ROI.py \
-   --root-dir /scratch/l.peiwang/kari_flair_all \
-   --out /scratch/l.peiwang/kari_flair_all/mi_results_norm_vs_raw \
+   --root-dir /scratch/l.peiwang/kari_all \
+   --out /scratch/l.peiwang/kari_all/mi_results_norm_vs_raw \
    --bins 64 \
    --verbose
 # ------------------------------------------------------------
