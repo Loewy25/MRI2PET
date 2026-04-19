@@ -17,7 +17,7 @@ os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
 
 RESIZE_TO: Optional[Tuple[int,int,int]] = (128,128,128)
-RESAMPLE_BACK_TO_T1 = False
+RESAMPLE_BACK_TO_T1 = True
 
 TRAIN_FRACTION = 0.70
 VAL_FRACTION   = 0.15
