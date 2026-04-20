@@ -148,16 +148,16 @@ pip install pydicom
 python eval_taupet_comprehensive.py \
   --roi-root /scratch/l.peiwang/kari_flair_all\
   --vols-roots \
-    /home/l.peiwang/MRI2PET/finaltry_reverse_300_resize_fold1_os65_prob5/volumes \
-    /home/l.peiwang/MRI2PET/finaltry_reverse_300_resize_fold2_os65_prob5/volumes \
-    /home/l.peiwang/MRI2PET/finaltry_reverse_300_resize_fold3_os65_prob5/volumes \
-    /home/l.peiwang/MRI2PET/finaltry_reverse_300_resize_fold4_os65_prob5/volumes \
-    /home/l.peiwang/MRI2PET/finaltry_reverse_300_resize_fold5_os65_prob5/volumes \
+    /home/l.peiwang/MRI2PET/finaltry_reverse_NOresize_fold1_os5_prob5/volumes \
+    /home/l.peiwang/MRI2PET/finaltry_reverse_NOresize_fold2_os5_prob5/volumes \
+    /home/l.peiwang/MRI2PET/finaltry_reverse_NOresize_fold3_os5_prob5/volumes \
+    /home/l.peiwang/MRI2PET/finaltry_reverse_NOresize_fold4_os5_prob5/volumes \
+    /home/l.peiwang/MRI2PET/finaltry_reverse_NOresize_fold5_os5_prob5/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
   --thr-braak 1.2 \
-  --out /scratch/l.peiwang/finaltry_reverse_300_resize_fold1_os65_prob5
+  --out /scratch/l.peiwang/finaltry_reverse_NOresize_fold1_os5_prob5
 
 #python build_kari_flair_all.py
 #python new_class.py \
