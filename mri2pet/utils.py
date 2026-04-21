@@ -31,8 +31,46 @@ def _safe_name(s: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in s)
 
 def _save_nifti(vol: np.ndarray, affine: np.ndarray, path: str):
+    affine = np.asarray(affine, dtype=np.float64)
     img = nib.Nifti1Image(vol.astype(np.float32), affine)
+    img.set_sform(affine, code=1)
+    try:
+        img.set_qform(affine, code=1)
+    except Exception:
+        pass
     nib.save(img, path)
+
+def _resized_affine_for_scipy_zoom(
+    orig_affine: np.ndarray,
+    orig_shape,
+    new_shape,
+) -> np.ndarray:
+    """
+    Build an affine for an array resized with scipy.ndimage.zoom using the
+    current code's default grid_mode=False behavior.
+    """
+    orig_affine = np.asarray(orig_affine, dtype=np.float64)
+    orig_shape = np.asarray(orig_shape, dtype=np.float64).reshape(-1)[:3]
+    new_shape = np.asarray(new_shape, dtype=np.float64).reshape(-1)[:3]
+
+    if np.any(orig_shape <= 0) or np.any(new_shape <= 0):
+        raise ValueError(f"Bad shape: orig_shape={orig_shape}, new_shape={new_shape}")
+
+    if np.all(orig_shape == new_shape):
+        return orig_affine.copy()
+
+    scale = np.ones(3, dtype=np.float64)
+    for ax in range(3):
+        if orig_shape[ax] > 1 and new_shape[ax] > 1:
+            scale[ax] = (orig_shape[ax] - 1.0) / (new_shape[ax] - 1.0)
+        else:
+            scale[ax] = orig_shape[ax] / new_shape[ax]
+
+    S = np.eye(4, dtype=np.float64)
+    S[0, 0] = scale[0]
+    S[1, 1] = scale[1]
+    S[2, 2] = scale[2]
+    return orig_affine @ S
 
 def _as_int_tuple3(x: Union[Tuple[int,int,int], List[Any], np.ndarray, torch.Tensor]) -> Tuple[int,int,int]:
     if isinstance(x, (list, tuple)) and len(x) == 1:

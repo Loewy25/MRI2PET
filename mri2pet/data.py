@@ -12,6 +12,8 @@ import torch
 from scipy.ndimage import zoom as nd_zoom
 from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler, random_split
 
+from .utils import _resized_affine_for_scipy_zoom
+
 from .config import (
     BATCH_SIZE,
     EVAL_BATCH_SIZE,
@@ -467,11 +469,31 @@ class KariAV1451Dataset(Dataset):
         orig_shape = tuple(t1.shape)
         t1_affine = t1_img.affine
         pet_affine = pet_img.affine
+        flair_affine = flair_img.affine
+        mask_affine = mask_img.affine
+        cortex_affine = cortex_img.affine
+
+        if not np.allclose(t1_affine, pet_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: T1 and PET shapes match, but affines differ")
+        if not np.allclose(t1_affine, flair_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: T1 and FLAIR shapes match, but affines differ")
+        if not np.allclose(mask_affine, t1_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: brain mask affine does not match T1 affine")
+        if not np.allclose(cortex_affine, t1_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: cortex mask affine does not match T1 affine")
 
         t1 = _maybe_resize(t1, self.resize_to, order=1)
         flair = _maybe_resize(flair, self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
+        if self.resize_to is None or tuple(orig_shape) == tuple(cur_shape):
+            model_affine = np.asarray(t1_affine, dtype=np.float64)
+        else:
+            model_affine = _resized_affine_for_scipy_zoom(
+                t1_affine,
+                orig_shape=orig_shape,
+                new_shape=cur_shape,
+            )
 
         if self.resize_to is not None:
             dz, hy, wx = mask.shape
@@ -497,6 +519,7 @@ class KariAV1451Dataset(Dataset):
             "pet_path": item["pet_path"],
             "t1_affine": t1_affine,
             "pet_affine": pet_affine,
+            "model_affine": model_affine,
             "orig_shape": orig_shape,
             "cur_shape": cur_shape,
             "label": int(item["label"]),
