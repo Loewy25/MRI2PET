@@ -17,7 +17,7 @@ from .config import (
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian
-from .utils import _safe_name, _save_nifti, _meta_unbatch
+from .utils import _safe_name, _save_nifti, _meta_unbatch, _resized_affine_for_scipy_zoom
 import wandb
 
 
@@ -682,8 +682,17 @@ def evaluate_and_save(
             err_np  = nd_zoom(err_np,  zf, order=1)
             affine_to_use = meta.get("t1_affine", np.eye(4))
         else:
-            resized_to = meta.get("resized_to", None)
-            affine_to_use = meta.get("t1_affine", np.eye(4)) if resized_to is None else np.eye(4)
+            affine_to_use = meta.get("model_affine", None)
+            if affine_to_use is None:
+                resized_to = meta.get("resized_to", None)
+                if resized_to is None or tuple(orig_shape) == tuple(cur_shape):
+                    affine_to_use = meta.get("t1_affine", np.eye(4))
+                else:
+                    affine_to_use = _resized_affine_for_scipy_zoom(
+                        meta.get("t1_affine", np.eye(4)),
+                        orig_shape=orig_shape,
+                        new_shape=cur_shape,
+                    )
 
         _save_nifti(mri_np,  affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
         _save_nifti(pet_np,  affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))

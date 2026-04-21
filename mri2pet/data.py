@@ -13,7 +13,7 @@ from .config import (
     OVERSAMPLE_ENABLE, OVERSAMPLE_LABEL3_TARGET, OVERSAMPLE_MAX_WEIGHT
 )
 
-from .utils import _pad_or_crop_to  # used by models.py; keep import path if needed
+from .utils import _pad_or_crop_to, _resized_affine_for_scipy_zoom  # used by models.py; keep import path if needed
 
 def _maybe_resize(vol: np.ndarray, target: Optional[Tuple[int,int,int]], order: int = 1) -> np.ndarray:
     if target is None:
@@ -111,10 +111,24 @@ class KariAV1451Dataset(Dataset):
     
         if t1.shape != pet.shape:
             raise TypeError("T1 and PET are not in the same grid")
-    
+        if not np.allclose(t1_affine, pet_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: T1 and PET shapes match, but affines differ")
+        if mask_path is not None and not np.allclose(m_img.affine, t1_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: brain mask affine does not match T1 affine")
+        if cortex is not None and not np.allclose(c_img.affine, t1_affine, atol=1e-4):
+            raise RuntimeError(f"{sid}: cortex mask affine does not match T1 affine")
+
         t1  = _maybe_resize(t1,  self.resize_to, order=1)
         pet = _maybe_resize(pet, self.resize_to, order=1)
         cur_shape = tuple(t1.shape)
+        if self.resize_to is None or tuple(orig_shape) == tuple(cur_shape):
+            model_affine = np.asarray(t1_affine, dtype=np.float64)
+        else:
+            model_affine = _resized_affine_for_scipy_zoom(
+                t1_affine,
+                orig_shape=orig_shape,
+                new_shape=cur_shape,
+            )
     
         if self.resize_to is not None and mask is not None:
             Dz, Hy, Wx = mask.shape
@@ -143,6 +157,7 @@ class KariAV1451Dataset(Dataset):
             "pet_path": pet_path,
             "t1_affine": t1_affine,
             "pet_affine": pet_affine,
+            "model_affine": model_affine,
             "orig_shape": orig_shape,
             "cur_shape": cur_shape,
             "label": int(self.sid_to_label.get(sid, -1)),
