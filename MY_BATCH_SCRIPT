@@ -29,15 +29,15 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="2025_residual_5_os5"
-export FOLD_INDEX=4
+export RUN_NAME="2025_residual_4_os5"
+export FOLD_INDEX=3
 
 export MODEL_VARIANT="residual_spatial_prior"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os5/checkpoints/best_G.pth"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold2_os5/checkpoints/best_G.pth"
 #export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold3_os5/checkpoints/best_G.pth"
-#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold4_os65/checkpoints/best_G.pth"
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold5_os5/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold4_os65/checkpoints/best_G.pth"
+#export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold5_os5/checkpoints/best_G.pth"
 
 export USE_FLAIR=1
 export USE_CLINICAL=1
