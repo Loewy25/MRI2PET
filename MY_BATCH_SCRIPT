@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:tesla_a100:1
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
-#SBATCH --exclude=gpu02,gpua405
+#SBATCH --exclude=gpu02,gpua405,gpu01
 # Output and error filenames based on job ID and task ID
 #SBATCH --output=slurm-%A_haha.out
 #SBATCH --error=slurm-%A_haha.err
