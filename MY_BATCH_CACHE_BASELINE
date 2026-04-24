@@ -27,7 +27,7 @@ export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 # IMPORTANT: use the checkpoint trained for the same fold.
 # This can be a plain baseline Generator best_G.pth, or a residual model
 # best_G.pth; the cache tool will extract residual checkpoint base.* weights.
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025_residual_1_os65/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025_residual_1_os5/checkpoints/best_G.pth"
 
 # Output cache for this fold/model grid.
 export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
