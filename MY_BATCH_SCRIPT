@@ -152,7 +152,7 @@ python eval_taupet_comprehensive.py \
     /home/l.peiwang/MRI2PET/2025baseline_flair_fold2_os5/volumes \
     /home/l.peiwang/MRI2PET/2025baseline_flair_fold3_os5/volumes \
     /home/l.peiwang/MRI2PET/2025baseline_flair_fold4_os65/volumes \
-    /home/l.peiwang/MRI2PET/2025baseline_flair_fold5_os5/volumes \
+    /home/l.peiwang/MRI2PET/2025baseline_flair_fold5_os65/volumes \
   --meta-csv /scratch/l.peiwang/MR_AMY_TAU_CDR_merge_DF26.csv \
   --session-col TAU_PET_Session \
   --split-by braak \
