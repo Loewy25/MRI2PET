@@ -29,7 +29,7 @@ export WANDB__SERVICE_WAIT=300
 # wandb login 可以省略交互式那句，或者用: wandb login $WANDB_API_KEY
 
 # ---- NEW: per-job config ----
-export RUN_NAME="2025_residual_5_os65"
+export RUN_NAME="2025_residual_5_os5"
 export FOLD_INDEX=4
 
 export MODEL_VARIANT="residual_spatial_prior"
@@ -55,7 +55,7 @@ export DETACH_BASE_LATENT_FOR_PRIOR=1
 
 # Oversampling (train only)
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.65
+export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Augmentation (train only)
 export AUG_ENABLE=1
