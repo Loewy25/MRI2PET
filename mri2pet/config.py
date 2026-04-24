@@ -122,6 +122,33 @@ MODEL_VARIANT = os.environ.get("MODEL_VARIANT", "residual_spatial_prior")
 BASE_PRETRAIN_CKPT = os.environ.get("BASE_PRETRAIN_CKPT", "")
 
 # =========================
+# Residual Diffusion
+# =========================
+USE_BASELINE_CACHE = _env_bool("USE_BASELINE_CACHE", True)
+BASELINE_CACHE_DIR = os.environ.get("BASELINE_CACHE_DIR", "")
+
+DIFF_TIMESTEPS = _env_int("DIFF_TIMESTEPS", 1000)
+DIFF_BETA_START = _env_float("DIFF_BETA_START", 1e-4)
+DIFF_BETA_END = _env_float("DIFF_BETA_END", 2e-2)
+
+DIFF_UNET_BASE_CH = _env_int("DIFF_UNET_BASE_CH", 32)
+DIFF_EMB_DIM = _env_int("DIFF_EMB_DIM", 128)
+
+DIFF_LR = _env_float("DIFF_LR", 2e-4)
+DIFF_WEIGHT_DECAY = _env_float("DIFF_WEIGHT_DECAY", 1e-4)
+
+DIFF_RESIDUAL_MEAN = _env_float("DIFF_RESIDUAL_MEAN", 0.0)
+DIFF_RESIDUAL_STD = _env_float("DIFF_RESIDUAL_STD", 0.25)
+
+DIFF_LAMBDA_X0 = _env_float("DIFF_LAMBDA_X0", 1.0)
+DIFF_LAMBDA_ROI = _env_float("DIFF_LAMBDA_ROI", 1.0)
+DIFF_LAMBDA_BRAAK = _env_float("DIFF_LAMBDA_BRAAK", 0.25)
+
+DIFF_VAL_SAMPLE_STEPS = _env_int("DIFF_VAL_SAMPLE_STEPS", 50)
+DIFF_TEST_SAMPLE_STEPS = _env_int("DIFF_TEST_SAMPLE_STEPS", 100)
+DIFF_NUM_SAMPLES = _env_int("DIFF_NUM_SAMPLES", 8)
+
+# =========================
 # Residual-Spatial-Prior settings
 # =========================
 FREEZE_BASE_EPOCHS = _env_int("FREEZE_BASE_EPOCHS", 10)

@@ -13,6 +13,12 @@ from mri2pet.config import (
     AUG_SHIFT_MIN, AUG_SHIFT_MAX,
     ROI_HI_Q, ROI_HI_LAMBDA, ROI_HI_MIN_VOXELS,
     MODEL_VARIANT, BASE_PRETRAIN_CKPT,
+    USE_BASELINE_CACHE, BASELINE_CACHE_DIR,
+    DIFF_TIMESTEPS, DIFF_BETA_START, DIFF_BETA_END,
+    DIFF_UNET_BASE_CH, DIFF_EMB_DIM, DIFF_LR, DIFF_WEIGHT_DECAY,
+    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD,
+    DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
+    DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
@@ -27,8 +33,14 @@ from mri2pet.config import (
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
-from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator
-from mri2pet.train_eval import train_paggan, train_residual_spatial_prior, evaluate_and_save
+from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator, ResidualDiffusionUNet3D
+from mri2pet.train_eval import (
+    train_paggan,
+    train_residual_spatial_prior,
+    train_residual_diffusion,
+    evaluate_and_save,
+    evaluate_and_save_diffusion,
+)
 from mri2pet.plotting import save_loss_curves, save_history_csv
 from mri2pet.data import CLINICAL_FEATURE_NAMES
 
@@ -92,6 +104,26 @@ def init_wandb_run():
             "prior_gain_init_x4": PRIOR_GAIN_INIT_X4,
             "prior_gain_init_x3": PRIOR_GAIN_INIT_X3,
         })
+    if MODEL_VARIANT == "residual_diffusion":
+        wandb_config.update({
+            "use_baseline_cache": USE_BASELINE_CACHE,
+            "baseline_cache_dir": BASELINE_CACHE_DIR,
+            "diff_timesteps": DIFF_TIMESTEPS,
+            "diff_beta_start": DIFF_BETA_START,
+            "diff_beta_end": DIFF_BETA_END,
+            "diff_unet_base_ch": DIFF_UNET_BASE_CH,
+            "diff_emb_dim": DIFF_EMB_DIM,
+            "diff_lr": DIFF_LR,
+            "diff_weight_decay": DIFF_WEIGHT_DECAY,
+            "diff_residual_mean": DIFF_RESIDUAL_MEAN,
+            "diff_residual_std": DIFF_RESIDUAL_STD,
+            "diff_lambda_x0": DIFF_LAMBDA_X0,
+            "diff_lambda_roi": DIFF_LAMBDA_ROI,
+            "diff_lambda_braak": DIFF_LAMBDA_BRAAK,
+            "diff_val_sample_steps": DIFF_VAL_SAMPLE_STEPS,
+            "diff_test_sample_steps": DIFF_TEST_SAMPLE_STEPS,
+            "diff_num_samples": DIFF_NUM_SAMPLES,
+        })
 
     try:
         return wandb.init(
@@ -142,6 +174,18 @@ if __name__ == "__main__":
     print(f"Epochs:         {EPOCHS}")
     print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
     print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
+    if MODEL_VARIANT == "residual_diffusion":
+        print("Residual diffusion model:")
+        print(f"  USE_BASELINE_CACHE={USE_BASELINE_CACHE}  BASELINE_CACHE_DIR={BASELINE_CACHE_DIR}")
+        print(f"  timesteps={DIFF_TIMESTEPS} beta=[{DIFF_BETA_START}, {DIFF_BETA_END}]")
+        print(f"  base_ch={DIFF_UNET_BASE_CH} emb_dim={DIFF_EMB_DIM} lr={DIFF_LR} wd={DIFF_WEIGHT_DECAY}")
+        print(f"  residual mean/std={DIFF_RESIDUAL_MEAN}/{DIFF_RESIDUAL_STD}")
+        print(
+            f"  lambdas x0={DIFF_LAMBDA_X0} roi={DIFF_LAMBDA_ROI} braak={DIFF_LAMBDA_BRAAK} "
+            f"val_steps={DIFF_VAL_SAMPLE_STEPS} test_steps={DIFF_TEST_SAMPLE_STEPS} K={DIFF_NUM_SAMPLES}"
+        )
+        if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
+            raise RuntimeError("MODEL_VARIANT=residual_diffusion requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
     if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
         print("Residual spatial prior model:")
         print(
@@ -256,8 +300,19 @@ if __name__ == "__main__":
 
     # Instantiate models
     is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
+    is_residual_diffusion = (MODEL_VARIANT == "residual_diffusion")
 
-    if is_prompt_residual:
+    if is_residual_diffusion:
+        G = ResidualDiffusionUNet3D(
+            in_ch=6,
+            base_ch=DIFF_UNET_BASE_CH,
+            emb_dim=DIFF_EMB_DIM,
+            clinical_dim=CLINICAL_DIM,
+            use_checkpoint=USE_CHECKPOINT,
+        )
+        D = None
+        print(f"Diffusion branch will use cached PET_base from: {BASELINE_CACHE_DIR}")
+    elif is_prompt_residual:
         G = ResidualSpatialPriorGenerator(
             in_ch=1, out_ch=1,
             use_checkpoint=USE_CHECKPOINT,
@@ -276,15 +331,20 @@ if __name__ == "__main__":
             )
     else:
         G = Generator(in_ch=1, out_ch=1)
+        D = CondPatchDiscriminator3D(in_ch=2)
 
-    D = CondPatchDiscriminator3D(in_ch=2)
+    if is_prompt_residual:
+        D = CondPatchDiscriminator3D(in_ch=2)
 
     def _count_params(m):
         return sum(p.numel() for p in m.parameters())
     def _count_trainable(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
     print(f"Generator params:     {_count_params(G):,} ({_count_trainable(G):,} trainable)")
-    print(f"Discriminator params: {_count_params(D):,}")
+    if D is not None:
+        print(f"Discriminator params: {_count_params(D):,}")
+    else:
+        print("Discriminator params: (none for residual diffusion)")
     if is_prompt_residual:
         print(f"  Base params:        {_count_params(G.base):,}")
         print(f"  New branch params:  {_count_params(G) - _count_params(G.base):,}")
@@ -292,10 +352,19 @@ if __name__ == "__main__":
 
     if wandb_run is not None:
         wandb.watch(G, log="gradients", log_freq=50)
-        wandb.watch(D, log="gradients", log_freq=50)
+        if D is not None:
+            wandb.watch(D, log="gradients", log_freq=50)
 
     # Train
-    if is_prompt_residual:
+    if is_residual_diffusion:
+        out = train_residual_diffusion(
+            G, train_loader, val_loader,
+            device=device, epochs=EPOCHS,
+            data_range=DATA_RANGE,
+            verbose=True,
+            log_to_wandb=(wandb_run is not None),
+        )
+    elif is_prompt_residual:
         out = train_residual_spatial_prior(
             G, D, train_loader, val_loader,
             device=device, epochs=EPOCHS, gamma=GAMMA,
@@ -328,21 +397,39 @@ if __name__ == "__main__":
         print(f"Cleared old VOL_DIR: {VOL_DIR}")
     os.makedirs(VOL_DIR, exist_ok=True)
 
-    metrics = evaluate_and_save(
-        G, test_loader, device=device,
-        out_dir=VOL_DIR, data_range=DATA_RANGE,
-        mmd_voxels=2048,
-        is_prompt_residual=is_prompt_residual,
-    )
+    if is_residual_diffusion:
+        metrics = evaluate_and_save_diffusion(
+            G, test_loader, device=device,
+            out_dir=VOL_DIR, data_range=DATA_RANGE,
+            mmd_voxels=2048,
+            sample_steps=DIFF_TEST_SAMPLE_STEPS,
+            num_samples=DIFF_NUM_SAMPLES,
+        )
+    else:
+        metrics = evaluate_and_save(
+            G, test_loader, device=device,
+            out_dir=VOL_DIR, data_range=DATA_RANGE,
+            mmd_voxels=2048,
+            is_prompt_residual=is_prompt_residual,
+        )
     print("Test metrics:", metrics)
 
     if wandb_run is not None:
-        wandb.log({
+        test_log = {
             "test/SSIM": metrics["SSIM"],
             "test/PSNR": metrics["PSNR"],
             "test/MSE": metrics["MSE"],
             "test/MMD": metrics["MMD"],
-        })
+        }
+        for key in [
+            "uncertainty_mean_brain",
+            "uncertainty_mean_cortex",
+            "mean_abs_delta",
+            "base_vs_fake_recon_improvement",
+        ]:
+            if key in metrics:
+                test_log[f"test/{key}"] = metrics[key]
+        wandb.log(test_log)
 
     metrics_txt = os.path.join(OUT_RUN, "test_metrics.txt")
     with open(metrics_txt, "w") as f:
@@ -355,10 +442,18 @@ if __name__ == "__main__":
             curves_path,
             csv_path,
             os.path.join(OUT_RUN, "per_subject_metrics.csv"),
-            os.path.join(OUT_RUN, "per_subject_aux.csv"),
             os.path.join(OUT_RUN, "test_metrics_summary.json"),
-            os.path.join(CKPT_DIR, "best_G.pth"),
-            os.path.join(CKPT_DIR, "best_D.pth"),
         ]
+        if is_residual_diffusion:
+            output_files.extend([
+                os.path.join(OUT_RUN, "per_subject_diffusion.csv"),
+                os.path.join(CKPT_DIR, "best_diffusion.pth"),
+            ])
+        else:
+            output_files.extend([
+                os.path.join(OUT_RUN, "per_subject_aux.csv"),
+                os.path.join(CKPT_DIR, "best_G.pth"),
+                os.path.join(CKPT_DIR, "best_D.pth"),
+            ])
         log_wandb_output_files(wandb_run, RUN_NAME, output_files)
         wandb.finish()

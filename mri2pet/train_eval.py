@@ -18,10 +18,16 @@ from .config import (
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP, MASK_GLOBAL_RECON,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE,
     AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT, SPATIAL_PRIOR_LR_MULT,
+    DIFF_TIMESTEPS, DIFF_BETA_START, DIFF_BETA_END,
+    DIFF_LR, DIFF_WEIGHT_DECAY,
+    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD,
+    DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
+    DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
 from .utils import _safe_name, _save_nifti, _meta_unbatch, _resized_affine_for_scipy_zoom
+from .diffusion import make_beta_schedule, q_sample, predict_x0_from_eps, ddim_sample_loop
 import wandb
 
 
@@ -93,6 +99,16 @@ def _extract_new_variant_inputs(metas: List[Dict[str, Any]], device: torch.devic
     return flair5, clinical, braak_vals
 
 
+def _extract_pet_base(metas: List[Dict[str, Any]], device: torch.device) -> Optional[torch.Tensor]:
+    vals = []
+    for m in metas:
+        v = m.get("pet_base", None)
+        if v is None:
+            return None
+        vals.append(torch.from_numpy(v) if isinstance(v, np.ndarray) else v)
+    return torch.stack(vals, dim=0).to(device, non_blocking=True)
+
+
 # =========================================================================
 # Shared augmentation + loss helpers
 # =========================================================================
@@ -144,18 +160,19 @@ def _maybe_augment_pair(
     brain5: Optional[torch.Tensor],
     cortex5: Optional[torch.Tensor],
     flair5: Optional[torch.Tensor] = None,
+    pet_base5: Optional[torch.Tensor] = None,
 ):
     """
     Train-only augmentation:
-      - paired random flips on MRI/PET/FLAIR/brain/cortex masks
+      - paired random flips on MRI/PET/FLAIR/PET_base/brain/cortex masks
       - MRI-only intensity jitter inside brain mask
-    Returns (mri5, pet5, brain5, cortex5, flair5)
+    Returns (mri5, pet5, brain5, cortex5, flair5, pet_base5)
     """
     if not AUG_ENABLE:
-        return mri5, pet5, brain5, cortex5, flair5
+        return mri5, pet5, brain5, cortex5, flair5, pet_base5
 
     if torch.rand((), device=mri5.device) > float(AUG_PROB):
-        return mri5, pet5, brain5, cortex5, flair5
+        return mri5, pet5, brain5, cortex5, flair5, pet_base5
 
     # --- paired random flips (D/H/W axes) ---
     for dim in (-1, -2, -3):
@@ -168,6 +185,8 @@ def _maybe_augment_pair(
                 cortex5 = torch.flip(cortex5, dims=(dim,))
             if flair5 is not None:
                 flair5 = torch.flip(flair5, dims=(dim,))
+            if pet_base5 is not None:
+                pet_base5 = torch.flip(pet_base5, dims=(dim,))
 
     # --- MRI-only intensity augmentation (inside brain mask) ---
     if torch.rand((), device=mri5.device) < float(AUG_INTENSITY_PROB):
@@ -185,7 +204,7 @@ def _maybe_augment_pair(
         else:
             mri5 = (mri5 * s + b + noise)
 
-    return mri5, pet5, brain5, cortex5, flair5
+    return mri5, pet5, brain5, cortex5, flair5, pet_base5
 
 
 # =========================================================================
@@ -357,7 +376,7 @@ def train_paggan(
             metas = _meta_as_list(meta, B)
             brain5, cortex5 = _extract_masks(metas, device)
 
-            mri5, pet5, brain5, cortex5, _ = _maybe_augment_pair(mri5, pet5, brain5, cortex5)
+            mri5, pet5, brain5, cortex5, _, _ = _maybe_augment_pair(mri5, pet5, brain5, cortex5)
 
             # ---- Update D ----
             with torch.no_grad():
@@ -756,7 +775,7 @@ def train_residual_spatial_prior(
             if flair5 is None:
                 raise RuntimeError("FLAIR/clinical/braak missing from meta")
 
-            mri5, pet5, brain5, cortex5, flair5 = _maybe_augment_pair(mri5, pet5, brain5, cortex5, flair5)
+            mri5, pet5, brain5, cortex5, flair5, _ = _maybe_augment_pair(mri5, pet5, brain5, cortex5, flair5)
 
             # ---- Update D ----
             with torch.no_grad():
@@ -1296,6 +1315,379 @@ train_prompt_residual_braak = train_residual_spatial_prior
 
 
 # =========================================================================
+# Residual diffusion training
+# =========================================================================
+def _masked_mean_l1(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    den = (mask.sum() * x.size(1)).clamp_min(eps)
+    return ((x - y).abs() * mask).sum() / den
+
+
+def _masked_mean_mse(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    den = (mask.sum() * x.size(1)).clamp_min(eps)
+    return (((x - y) ** 2) * mask).sum() / den
+
+
+def _residual_scaled_to_pet(
+    x0_scaled: torch.Tensor,
+    pet_base: torch.Tensor,
+    brain_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    std = max(float(DIFF_RESIDUAL_STD), 1e-6)
+    mean = float(DIFF_RESIDUAL_MEAN)
+    delta = ((x0_scaled * std) + mean) * brain_mask.float()
+    return pet_base + delta, delta
+
+
+def _diffusion_recon_loss(
+    pet_hat: torch.Tensor,
+    pet_true: torch.Tensor,
+    brain_mask: torch.Tensor,
+    data_range: float,
+) -> torch.Tensor:
+    if MASK_GLOBAL_RECON and brain_mask is not None:
+        fake_eval = pet_hat.float() * brain_mask.float()
+        pet_eval = pet_true.float() * brain_mask.float()
+    else:
+        fake_eval = pet_hat.float()
+        pet_eval = pet_true.float()
+    return l1_loss(fake_eval, pet_eval) + (1.0 - ssim3d(fake_eval, pet_eval, data_range=data_range))
+
+
+def train_residual_diffusion(
+    G: nn.Module,
+    train_loader: Iterable,
+    val_loader: Optional[Iterable],
+    device: torch.device,
+    epochs: int = EPOCHS,
+    data_range: float = DATA_RANGE,
+    verbose: bool = True,
+    log_to_wandb: bool = False,
+) -> Dict[str, Any]:
+    G.to(device)
+    G.train()
+
+    opt_G = torch.optim.AdamW(G.parameters(), lr=DIFF_LR, weight_decay=DIFF_WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE
+    )
+    schedule = make_beta_schedule(
+        timesteps=DIFF_TIMESTEPS,
+        beta_start=DIFF_BETA_START,
+        beta_end=DIFF_BETA_END,
+        device=device,
+    )
+
+    use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+    use_scaler = use_amp and amp_dtype == torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+
+    best_val = float("inf")
+    best_G_state: Optional[Dict[str, torch.Tensor]] = None
+    patience_counter = 0
+    hist: Dict[str, list] = {
+        "train_G": [], "val_recon": [], "val_roi": [], "val_score": [],
+        "train_noise": [], "train_x0": [], "train_roi": [], "train_braak": [],
+        "val_noise": [], "val_base_recon": [], "val_base_roi": [],
+        "val_improve_recon": [], "val_improve_roi": [],
+    }
+
+    total_train_batches = len(train_loader) if hasattr(train_loader, "__len__") else None
+    print_every = 10
+
+    for epoch in range(1, epochs + 1):
+        t0 = time.time()
+        G.train()
+        total_running = noise_running = x0_running = roi_running = braak_running = 0.0
+        n_batches = 0
+
+        if verbose:
+            total_str = str(total_train_batches) if total_train_batches is not None else "?"
+            print(
+                f"[DIFF][epoch {epoch:03d}/{epochs}] start train "
+                f"batches={total_str} lr={opt_G.param_groups[0]['lr']:.2e} "
+                f"sample_val_steps={DIFF_VAL_SAMPLE_STEPS}",
+                flush=True,
+            )
+
+        for step, batch in enumerate(train_loader, start=1):
+            step_t0 = time.time()
+            if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                raise ValueError("Expected (mri, pet, meta) batch")
+            mri, pet, meta = batch
+            mri = mri.to(device, non_blocking=True)
+            pet = pet.to(device, non_blocking=True)
+            B = mri.size(0) if mri.dim() == 5 else 1
+            mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
+            pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+
+            metas = _meta_as_list(meta, B)
+            brain5, cortex5 = _extract_masks(metas, device)
+            flair5, clinical, braak_gt = _extract_new_variant_inputs(metas, device)
+            pet_base5 = _extract_pet_base(metas, device)
+            if brain5 is None or cortex5 is None or flair5 is None or clinical is None or braak_gt is None:
+                raise RuntimeError("Diffusion training requires brain/cortex masks, FLAIR, clinical, and Braak meta")
+            if pet_base5 is None:
+                raise RuntimeError("Diffusion training requires cached PET_base in meta")
+
+            mri5, pet5, brain5, cortex5, flair5, pet_base5 = _maybe_augment_pair(
+                mri5, pet5, brain5, cortex5, flair5=flair5, pet_base5=pet_base5
+            )
+
+            brain_f = brain5.float()
+            r0 = (pet5.float() - pet_base5.float()) * brain_f
+            x0 = ((r0 - float(DIFF_RESIDUAL_MEAN)) / max(float(DIFF_RESIDUAL_STD), 1e-6)) * brain_f
+            t = torch.randint(0, DIFF_TIMESTEPS, (B,), device=device, dtype=torch.long)
+            noise = torch.randn_like(x0)
+            xt = q_sample(x0, t, noise, schedule)
+
+            opt_G.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                eps_pred, aux = G(
+                    xt, t,
+                    t1=mri5,
+                    flair=flair5,
+                    pet_base=pet_base5,
+                    brain_mask=brain5,
+                    cortex_mask=cortex5,
+                    clinical=clinical,
+                    return_aux=True,
+                )
+
+            eps_f = eps_pred.float()
+            noise_loss = _masked_mean_mse(eps_f, noise.float(), brain_f)
+            x0_pred = predict_x0_from_eps(xt.float(), t, eps_f, schedule)
+            pet_hat, _ = _residual_scaled_to_pet(x0_pred, pet_base5.float(), brain_f)
+            x0_loss = _masked_mean_l1(pet_hat.float(), pet5.float(), brain_f)
+            roi_loss = _masked_l1_high_uptake(pet_hat.float(), pet5.float(), cortex5.float())
+            braak_loss = F.smooth_l1_loss(aux["braak_pred"].float(), braak_gt.float())
+            loss = (
+                noise_loss
+                + float(DIFF_LAMBDA_X0) * x0_loss
+                + float(DIFF_LAMBDA_ROI) * roi_loss
+                + float(DIFF_LAMBDA_BRAAK) * braak_loss
+            )
+
+            if use_scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt_G)
+                torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
+                scaler.step(opt_G)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(G.parameters(), 5.0)
+                opt_G.step()
+
+            total_running += float(loss.detach().item())
+            noise_running += float(noise_loss.detach().item())
+            x0_running += float(x0_loss.detach().item())
+            roi_running += float(roi_loss.detach().item())
+            braak_running += float(braak_loss.detach().item())
+            n_batches += 1
+
+            if verbose and (step == 1 or step % print_every == 0 or step == total_train_batches):
+                elapsed = time.time() - t0
+                sec_per_batch = elapsed / max(1, step)
+                eta = ""
+                if total_train_batches is not None:
+                    eta_min = sec_per_batch * max(0, total_train_batches - step) / 60.0
+                    eta = f" eta_train={eta_min:.1f}m"
+                print(
+                    f"[DIFF][epoch {epoch:03d}] step {step}/{total_train_batches or '?'} "
+                    f"loss={loss.detach().item():.4f} noise={noise_loss.detach().item():.4f} "
+                    f"x0={x0_loss.detach().item():.4f} roi={roi_loss.detach().item():.4f} "
+                    f"braak={braak_loss.detach().item():.4f} "
+                    f"step_sec={time.time() - step_t0:.2f} avg_sec={sec_per_batch:.2f}{eta}",
+                    flush=True,
+                )
+
+        nb = max(1, n_batches)
+        avg_total = total_running / nb
+        avg_noise = noise_running / nb
+        avg_x0 = x0_running / nb
+        avg_roi = roi_running / nb
+        avg_braak = braak_running / nb
+        train_sec = time.time() - t0
+        hist["train_G"].append(avg_total)
+        hist["train_noise"].append(avg_noise)
+        hist["train_x0"].append(avg_x0)
+        hist["train_roi"].append(avg_roi)
+        hist["train_braak"].append(avg_braak)
+
+        val_noise_epoch = val_recon_epoch = val_roi_epoch = val_score_epoch = None
+        val_base_recon_epoch = val_base_roi_epoch = None
+        val_improve_recon_epoch = val_improve_roi_epoch = None
+        val_sec_epoch = None
+
+        if val_loader is not None:
+            G.eval()
+            val_t0 = time.time()
+            val_noise_sum = val_recon_sum = val_roi_sum = 0.0
+            val_base_recon_sum = val_base_roi_sum = 0.0
+            v_batches = 0
+            if verbose:
+                print(
+                    f"[DIFF][epoch {epoch:03d}] start sampled validation "
+                    f"ddim_steps={DIFF_VAL_SAMPLE_STEPS}",
+                    flush=True,
+                )
+
+            with torch.no_grad():
+                for v_step, batch in enumerate(val_loader, start=1):
+                    if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                        raise ValueError("Expected (mri, pet, meta) batch")
+                    mri, pet, meta = batch
+                    mri = mri.to(device, non_blocking=True)
+                    pet = pet.to(device, non_blocking=True)
+                    Bv = mri.size(0) if mri.dim() == 5 else 1
+                    mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
+                    pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+                    metas = _meta_as_list(meta, Bv)
+                    brain5, cortex5 = _extract_masks(metas, device)
+                    flair5, clinical, braak_gt = _extract_new_variant_inputs(metas, device)
+                    pet_base5 = _extract_pet_base(metas, device)
+                    if brain5 is None or cortex5 is None or flair5 is None or pet_base5 is None:
+                        raise RuntimeError("Diffusion validation requires cached PET_base and full meta")
+
+                    brain_f = brain5.float()
+                    r0 = (pet5.float() - pet_base5.float()) * brain_f
+                    x0 = ((r0 - float(DIFF_RESIDUAL_MEAN)) / max(float(DIFF_RESIDUAL_STD), 1e-6)) * brain_f
+                    t = torch.randint(0, DIFF_TIMESTEPS, (Bv,), device=device, dtype=torch.long)
+                    noise = torch.randn_like(x0)
+                    xt = q_sample(x0, t, noise, schedule)
+                    with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                        eps_pred = G(
+                            xt, t,
+                            t1=mri5,
+                            flair=flair5,
+                            pet_base=pet_base5,
+                            brain_mask=brain5,
+                            cortex_mask=cortex5,
+                            clinical=clinical,
+                        )
+                    val_noise_sum += _masked_mean_mse(eps_pred.float(), noise.float(), brain_f).item()
+
+                    with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                        x0_sample, _ = ddim_sample_loop(
+                            G,
+                            tuple(x0.shape),
+                            schedule,
+                            steps=DIFF_VAL_SAMPLE_STEPS,
+                            t1=mri5,
+                            flair=flair5,
+                            pet_base=pet_base5,
+                            brain_mask=brain5,
+                            cortex_mask=cortex5,
+                            clinical=clinical,
+                        )
+                    x0_sample = x0_sample.float() * brain_f
+                    pet_hat, _ = _residual_scaled_to_pet(x0_sample, pet_base5.float(), brain_f)
+
+                    val_recon_sum += _diffusion_recon_loss(pet_hat, pet5, brain_f, data_range).item()
+                    val_base_recon_sum += _diffusion_recon_loss(pet_base5.float(), pet5, brain_f, data_range).item()
+                    val_roi_sum += _masked_l1_high_uptake(pet_hat.float(), pet5.float(), cortex5.float()).item()
+                    val_base_roi_sum += _masked_l1_high_uptake(pet_base5.float(), pet5.float(), cortex5.float()).item()
+                    v_batches += 1
+
+                    if verbose and (v_step == 1 or v_step % 5 == 0):
+                        print(
+                            f"[DIFF][epoch {epoch:03d}] val step {v_step} "
+                            f"elapsed={time.time() - val_t0:.1f}s",
+                            flush=True,
+                        )
+
+            vb = max(1, v_batches)
+            val_noise_epoch = val_noise_sum / vb
+            val_recon_epoch = val_recon_sum / vb
+            val_roi_epoch = val_roi_sum / vb
+            val_base_recon_epoch = val_base_recon_sum / vb
+            val_base_roi_epoch = val_base_roi_sum / vb
+            val_improve_recon_epoch = val_base_recon_epoch - val_recon_epoch
+            val_improve_roi_epoch = val_base_roi_epoch - val_roi_epoch
+            val_score_epoch = val_recon_epoch + float(VAL_ROI_WEIGHT) * val_roi_epoch
+            val_sec_epoch = time.time() - val_t0
+
+            hist["val_noise"].append(val_noise_epoch)
+            hist["val_recon"].append(val_recon_epoch)
+            hist["val_roi"].append(val_roi_epoch)
+            hist["val_score"].append(val_score_epoch)
+            hist["val_base_recon"].append(val_base_recon_epoch)
+            hist["val_base_roi"].append(val_base_roi_epoch)
+            hist["val_improve_recon"].append(val_improve_recon_epoch)
+            hist["val_improve_roi"].append(val_improve_roi_epoch)
+
+            scheduler.step(val_score_epoch)
+            if val_score_epoch < best_val:
+                best_val = val_score_epoch
+                patience_counter = 0
+                best_G_state = {k: v.detach().clone() for k, v in G.state_dict().items()}
+                torch.save(best_G_state, os.path.join(CKPT_DIR, "best_diffusion.pth"))
+            else:
+                patience_counter += 1
+
+            if verbose:
+                print(
+                    f"[DIFF][epoch {epoch:03d}/{epochs}] "
+                    f"train={avg_total:.4f} noise={avg_noise:.4f} x0={avg_x0:.4f} "
+                    f"roi={avg_roi:.4f} braak={avg_braak:.4f} | "
+                    f"val_noise={val_noise_epoch:.4f} val_recon={val_recon_epoch:.4f} "
+                    f"val_roi={val_roi_epoch:.4f} val_score={val_score_epoch:.4f} "
+                    f"base_recon={val_base_recon_epoch:.4f} base_roi={val_base_roi_epoch:.4f} "
+                    f"improve_recon={val_improve_recon_epoch:.4f} improve_roi={val_improve_roi_epoch:.4f} "
+                    f"best={best_val:.4f} patience={patience_counter}/{EARLY_STOP_PATIENCE} "
+                    f"epoch_sec={time.time() - t0:.1f}",
+                    flush=True,
+                )
+
+            if patience_counter >= EARLY_STOP_PATIENCE:
+                print(f"[DIFF] Early stopping at epoch {epoch} (patience={EARLY_STOP_PATIENCE})", flush=True)
+                break
+        elif verbose:
+            print(
+                f"[DIFF][epoch {epoch:03d}/{epochs}] train={avg_total:.4f} "
+                f"noise={avg_noise:.4f} x0={avg_x0:.4f} roi={avg_roi:.4f} "
+                f"braak={avg_braak:.4f} epoch_sec={time.time() - t0:.1f}",
+                flush=True,
+            )
+
+        if log_to_wandb and wandb.run is not None:
+            log_dict = {
+                "epoch": epoch,
+                "train/G_loss": avg_total,
+                "train/noise_loss": avg_noise,
+                "train/x0_loss": avg_x0,
+                "train/roi_loss": avg_roi,
+                "train/braak_loss": avg_braak,
+                "optim/lr_diffusion": opt_G.param_groups[0]["lr"],
+                "time/train_sec": train_sec,
+                "time/sec_per_train_batch": train_sec / nb,
+                "time/epoch_sec": time.time() - t0,
+            }
+            if val_noise_epoch is not None:
+                log_dict.update({
+                    "val/noise_loss": val_noise_epoch,
+                    "val/recon_loss": val_recon_epoch,
+                    "val/roi_loss": val_roi_epoch,
+                    "val/score": val_score_epoch,
+                    "val/best_score": best_val,
+                    "val/base_recon": val_base_recon_epoch,
+                    "val/base_roi": val_base_roi_epoch,
+                    "val/improve_recon": val_improve_recon_epoch,
+                    "val/improve_roi": val_improve_roi_epoch,
+                    "time/val_sec": val_sec_epoch,
+                })
+            wandb.log(log_dict, step=epoch)
+
+    if best_G_state is not None:
+        G.load_state_dict(best_G_state)
+
+    return {"history": hist, "best_G": best_G_state}
+
+
+# =========================================================================
 # Evaluation (shared, but variant-aware)
 # =========================================================================
 @torch.no_grad()
@@ -1578,4 +1970,247 @@ def evaluate_and_save(
         "MMD":  m_mmd,  "MMD_std":  sd_mmd,  "MMD_lo95":  lo_mmd,  "MMD_hi95":  hi_mmd,
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
+    }
+
+
+@torch.no_grad()
+def evaluate_and_save_diffusion(
+    G: nn.Module,
+    test_loader: Iterable,
+    device: torch.device,
+    out_dir: str,
+    data_range: float = DATA_RANGE,
+    mmd_voxels: int = 2048,
+    resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
+    sample_steps: int = DIFF_TEST_SAMPLE_STEPS,
+    num_samples: int = DIFF_NUM_SAMPLES,
+):
+    assert getattr(test_loader, "batch_size", 1) == 1, (
+        f"evaluate_and_save_diffusion requires batch_size=1, got {getattr(test_loader, 'batch_size', '?')}"
+    )
+    import json
+    try:
+        from scipy.stats import t as _t_dist
+        def _tcrit(df): return float(_t_dist.ppf(0.975, df)) if df > 0 else float('nan')
+    except Exception:
+        def _tcrit(df): return 1.96 if df > 0 else float('nan')
+
+    os.makedirs(out_dir, exist_ok=True)
+    G.to(device)
+    G.eval()
+    schedule = make_beta_schedule(
+        timesteps=DIFF_TIMESTEPS,
+        beta_start=DIFF_BETA_START,
+        beta_end=DIFF_BETA_END,
+        device=device,
+    )
+
+    use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+
+    sids, ssim_list, psnr_list, mse_list, mmd_list = [], [], [], [], []
+    uncertainty_brain_list, uncertainty_cortex_list = [], []
+    mean_abs_delta_list, base_improve_list = [], []
+    run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
+
+    for i, batch in enumerate(test_loader):
+        subj_t0 = time.time()
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            mri, pet, meta = batch
+        else:
+            raise ValueError("Diffusion evaluation requires (mri, pet, meta) batches")
+        meta = _meta_unbatch(meta)
+        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
+        sids.append(sid)
+        subdir = os.path.join(out_dir, sid)
+        os.makedirs(subdir, exist_ok=True)
+
+        print(
+            f"[DIFF][test] subject {i + 1}/{len(test_loader) if hasattr(test_loader, '__len__') else '?'} "
+            f"{sid}: sampling K={num_samples}, steps={sample_steps}",
+            flush=True,
+        )
+
+        mri_t = mri.to(device, non_blocking=True)
+        pet_t = pet.to(device, non_blocking=True)
+        mri5 = mri_t if mri_t.dim() == 5 else mri_t.unsqueeze(0)
+        pet5 = pet_t if pet_t.dim() == 5 else pet_t.unsqueeze(0)
+
+        metas_list = _meta_as_list(meta, 1)
+        flair5, clinical, _ = _extract_new_variant_inputs(metas_list, device)
+        brain5, cortex5 = _extract_masks(metas_list, device)
+        pet_base5 = _extract_pet_base(metas_list, device)
+        if brain5 is None or cortex5 is None or flair5 is None or pet_base5 is None:
+            raise RuntimeError(f"{sid}: diffusion evaluation requires cached PET_base and full meta")
+
+        brain_f = brain5.float()
+        samples = []
+        for k in range(max(1, int(num_samples))):
+            sample_t0 = time.time()
+            shape = (1, 1, *tuple(mri5.shape[2:]))
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                x0_sample, _ = ddim_sample_loop(
+                    G,
+                    shape,
+                    schedule,
+                    steps=sample_steps,
+                    t1=mri5,
+                    flair=flair5,
+                    pet_base=pet_base5,
+                    brain_mask=brain5,
+                    cortex_mask=cortex5,
+                    clinical=clinical,
+                )
+            x0_sample = x0_sample.float() * brain_f
+            pet_sample, _ = _residual_scaled_to_pet(x0_sample, pet_base5.float(), brain_f)
+            samples.append(pet_sample.float())
+            print(
+                f"[DIFF][test] {sid} sample {k + 1}/{num_samples} "
+                f"sec={time.time() - sample_t0:.1f}",
+                flush=True,
+            )
+
+        sample_stack = torch.stack(samples, dim=0)  # [K,1,1,D,H,W]
+        fake_t = sample_stack.mean(dim=0)
+        uncert_t = sample_stack.std(dim=0, unbiased=False) if sample_stack.size(0) > 1 else torch.zeros_like(fake_t)
+        delta_t = fake_t - pet_base5.float()
+
+        ssim_val = ssim3d_masked(fake_t.float(), pet5.float(), brain_f, data_range=data_range).item()
+        psnr_val = masked_psnr(fake_t.float(), pet5.float(), brain_f, data_range=data_range)
+        mse_val = masked_mse(fake_t.float(), pet5.float(), brain_f).item()
+        mmd_val = mmd_gaussian(pet5.float(), fake_t.float(), num_voxels=mmd_voxels, mask=brain_f)
+        ssim_list.append(ssim_val)
+        psnr_list.append(psnr_val)
+        mse_list.append(mse_val)
+        mmd_list.append(mmd_val)
+
+        brain_den = brain_f.sum().clamp_min(1.0)
+        cortex_f = cortex5.float()
+        cortex_den = cortex_f.sum().clamp_min(1.0)
+        uncertainty_brain_list.append(float((uncert_t * brain_f).sum().item() / brain_den.item()))
+        uncertainty_cortex_list.append(float((uncert_t * cortex_f).sum().item() / cortex_den.item()))
+        mean_abs_delta_list.append(float((delta_t.abs() * brain_f).sum().item() / brain_den.item()))
+        fake_recon = _diffusion_recon_loss(fake_t.float(), pet5.float(), brain_f, data_range).item()
+        base_recon = _diffusion_recon_loss(pet_base5.float(), pet5.float(), brain_f, data_range).item()
+        base_improve_list.append(base_recon - fake_recon)
+
+        mri_np = mri5.squeeze(0).squeeze(0).cpu().numpy()
+        pet_np = pet5.squeeze(0).squeeze(0).cpu().numpy()
+        fake_np = fake_t.squeeze(0).squeeze(0).cpu().numpy()
+        base_np = pet_base5.squeeze(0).squeeze(0).cpu().numpy()
+        delta_np = delta_t.squeeze(0).squeeze(0).cpu().numpy()
+        uncert_np = uncert_t.squeeze(0).squeeze(0).cpu().numpy()
+        sample_nps = [s.squeeze(0).squeeze(0).cpu().numpy() for s in samples]
+        err_np = np.abs(fake_np - pet_np)
+
+        cur_shape = tuple(mri_np.shape)
+        orig_shape = tuple(meta.get("orig_shape", cur_shape))
+        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
+            zf = (float(orig_shape[0]) / float(cur_shape[0]),
+                  float(orig_shape[1]) / float(cur_shape[1]),
+                  float(orig_shape[2]) / float(cur_shape[2]))
+            mri_np = nd_zoom(mri_np, zf, order=1)
+            pet_np = nd_zoom(pet_np, zf, order=1)
+            fake_np = nd_zoom(fake_np, zf, order=1)
+            base_np = nd_zoom(base_np, zf, order=1)
+            delta_np = nd_zoom(delta_np, zf, order=1)
+            uncert_np = nd_zoom(uncert_np, zf, order=1)
+            err_np = nd_zoom(err_np, zf, order=1)
+            sample_nps = [nd_zoom(s, zf, order=1) for s in sample_nps]
+            affine_to_use = meta.get("t1_affine", np.eye(4))
+        else:
+            affine_to_use = meta.get("model_affine", None)
+            if affine_to_use is None:
+                resized_to = meta.get("resized_to", None)
+                if resized_to is None or tuple(orig_shape) == tuple(cur_shape):
+                    affine_to_use = meta.get("t1_affine", np.eye(4))
+                else:
+                    affine_to_use = _resized_affine_for_scipy_zoom(
+                        meta.get("t1_affine", np.eye(4)),
+                        orig_shape=orig_shape,
+                        new_shape=cur_shape,
+                    )
+
+        _save_nifti(mri_np, affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
+        _save_nifti(pet_np, affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
+        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
+        _save_nifti(err_np, affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
+        _save_nifti(base_np, affine_to_use, os.path.join(subdir, "PET_base.nii.gz"))
+        _save_nifti(delta_np, affine_to_use, os.path.join(subdir, "PET_delta.nii.gz"))
+        _save_nifti(uncert_np, affine_to_use, os.path.join(subdir, "PET_uncertainty_std.nii.gz"))
+        for k, sample_np in enumerate(sample_nps):
+            _save_nifti(sample_np, affine_to_use, os.path.join(subdir, f"PET_sample_{k:02d}.nii.gz"))
+
+        print(
+            f"[DIFF][test] {sid} done SSIM={ssim_val:.4f} PSNR={psnr_val:.2f} "
+            f"MSE={mse_val:.5f} MMD={mmd_val:.5f} "
+            f"unc_brain={uncertainty_brain_list[-1]:.5f} "
+            f"|delta|={mean_abs_delta_list[-1]:.5f} sec={time.time() - subj_t0:.1f}",
+            flush=True,
+        )
+
+    def _mean_std_ci(vals):
+        a = np.asarray(vals, dtype=np.float64)
+        n = a.size
+        mean = float(a.mean()) if n > 0 else float("nan")
+        std = float(a.std(ddof=1)) if n > 1 else float("nan")
+        se = (std / np.sqrt(n)) if n > 1 else float("nan")
+        tcrit = _tcrit(n - 1)
+        lo = mean - tcrit * se if n > 1 else float("nan")
+        hi = mean + tcrit * se if n > 1 else float("nan")
+        return mean, std, n, lo, hi
+
+    m_ssim, sd_ssim, n_ssim, lo_ssim, hi_ssim = _mean_std_ci(ssim_list)
+    m_psnr, sd_psnr, n_psnr, lo_psnr, hi_psnr = _mean_std_ci(psnr_list)
+    m_mse, sd_mse, n_mse, lo_mse, hi_mse = _mean_std_ci(mse_list)
+    m_mmd, sd_mmd, n_mmd, lo_mmd, hi_mmd = _mean_std_ci(mmd_list)
+
+    per_subj_csv = os.path.join(run_dir, "per_subject_metrics.csv")
+    with open(per_subj_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["sid", "SSIM", "PSNR", "MSE", "MMD"])
+        for sid, ssim_v, psnr_v, mse_v, mmd_v in zip(sids, ssim_list, psnr_list, mse_list, mmd_list):
+            w.writerow([sid, ssim_v, psnr_v, mse_v, mmd_v])
+
+    diff_csv = os.path.join(run_dir, "per_subject_diffusion.csv")
+    with open(diff_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "sid", "uncertainty_mean_brain", "uncertainty_mean_cortex",
+            "mean_abs_delta", "base_vs_fake_recon_improvement",
+        ])
+        for row in zip(sids, uncertainty_brain_list, uncertainty_cortex_list, mean_abs_delta_list, base_improve_list):
+            w.writerow(row)
+
+    summary_json = os.path.join(run_dir, "test_metrics_summary.json")
+    extra = {
+        "uncertainty_mean_brain": float(np.mean(uncertainty_brain_list)) if uncertainty_brain_list else float("nan"),
+        "uncertainty_mean_cortex": float(np.mean(uncertainty_cortex_list)) if uncertainty_cortex_list else float("nan"),
+        "mean_abs_delta": float(np.mean(mean_abs_delta_list)) if mean_abs_delta_list else float("nan"),
+        "base_vs_fake_recon_improvement": float(np.mean(base_improve_list)) if base_improve_list else float("nan"),
+        "per_subject_diffusion_csv": diff_csv,
+    }
+    summary = {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE": m_mse, "MSE_std": sd_mse, "MSE_lo95": lo_mse, "MSE_hi95": hi_mse,
+        "MMD": m_mmd, "MMD_std": sd_mmd, "MMD_lo95": lo_mmd, "MMD_hi95": hi_mmd,
+        "per_subject_csv": per_subj_csv,
+        **extra,
+    }
+    with open(summary_json, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    return {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE": m_mse, "MSE_std": sd_mse, "MSE_lo95": lo_mse, "MSE_hi95": hi_mse,
+        "MMD": m_mmd, "MMD_std": sd_mmd, "MMD_lo95": lo_mmd, "MMD_hi95": hi_mmd,
+        "per_subject_csv": per_subj_csv,
+        "summary_json": summary_json,
+        **extra,
     }

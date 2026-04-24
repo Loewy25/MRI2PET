@@ -1,4 +1,5 @@
 # models.py
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -8,10 +9,13 @@ from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .config import (
     DETACH_BASE_LATENT_FOR_PRIOR,
+    DIFF_EMB_DIM,
+    DIFF_UNET_BASE_CH,
     PRIOR_GAIN_INIT_B,
     PRIOR_GAIN_INIT_X3,
     PRIOR_GAIN_INIT_X4,
     SPATIAL_PRIOR_K,
+    USE_CHECKPOINT,
     USE_BRAAK_HEAD,
     USE_CLINICAL,
     USE_FLAIR,
@@ -641,3 +645,206 @@ class ResidualSpatialPriorGenerator(nn.Module):
 
 
 PromptResidualBraakGenerator = ResidualSpatialPriorGenerator
+
+
+# =========================================================================
+# Residual diffusion denoiser
+# =========================================================================
+def _group_norm(channels: int) -> nn.GroupNorm:
+    groups = min(8, channels)
+    while channels % groups != 0:
+        groups -= 1
+    return nn.GroupNorm(groups, channels)
+
+
+def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+    half = dim // 2
+    if half == 0:
+        return t.float().unsqueeze(1)
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(half, device=t.device, dtype=torch.float32) / max(half - 1, 1)
+    )
+    args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
+    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+    if dim % 2 == 1:
+        emb = F.pad(emb, (0, 1))
+    return emb
+
+
+class FiLMResBlock3D(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, emb_dim: int):
+        super().__init__()
+        self.norm1 = _group_norm(in_ch)
+        self.conv1 = nn.Conv3d(in_ch, out_ch, kernel_size=3, padding=1, bias=True)
+        self.norm2 = _group_norm(out_ch)
+        self.film = nn.Linear(emb_dim, out_ch * 2)
+        self.conv2 = nn.Conv3d(out_ch, out_ch, kernel_size=3, padding=1, bias=True)
+        self.skip = nn.Conv3d(in_ch, out_ch, kernel_size=1, bias=True) if in_ch != out_ch else nn.Identity()
+        nn.init.zeros_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
+
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(F.silu(self.norm1(x)))
+        gamma, beta = self.film(emb).chunk(2, dim=1)
+        h = self.norm2(h)
+        h = h * (1.0 + gamma[..., None, None, None]) + beta[..., None, None, None]
+        h = self.conv2(F.silu(h))
+        return h + self.skip(x)
+
+
+class Downsample3D(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.conv = nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Upsample3D(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.conv = nn.Conv3d(in_ch, out_ch, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        x = F.interpolate(x.float(), scale_factor=2, mode="trilinear", align_corners=False).to(dtype=ref.dtype)
+        x = _pad_or_crop_to(x, ref)
+        return self.conv(x)
+
+
+class BottleneckAttention3D(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.norm = _group_norm(channels)
+        self.q = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
+        self.k = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
+        self.v = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
+        self.proj = nn.Conv3d(channels, channels, kernel_size=1, bias=True)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, D, H, W = x.shape
+        h = self.norm(x)
+        q = self.q(h).reshape(B, C, D * H * W).transpose(1, 2)
+        k = self.k(h).reshape(B, C, D * H * W)
+        v = self.v(h).reshape(B, C, D * H * W).transpose(1, 2)
+        attn = torch.softmax(torch.bmm(q.float(), k.float()) / math.sqrt(float(C)), dim=-1).to(dtype=x.dtype)
+        out = torch.bmm(attn, v).transpose(1, 2).reshape(B, C, D, H, W)
+        return x + self.proj(out)
+
+
+class ResidualDiffusionUNet3D(nn.Module):
+    def __init__(
+        self,
+        in_ch: int = 6,
+        base_ch: int = DIFF_UNET_BASE_CH,
+        emb_dim: int = DIFF_EMB_DIM,
+        clinical_dim: int = 10,
+        use_checkpoint: bool = USE_CHECKPOINT,
+    ):
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.use_checkpoint = use_checkpoint
+        ch0 = int(base_ch)
+        ch1 = ch0 * 2
+        ch2 = ch0 * 4
+        ch3 = ch0 * 8
+        ch4 = ch0 * 16
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim * 4),
+            nn.SiLU(),
+            nn.Linear(emb_dim * 4, emb_dim),
+        )
+        self.clinical_mlp = nn.Sequential(
+            nn.LayerNorm(clinical_dim),
+            nn.Linear(clinical_dim, emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, emb_dim),
+        )
+
+        self.in_proj = nn.Conv3d(in_ch, ch0, kernel_size=3, padding=1, bias=True)
+        self.enc0 = FiLMResBlock3D(ch0, ch0, emb_dim)
+        self.down1 = Downsample3D(ch0, ch1)
+        self.enc1 = FiLMResBlock3D(ch1, ch1, emb_dim)
+        self.down2 = Downsample3D(ch1, ch2)
+        self.enc2 = FiLMResBlock3D(ch2, ch2, emb_dim)
+        self.down3 = Downsample3D(ch2, ch3)
+        self.enc3 = FiLMResBlock3D(ch3, ch3, emb_dim)
+        self.down4 = Downsample3D(ch3, ch4)
+        self.mid1 = FiLMResBlock3D(ch4, ch4, emb_dim)
+        self.mid_attn = BottleneckAttention3D(ch4)
+        self.mid2 = FiLMResBlock3D(ch4, ch4, emb_dim)
+
+        self.up3 = Upsample3D(ch4, ch3)
+        self.dec3 = FiLMResBlock3D(ch3 + ch3, ch3, emb_dim)
+        self.up2 = Upsample3D(ch3, ch2)
+        self.dec2 = FiLMResBlock3D(ch2 + ch2, ch2, emb_dim)
+        self.up1 = Upsample3D(ch2, ch1)
+        self.dec1 = FiLMResBlock3D(ch1 + ch1, ch1, emb_dim)
+        self.up0 = Upsample3D(ch1, ch0)
+        self.dec0 = FiLMResBlock3D(ch0 + ch0, ch0, emb_dim)
+
+        self.out_norm = _group_norm(ch0)
+        self.out_conv = nn.Conv3d(ch0, 1, kernel_size=3, padding=1, bias=True)
+        self.braak_head = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Flatten(),
+            nn.Linear(ch4, emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, 3),
+        )
+        nn.init.zeros_(self.out_conv.weight)
+        nn.init.zeros_(self.out_conv.bias)
+
+    def _run_block(self, block: nn.Module, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        if self.use_checkpoint and self.training:
+            return grad_checkpoint(lambda a, b: block(a, b), x, emb, use_reentrant=False)
+        return block(x, emb)
+
+    def _condition(self, t: torch.Tensor, clinical: torch.Tensor) -> torch.Tensor:
+        z_t = self.time_mlp(_sinusoidal_timestep_embedding(t, self.emb_dim).to(device=clinical.device))
+        z_c = self.clinical_mlp(clinical.float()).to(dtype=z_t.dtype)
+        return z_t + z_c
+
+    def forward(
+        self,
+        noisy_residual: torch.Tensor,
+        t: torch.Tensor,
+        t1: torch.Tensor,
+        flair: torch.Tensor,
+        pet_base: torch.Tensor,
+        brain_mask: torch.Tensor,
+        cortex_mask: torch.Tensor,
+        clinical: torch.Tensor,
+        return_aux: bool = False,
+    ):
+        emb = self._condition(t, clinical)
+        x = torch.cat([noisy_residual, t1, flair, pet_base, brain_mask, cortex_mask], dim=1)
+
+        x0 = self.in_proj(x)
+        e0 = self._run_block(self.enc0, x0, emb)
+        e1 = self._run_block(self.enc1, self.down1(e0), emb)
+        e2 = self._run_block(self.enc2, self.down2(e1), emb)
+        e3 = self._run_block(self.enc3, self.down3(e2), emb)
+
+        mid = self.down4(e3)
+        mid = self._run_block(self.mid1, mid, emb)
+        mid = self.mid_attn(mid)
+        mid = self._run_block(self.mid2, mid, emb)
+
+        d3 = self.up3(mid, e3)
+        d3 = self._run_block(self.dec3, torch.cat([d3, e3], dim=1), emb)
+        d2 = self.up2(d3, e2)
+        d2 = self._run_block(self.dec2, torch.cat([d2, e2], dim=1), emb)
+        d1 = self.up1(d2, e1)
+        d1 = self._run_block(self.dec1, torch.cat([d1, e1], dim=1), emb)
+        d0 = self.up0(d1, e0)
+        d0 = self._run_block(self.dec0, torch.cat([d0, e0], dim=1), emb)
+
+        eps = self.out_conv(F.silu(self.out_norm(d0)))
+        if not return_aux:
+            return eps
+        aux = {"braak_pred": self.braak_head(mid)}
+        return eps, aux

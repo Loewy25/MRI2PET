@@ -16,6 +16,7 @@ from .utils import _resized_affine_for_scipy_zoom
 
 from .config import (
     BATCH_SIZE,
+    BASELINE_CACHE_DIR,
     EVAL_BATCH_SIZE,
     BRAAK_THRESHOLD,
     DEMOGRAPHICS_CSV,
@@ -29,6 +30,7 @@ from .config import (
     RESIZE_TO,
     ROOT_DIR,
     TRAIN_FRACTION,
+    USE_BASELINE_CACHE,
     VAL_FRACTION,
 )
 
@@ -378,6 +380,8 @@ class KariAV1451Dataset(Dataset):
         self.root_dir = root_dir
         self.resize_to = resize_to
         self.sid_to_label = sid_to_label or {}
+        self.use_baseline_cache = USE_BASELINE_CACHE and bool(BASELINE_CACHE_DIR)
+        self.baseline_cache_dir = BASELINE_CACHE_DIR
         self.clinical_stats: Optional[Dict[str, Tuple[float, float]]] = None
         self.braak_mean: Optional[np.ndarray] = None
         self.braak_std: Optional[np.ndarray] = None
@@ -506,6 +510,17 @@ class KariAV1451Dataset(Dataset):
         t1n = norm_mri_to_01(t1, mask)
         flairn = norm_mri_to_01(flair, mask)
         petn = norm_pet_to_01(pet, mask=mask)
+        pet_base_arr = None
+        if self.use_baseline_cache:
+            base_path = os.path.join(self.baseline_cache_dir, f"{sid}_pet_base.npy")
+            if not os.path.isfile(base_path):
+                raise RuntimeError(f"{sid}: cached PET_base not found: {base_path}")
+            pet_base_arr = np.load(base_path).astype(np.float32)
+            if pet_base_arr.shape != petn.shape:
+                raise RuntimeError(
+                    f"{sid}: cached PET_base shape {pet_base_arr.shape} does not match model grid {petn.shape}"
+                )
+            pet_base_arr[~mask] = 0.0
         clin = self._clinical_vector(item["clinical_raw"])
         braak_norm = self._normalized_braak(item["braak_values_raw"])
 
@@ -533,6 +548,8 @@ class KariAV1451Dataset(Dataset):
             "braak_values": braak_norm,
             "braak_values_raw": item["braak_values_raw"].astype(np.float32),
         }
+        if pet_base_arr is not None:
+            meta["pet_base"] = np.expand_dims(pet_base_arr, axis=0).astype(np.float32)
         return t1n_t, petn_t, meta
 
 
