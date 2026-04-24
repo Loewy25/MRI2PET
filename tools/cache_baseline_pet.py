@@ -28,11 +28,7 @@ from mri2pet.models import Generator
 
 def _parse_args():
     p = argparse.ArgumentParser(description="Cache baseline PET_base outputs in the model grid.")
-    p.add_argument(
-        "--checkpoint",
-        default=BASE_PRETRAIN_CKPT,
-        help="Baseline Generator checkpoint, or residual model checkpoint containing base.* weights.",
-    )
+    p.add_argument("--checkpoint", default=BASE_PRETRAIN_CKPT, help="Baseline Generator checkpoint path.")
     p.add_argument("--cache-dir", required=True, help="Output directory for *_pet_base.npy files.")
     p.add_argument("--root-dir", default=ROOT_DIR, help="Subject root directory.")
     p.add_argument("--fold-csv", default=FOLD_CSV, help="Fold CSV used to define train/val/test subjects.")
@@ -41,70 +37,10 @@ def _parse_args():
     return p.parse_args()
 
 
-def _state_dict_candidates(obj):
-    candidates = [("raw", obj)]
-    if isinstance(obj, dict):
-        for key in ("state_dict", "model_state_dict", "model", "G", "generator", "best_G"):
-            val = obj.get(key)
-            if isinstance(val, dict):
-                candidates.append((key, val))
-    return candidates
-
-
-def _strip_module_prefix(state):
-    if not isinstance(state, dict):
-        return state
-    if state and all(str(k).startswith("module.") for k in state.keys()):
-        return {str(k)[len("module."):]: v for k, v in state.items()}
-    return state
-
-
-def _load_generator_checkpoint(G: Generator, checkpoint_path: str) -> str:
-    raw = torch.load(checkpoint_path, map_location="cpu")
-    expected = set(G.state_dict().keys())
-    errors = []
-
-    for source_name, state in _state_dict_candidates(raw):
-        state = _strip_module_prefix(state)
-        if not isinstance(state, dict):
-            continue
-
-        plain = {str(k): v for k, v in state.items()}
-        if set(plain.keys()) == expected:
-            G.load_state_dict(plain, strict=True)
-            return f"{source_name}:plain_generator"
-
-        base_state = {
-            str(k)[len("base."):]: v
-            for k, v in plain.items()
-            if str(k).startswith("base.")
-        }
-        if base_state and set(base_state.keys()) == expected:
-            G.load_state_dict(base_state, strict=True)
-            return f"{source_name}:extracted_base_prefix"
-
-        missing_plain = len(expected - set(plain.keys()))
-        unexpected_plain = len(set(plain.keys()) - expected)
-        missing_base = len(expected - set(base_state.keys())) if base_state else len(expected)
-        errors.append(
-            f"{source_name}: plain missing={missing_plain} unexpected={unexpected_plain}; "
-            f"base missing={missing_base} base_keys={len(base_state)}"
-        )
-
-    preview = []
-    if isinstance(raw, dict):
-        preview = [str(k) for k in list(raw.keys())[:12]]
-    raise RuntimeError(
-        "Could not load checkpoint into baseline Generator. Expected either plain Generator keys "
-        "or residual checkpoint keys prefixed with 'base.'. "
-        f"Checkpoint={checkpoint_path}. Top-level preview={preview}. Attempts: {errors}"
-    )
-
-
 def main():
     args = _parse_args()
     if not args.checkpoint or not os.path.isfile(args.checkpoint):
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+        raise FileNotFoundError(f"Baseline checkpoint not found: {args.checkpoint}")
     if not os.path.isfile(args.fold_csv):
         raise FileNotFoundError(f"Fold CSV not found: {args.fold_csv}")
 
@@ -133,9 +69,9 @@ def main():
     ds.set_braak_stats(braak_mean, braak_std)
 
     G = Generator(in_ch=1, out_ch=1, use_checkpoint=False).to(device)
-    checkpoint_load_mode = _load_generator_checkpoint(G, args.checkpoint)
+    state = torch.load(args.checkpoint, map_location="cpu")
+    G.load_state_dict(state, strict=True)
     G.eval()
-    print(f"[cache] checkpoint_load_mode={checkpoint_load_mode}", flush=True)
 
     t0 = time.time()
     for n, idx in enumerate(idx_all, start=1):
@@ -160,7 +96,6 @@ def main():
         "fold_index": int(args.fold_index),
         "fold_csv": os.path.abspath(args.fold_csv),
         "checkpoint": os.path.abspath(args.checkpoint),
-        "checkpoint_load_mode": checkpoint_load_mode,
         "resize_to": list(RESIZE_TO) if RESIZE_TO is not None else None,
         "root_dir": os.path.abspath(args.root_dir),
         "num_subjects": len(idx_all),
