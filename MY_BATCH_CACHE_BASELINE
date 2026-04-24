@@ -21,14 +21,14 @@ conda activate pasta
 export PYTHONUNBUFFERED=1
 
 # Choose the fold and matching baseline checkpoint before submitting.
-export FOLD_INDEX=4
+export FOLD_INDEX=3
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 
 # IMPORTANT: use the baseline best_G.pth trained for the same fold.
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025_residual_5_os5/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025_residual_4_os5/checkpoints/best_G.pth"
 
 # Output cache for this fold/model grid.
-export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold5_res128"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold4_res128"
 
 mkdir -p "${BASELINE_CACHE_DIR}"
 
