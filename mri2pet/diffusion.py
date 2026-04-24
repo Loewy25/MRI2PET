@@ -71,6 +71,12 @@ def ddim_sample_loop(
     step_ids = torch.unique_consecutive(step_ids)
 
     x = x_start if x_start is not None else torch.randn(shape, device=device, dtype=t1.dtype)
+    if brain_mask is None:
+        brain = torch.ones(shape, device=device, dtype=x.dtype)
+    else:
+        brain = brain_mask.to(device=device, dtype=x.dtype)
+    x = x * brain
+
     aux_last: Dict[str, Any] = {}
     for i, step in enumerate(step_ids):
         t = torch.full((shape[0],), int(step.item()), device=device, dtype=torch.long)
@@ -84,7 +90,9 @@ def ddim_sample_loop(
             clinical=clinical,
             return_aux=True,
         )
+        eps_pred = eps_pred * brain.to(dtype=eps_pred.dtype)
         x0_pred = predict_x0_from_eps(x, t, eps_pred, schedule)
+        x0_pred = x0_pred * brain.to(dtype=x0_pred.dtype)
         if i == len(step_ids) - 1:
             x = x0_pred
             break
@@ -92,5 +100,6 @@ def ddim_sample_loop(
         next_step = step_ids[i + 1]
         ab_prev = schedule["alphas_cumprod"][next_step].to(device=device, dtype=x.dtype)
         x = torch.sqrt(ab_prev) * x0_pred + torch.sqrt(1.0 - ab_prev) * eps_pred
+        x = x * brain
 
     return x, aux_last

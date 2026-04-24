@@ -36,6 +36,7 @@ export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
 # Fill these from tools/compute_residual_stats.py before launching a real run.
 export DIFF_RESIDUAL_MEAN=0.0
 export DIFF_RESIDUAL_STD=0.25
+export DIFF_X0_CLIP=8.0
 
 export DIFF_TIMESTEPS=1000
 export DIFF_UNET_BASE_CH=32

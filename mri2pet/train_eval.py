@@ -20,7 +20,7 @@ from .config import (
     AMP_ENABLE, USE_CHECKPOINT, VAL_ROI_WEIGHT, SPATIAL_PRIOR_LR_MULT,
     DIFF_TIMESTEPS, DIFF_BETA_START, DIFF_BETA_END,
     DIFF_LR, DIFF_WEIGHT_DECAY,
-    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD,
+    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD, DIFF_X0_CLIP,
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
 )
@@ -1440,8 +1440,8 @@ def train_residual_diffusion(
             r0 = (pet5.float() - pet_base5.float()) * brain_f
             x0 = ((r0 - float(DIFF_RESIDUAL_MEAN)) / max(float(DIFF_RESIDUAL_STD), 1e-6)) * brain_f
             t = torch.randint(0, DIFF_TIMESTEPS, (B,), device=device, dtype=torch.long)
-            noise = torch.randn_like(x0)
-            xt = q_sample(x0, t, noise, schedule)
+            noise = torch.randn_like(x0) * brain_f
+            xt = q_sample(x0, t, noise, schedule) * brain_f
 
             opt_G.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
@@ -1456,9 +1456,10 @@ def train_residual_diffusion(
                     return_aux=True,
                 )
 
-            eps_f = eps_pred.float()
+            eps_f = eps_pred.float() * brain_f
             noise_loss = _masked_mean_mse(eps_f, noise.float(), brain_f)
             x0_pred = predict_x0_from_eps(xt.float(), t, eps_f, schedule)
+            x0_pred = x0_pred.clamp(-float(DIFF_X0_CLIP), float(DIFF_X0_CLIP)) * brain_f
             pet_hat, _ = _residual_scaled_to_pet(x0_pred, pet_base5.float(), brain_f)
             x0_loss = _masked_mean_l1(pet_hat.float(), pet5.float(), brain_f)
             roi_loss = _masked_l1_high_uptake(pet_hat.float(), pet5.float(), cortex5.float())
@@ -1556,8 +1557,8 @@ def train_residual_diffusion(
                     r0 = (pet5.float() - pet_base5.float()) * brain_f
                     x0 = ((r0 - float(DIFF_RESIDUAL_MEAN)) / max(float(DIFF_RESIDUAL_STD), 1e-6)) * brain_f
                     t = torch.randint(0, DIFF_TIMESTEPS, (Bv,), device=device, dtype=torch.long)
-                    noise = torch.randn_like(x0)
-                    xt = q_sample(x0, t, noise, schedule)
+                    noise = torch.randn_like(x0) * brain_f
+                    xt = q_sample(x0, t, noise, schedule) * brain_f
                     with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                         eps_pred = G(
                             xt, t,
@@ -1568,7 +1569,17 @@ def train_residual_diffusion(
                             cortex_mask=cortex5,
                             clinical=clinical,
                         )
-                    val_noise_sum += _masked_mean_mse(eps_pred.float(), noise.float(), brain_f).item()
+                    eps_pred = eps_pred.float() * brain_f
+                    val_noise_sum += _masked_mean_mse(eps_pred, noise.float(), brain_f).item()
+
+                    val_gen = torch.Generator(device=device)
+                    val_gen.manual_seed(100000 + v_step)
+                    x_start = torch.randn(
+                        tuple(x0.shape),
+                        device=device,
+                        generator=val_gen,
+                        dtype=mri5.dtype,
+                    ) * brain_f
 
                     with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                         x0_sample, _ = ddim_sample_loop(
@@ -1582,8 +1593,9 @@ def train_residual_diffusion(
                             brain_mask=brain5,
                             cortex_mask=cortex5,
                             clinical=clinical,
+                            x_start=x_start,
                         )
-                    x0_sample = x0_sample.float() * brain_f
+                    x0_sample = x0_sample.float().clamp(-float(DIFF_X0_CLIP), float(DIFF_X0_CLIP)) * brain_f
                     pet_hat, _ = _residual_scaled_to_pet(x0_sample, pet_base5.float(), brain_f)
 
                     val_recon_sum += _diffusion_recon_loss(pet_hat, pet5, brain_f, data_range).item()
@@ -2063,7 +2075,7 @@ def evaluate_and_save_diffusion(
                     cortex_mask=cortex5,
                     clinical=clinical,
                 )
-            x0_sample = x0_sample.float() * brain_f
+            x0_sample = x0_sample.float().clamp(-float(DIFF_X0_CLIP), float(DIFF_X0_CLIP)) * brain_f
             pet_sample, _ = _residual_scaled_to_pet(x0_sample, pet_base5.float(), brain_f)
             samples.append(pet_sample.float())
             print(

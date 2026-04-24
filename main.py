@@ -16,7 +16,7 @@ from mri2pet.config import (
     USE_BASELINE_CACHE, BASELINE_CACHE_DIR,
     DIFF_TIMESTEPS, DIFF_BETA_START, DIFF_BETA_END,
     DIFF_UNET_BASE_CH, DIFF_EMB_DIM, DIFF_LR, DIFF_WEIGHT_DECAY,
-    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD,
+    DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD, DIFF_X0_CLIP,
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
@@ -117,6 +117,7 @@ def init_wandb_run():
             "diff_weight_decay": DIFF_WEIGHT_DECAY,
             "diff_residual_mean": DIFF_RESIDUAL_MEAN,
             "diff_residual_std": DIFF_RESIDUAL_STD,
+            "diff_x0_clip": DIFF_X0_CLIP,
             "diff_lambda_x0": DIFF_LAMBDA_X0,
             "diff_lambda_roi": DIFF_LAMBDA_ROI,
             "diff_lambda_braak": DIFF_LAMBDA_BRAAK,
@@ -179,7 +180,7 @@ if __name__ == "__main__":
         print(f"  USE_BASELINE_CACHE={USE_BASELINE_CACHE}  BASELINE_CACHE_DIR={BASELINE_CACHE_DIR}")
         print(f"  timesteps={DIFF_TIMESTEPS} beta=[{DIFF_BETA_START}, {DIFF_BETA_END}]")
         print(f"  base_ch={DIFF_UNET_BASE_CH} emb_dim={DIFF_EMB_DIM} lr={DIFF_LR} wd={DIFF_WEIGHT_DECAY}")
-        print(f"  residual mean/std={DIFF_RESIDUAL_MEAN}/{DIFF_RESIDUAL_STD}")
+        print(f"  residual mean/std={DIFF_RESIDUAL_MEAN}/{DIFF_RESIDUAL_STD}  x0_clip={DIFF_X0_CLIP}")
         print(
             f"  lambdas x0={DIFF_LAMBDA_X0} roi={DIFF_LAMBDA_ROI} braak={DIFF_LAMBDA_BRAAK} "
             f"val_steps={DIFF_VAL_SAMPLE_STEPS} test_steps={DIFF_TEST_SAMPLE_STEPS} K={DIFF_NUM_SAMPLES}"
