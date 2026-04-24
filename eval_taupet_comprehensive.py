@@ -144,6 +144,12 @@ def safe_fname(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s
 
+def debug_skip(scope: str, subject: str, reason: str, roi: Optional[str] = None):
+    if roi is None:
+        print(f"[SKIP_{scope}] subject='{subject}' reason='{reason}'")
+    else:
+        print(f"[SKIP_{scope}] subject='{subject}' roi='{roi}' reason='{reason}'")
+
 # ----------------------- CI utils ---------------------
 def _tcrit(df: int) -> float:
     try:
@@ -400,13 +406,22 @@ def compute_subject_all(subj_for_paths: str,
     fake_p = os.path.join(subj_vol, "PET_fake.nii.gz")
     gt_p   = os.path.join(subj_vol, "PET_gt.nii.gz")
     if not (os.path.exists(fake_p) and os.path.exists(gt_p)):
+        missing = []
+        if not os.path.exists(fake_p):
+            missing.append("PET_fake.nii.gz")
+        if not os.path.exists(gt_p):
+            missing.append("PET_gt.nii.gz")
+        debug_skip("SUBJECT", emit_subject_id, f"missing required volume(s): {', '.join(missing)}")
         return [], {}
 
     fake_img, fake_np = load_nii(fake_p)
     gt_img,   gt_np   = load_nii(gt_p)
     if fake_np.shape != gt_np.shape:
+        debug_skip("SUBJECT", emit_subject_id,
+                   f"PET_fake/PET_gt shape mismatch fake={tuple(fake_np.shape)} gt={tuple(gt_np.shape)}")
         return [], {}
     if strict_affine and not affines_close(fake_img, gt_img):
+        debug_skip("SUBJECT", emit_subject_id, "PET_fake/PET_gt affine mismatch under --strict-affine")
         return [], {}
 
     x_fake = to_tensor_5d(fake_np, device)
@@ -419,20 +434,25 @@ def compute_subject_all(subj_for_paths: str,
     def handle_mask(roi_name: str, roi_path: str):
         nonlocal long_rows, means
         if not os.path.exists(roi_path):
+            debug_skip("ROI", emit_subject_id, f"missing ROI file: {os.path.basename(roi_path)}", roi=roi_name)
             means[f"{roi_name}_GT"] = float("nan")
             means[f"{roi_name}_Fake"] = float("nan")
             return
         roi_img, roi_np = load_nii(roi_path)
         if roi_np.shape != fake_np.shape:
+            old_shape = tuple(roi_np.shape)
             zf = tuple(f / r for f, r in zip(fake_np.shape, roi_np.shape))
             roi_np = (nd_zoom(roi_np.astype(np.float32), zf, order=0) > 0.5).astype(np.uint8)
+            print(f"[DBG] subject='{emit_subject_id}' roi='{roi_name}' resized mask shape {old_shape} -> {tuple(roi_np.shape)}")
         if strict_affine and not affines_close(roi_img, fake_img):
+            debug_skip("ROI", emit_subject_id, "ROI/PET affine mismatch under --strict-affine", roi=roi_name)
             means[f"{roi_name}_GT"] = float("nan")
             means[f"{roi_name}_Fake"] = float("nan")
             return
 
         mask = (roi_np > 0)
         if mask.sum() == 0:
+            debug_skip("ROI", emit_subject_id, "mask has 0 voxels after loading/resizing", roi=roi_name)
             means[f"{roi_name}_GT"] = float("nan")
             means[f"{roi_name}_Fake"] = float("nan")
             return
@@ -463,6 +483,9 @@ def compute_subject_all(subj_for_paths: str,
     # WholeBrain masks
     for roi_name, roi_file in EXTRA_MASKS.items():
         handle_mask(roi_name, os.path.join(subj_roi, roi_file))
+
+    if not long_rows:
+        debug_skip("SUBJECT", emit_subject_id, "no valid ROI fidelity metrics were computed")
 
     return long_rows, means
 
