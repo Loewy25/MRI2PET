@@ -21,9 +21,9 @@ conda activate pasta
 export PYTHONUNBUFFERED=1
 
 # Must match the cache-generation fold and cache dir.
-export FOLD_INDEX=3
+export FOLD_INDEX=4
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
-export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold4_res128"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold5_res128"
 
 python -u tools/compute_residual_stats.py \
   --cache-dir "${BASELINE_CACHE_DIR}" \
