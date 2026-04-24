@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=resdiff_stats
+#SBATCH -N 1
+#SBATCH --mem=32G
+#SBATCH -t 02:00:00
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier2_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --exclude=gpu02,gpua405,gpu01
+#SBATCH --output=slurm-%A_resdiff_stats.out
+#SBATCH --error=slurm-%A_resdiff_stats.err
+
+set -euo pipefail
+
+module load cuda/12.2
+module load cudnn/9.6.0.74-cuda12
+
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+export PYTHONUNBUFFERED=1
+
+# Must match the cache-generation fold and cache dir.
+export FOLD_INDEX=0
+export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
+
+python -u tools/compute_residual_stats.py \
+  --cache-dir "${BASELINE_CACHE_DIR}" \
+  --root-dir "${ROOT_DIR}" \
+  | tee "${BASELINE_CACHE_DIR}/residual_stats_fold$((FOLD_INDEX + 1)).txt"
