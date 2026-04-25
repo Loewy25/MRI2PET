@@ -65,11 +65,6 @@ export AUG_ENABLE=1
 export AUG_PROB=0.5
 export AUG_FLIP_PROB=0.5
 export AUG_INTENSITY_PROB=0
-export AUG_NOISE_STD=0.03
-export AUG_SCALE_MIN=0.9
-export AUG_SCALE_MAX=1.1
-export AUG_SHIFT_MIN=-0.05
-export AUG_SHIFT_MAX=0.05
 
 export ROI_HI_Q=0.85
 export ROI_HI_LAMBDA=2.5
