@@ -24,7 +24,7 @@ export PYTHONUNBUFFERED=1
 export WANDB__SERVICE_WAIT=300
 # Run `wandb login` once on the cluster, or export WANDB_API_KEY before sbatch.
 
-export RUN_NAME="2025_resdiff_fold1_os65"
+export RUN_NAME="2025_resdiff_fold1_os5"
 export FOLD_INDEX=0
 
 export MODEL_VARIANT="residual_diffusion"
@@ -80,7 +80,7 @@ export AMP_ENABLE=1
 export USE_CHECKPOINT=1
 
 export OVERSAMPLE_ENABLE=1
-export OVERSAMPLE_LABEL3_TARGET=0.65
+export OVERSAMPLE_LABEL3_TARGET=0.5
 
 # Diffusion conditioning uses cached PET_base, so keep augmentation spatial-only.
 export AUG_ENABLE=1
