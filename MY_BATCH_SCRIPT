@@ -24,7 +24,7 @@ export PYTHONUNBUFFERED=1
 export WANDB__SERVICE_WAIT=300
 # Run `wandb login` once on the cluster, or export WANDB_API_KEY before sbatch.
 
-export RUN_NAME="resdiff_fold1_best"
+export RUN_NAME="2025_resdiff_fold1_os65"
 export FOLD_INDEX=0
 
 export MODEL_VARIANT="residual_diffusion"
@@ -33,10 +33,32 @@ export MODEL_VARIANT="residual_diffusion"
 export USE_BASELINE_CACHE=1
 export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
 
-# Fill these from tools/compute_residual_stats.py before launching a real run.
-export DIFF_RESIDUAL_MEAN=0.0
-export DIFF_RESIDUAL_STD=0.25
-export DIFF_X0_CLIP=8.0
+# fold1
+export FOLD_INDEX=0
+export DIFF_RESIDUAL_MEAN=-0.00859367
+export DIFF_RESIDUAL_STD=0.08132048
+
+# fold2
+#export FOLD_INDEX=1
+#export DIFF_RESIDUAL_MEAN=-0.01610212
+#export DIFF_RESIDUAL_STD=0.10196011
+
+# fold3
+#export FOLD_INDEX=2
+#export DIFF_RESIDUAL_MEAN=-0.01777566
+#export DIFF_RESIDUAL_STD=0.11000205
+
+# fold4
+#export FOLD_INDEX=3
+#export DIFF_RESIDUAL_MEAN=-0.00662102
+#export DIFF_RESIDUAL_STD=0.09579086
+
+# fold5
+#export FOLD_INDEX=4
+#export DIFF_RESIDUAL_MEAN=0.02150483
+#export DIFF_RESIDUAL_STD=0.08518133
+
+
 
 export DIFF_TIMESTEPS=1000
 export DIFF_UNET_BASE_CH=32
