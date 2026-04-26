@@ -17,7 +17,7 @@ os.environ["OVERSAMPLE_ENABLE"] = "0"
 os.environ["USE_BASELINE_CACHE"] = "0"
 
 from mri2pet.config import BASELINE_CACHE_DIR, FOLD_CSV, RESIZE_TO, ROOT_DIR
-from mri2pet.data import KariAV1451Dataset, _read_fold_csv_lists
+from mri2pet.data import KariAV1451Dataset, _compute_clinical_stats, _read_fold_csv_lists
 
 
 def _parse_args():
@@ -113,6 +113,17 @@ def main():
 
     ds = KariAV1451Dataset(root_dir=args.root_dir, resize_to=RESIZE_TO)
     sid_to_index = {item["sid"]: i for i, item in enumerate(ds.items)}
+
+    train_sids, _, _, _ = _read_fold_csv_lists(args.fold_csv)
+    missing_train = [sid for sid in train_sids if sid not in sid_to_index]
+    if missing_train:
+        raise RuntimeError(
+            f"{len(missing_train)} train subjects from fold CSV not found on disk. "
+            f"Examples: {missing_train[:8]}"
+        )
+    idx_train = [sid_to_index[sid] for sid in train_sids]
+    ds.set_clinical_stats(_compute_clinical_stats(ds, idx_train))
+
     sids = _subject_sids(args, ds)
 
     rows = []
