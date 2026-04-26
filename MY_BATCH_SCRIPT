@@ -98,6 +98,6 @@ export ROI_HI_MIN_VOXELS=32
 python -u tools/check_residual_contrast.py \
   --cache-dir /scratch/l.peiwang/pet_base_cache/fold3_res128 \
   --root-dir /scratch/l.peiwang/kari_flair_all \
-  --fold-csv /scratch/l.peiwang/kari_flair_all/CV3_braak_strat/fold4.csv \
+  --fold-csv /scratch/l.peiwang/kari_flair_all/CV5_braak_strat/fold3.csv \
   --split train \
   --out-csv /scratch/l.peiwang/pet_base_cache/fold3_res128/residual_contrast_train.csv
