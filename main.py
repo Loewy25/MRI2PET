@@ -19,6 +19,10 @@ from mri2pet.config import (
     DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD, DIFF_X0_CLIP,
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
+    CDRM_BASIS_DIR, CDRM_COEFF_CSV, CDRM_K_CAL, CDRM_K_DIS,
+    CDRM_LR, CDRM_WEIGHT_DECAY, CDRM_LAMBDA_ROI, CDRM_LAMBDA_COEF,
+    CDRM_T1_FREEZE, CDRM_STAT_DIM,
+    CDRM_DISEASE_TARGET_MODE, CDRM_CONTRAST_LAMBDA, CDRM_CONTRAST_REF,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
@@ -33,13 +37,21 @@ from mri2pet.config import (
 from mri2pet.data import build_loaders
 from mri2pet.config import FOLD_CSV
 from mri2pet.data import build_loaders_from_fold_csv
-from mri2pet.models import Generator, CondPatchDiscriminator3D, ResidualSpatialPriorGenerator, ResidualDiffusionUNet3D
+from mri2pet.models import (
+    Generator,
+    CondPatchDiscriminator3D,
+    ResidualSpatialPriorGenerator,
+    ResidualDiffusionUNet3D,
+    ResidualManifoldNet,
+)
 from mri2pet.train_eval import (
     train_paggan,
     train_residual_spatial_prior,
     train_residual_diffusion,
+    train_residual_manifold,
     evaluate_and_save,
     evaluate_and_save_diffusion,
+    evaluate_and_save_residual_manifold,
 )
 from mri2pet.plotting import save_loss_curves, save_history_csv
 from mri2pet.data import CLINICAL_FEATURE_NAMES
@@ -125,6 +137,25 @@ def init_wandb_run():
             "diff_test_sample_steps": DIFF_TEST_SAMPLE_STEPS,
             "diff_num_samples": DIFF_NUM_SAMPLES,
         })
+    if MODEL_VARIANT == "residual_manifold":
+        wandb_config.update({
+            "use_baseline_cache": USE_BASELINE_CACHE,
+            "baseline_cache_dir": BASELINE_CACHE_DIR,
+            "base_pretrain_ckpt": BASE_PRETRAIN_CKPT,
+            "cdrm_basis_dir": CDRM_BASIS_DIR,
+            "cdrm_coeff_csv": CDRM_COEFF_CSV,
+            "cdrm_k_cal": CDRM_K_CAL,
+            "cdrm_k_dis": CDRM_K_DIS,
+            "cdrm_lr": CDRM_LR,
+            "cdrm_weight_decay": CDRM_WEIGHT_DECAY,
+            "cdrm_lambda_roi": CDRM_LAMBDA_ROI,
+            "cdrm_lambda_coef": CDRM_LAMBDA_COEF,
+            "cdrm_t1_freeze": CDRM_T1_FREEZE,
+            "cdrm_stat_dim": CDRM_STAT_DIM,
+            "cdrm_disease_target_mode": CDRM_DISEASE_TARGET_MODE,
+            "cdrm_contrast_lambda": CDRM_CONTRAST_LAMBDA,
+            "cdrm_contrast_ref": CDRM_CONTRAST_REF,
+        })
 
     try:
         return wandb.init(
@@ -159,6 +190,24 @@ def log_wandb_output_files(wandb_run, run_name: str, paths):
         print(f"[WARN] Failed to log W&B output artifact: {exc}")
 
 
+def load_generator_weights_into_t1_backbone(model, ckpt_path: str):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt
+    for key in ("state_dict", "model_state_dict", "G", "generator"):
+        if isinstance(state, dict) and key in state and isinstance(state[key], dict):
+            state = state[key]
+            break
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Unsupported checkpoint format: {ckpt_path}")
+
+    if all(k.startswith("module.") for k in state.keys()):
+        state = {k[len("module."):]: v for k, v in state.items()}
+    base_prefixed = {k[len("base."):]: v for k, v in state.items() if k.startswith("base.")}
+    if base_prefixed:
+        state = base_prefixed
+    model.t1_backbone.load_state_dict(state, strict=True)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("MRI2PET Training Run")
@@ -187,6 +236,27 @@ if __name__ == "__main__":
         )
         if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
             raise RuntimeError("MODEL_VARIANT=residual_diffusion requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
+    if MODEL_VARIANT == "residual_manifold":
+        print("Residual manifold model:")
+        print(f"  USE_BASELINE_CACHE={USE_BASELINE_CACHE}  BASELINE_CACHE_DIR={BASELINE_CACHE_DIR}")
+        print(f"  basis_dir={CDRM_BASIS_DIR}  coeff_csv={CDRM_COEFF_CSV}")
+        print(f"  K_cal={CDRM_K_CAL} K_dis={CDRM_K_DIS} lr={CDRM_LR} wd={CDRM_WEIGHT_DECAY}")
+        print(
+            f"  lambdas roi={CDRM_LAMBDA_ROI} coef={CDRM_LAMBDA_COEF} "
+            f"t1_freeze={CDRM_T1_FREEZE} stat_dim={CDRM_STAT_DIM}"
+        )
+        print(
+            f"  basis mode={CDRM_DISEASE_TARGET_MODE} "
+            f"contrast_lambda={CDRM_CONTRAST_LAMBDA} contrast_ref={CDRM_CONTRAST_REF}"
+        )
+        if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
+            raise RuntimeError("MODEL_VARIANT=residual_manifold requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
+        if not (CDRM_BASIS_DIR and os.path.isdir(CDRM_BASIS_DIR)):
+            raise RuntimeError("MODEL_VARIANT=residual_manifold requires CDRM_BASIS_DIR")
+        if not (CDRM_COEFF_CSV and os.path.isfile(CDRM_COEFF_CSV)):
+            raise RuntimeError("MODEL_VARIANT=residual_manifold requires CDRM_COEFF_CSV")
+        if not (BASE_PRETRAIN_CKPT and os.path.isfile(BASE_PRETRAIN_CKPT)):
+            raise RuntimeError("MODEL_VARIANT=residual_manifold requires BASE_PRETRAIN_CKPT for T1 encoder")
     if MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}:
         print("Residual spatial prior model:")
         print(
@@ -302,6 +372,7 @@ if __name__ == "__main__":
     # Instantiate models
     is_prompt_residual = MODEL_VARIANT in {"prompt_residual_braak", "residual_spatial_prior"}
     is_residual_diffusion = (MODEL_VARIANT == "residual_diffusion")
+    is_residual_manifold = (MODEL_VARIANT == "residual_manifold")
 
     if is_residual_diffusion:
         G = ResidualDiffusionUNet3D(
@@ -313,6 +384,24 @@ if __name__ == "__main__":
         )
         D = None
         print(f"Diffusion branch will use cached PET_base from: {BASELINE_CACHE_DIR}")
+    elif is_residual_manifold:
+        G = ResidualManifoldNet(
+            basis_dir=CDRM_BASIS_DIR,
+            clinical_dim=CLINICAL_DIM,
+            stat_dim=CDRM_STAT_DIM,
+            t1_freeze=CDRM_T1_FREEZE,
+            use_checkpoint=USE_CHECKPOINT,
+        )
+        if G.k_cal != CDRM_K_CAL or G.k_dis != CDRM_K_DIS:
+            raise RuntimeError(
+                f"Basis dimensions K_cal/K_dis={G.k_cal}/{G.k_dis} do not match "
+                f"CDRM_K_CAL/CDRM_K_DIS={CDRM_K_CAL}/{CDRM_K_DIS}"
+            )
+        print(f"Loading T1 backbone checkpoint: {BASE_PRETRAIN_CKPT}")
+        load_generator_weights_into_t1_backbone(G, BASE_PRETRAIN_CKPT)
+        print("T1 backbone weights loaded successfully.")
+        D = None
+        print(f"Residual manifold branch will use cached PET_base from: {BASELINE_CACHE_DIR}")
     elif is_prompt_residual:
         G = ResidualSpatialPriorGenerator(
             in_ch=1, out_ch=1,
@@ -345,10 +434,13 @@ if __name__ == "__main__":
     if D is not None:
         print(f"Discriminator params: {_count_params(D):,}")
     else:
-        print("Discriminator params: (none for residual diffusion)")
+        print("Discriminator params: (none for this branch)")
     if is_prompt_residual:
         print(f"  Base params:        {_count_params(G.base):,}")
         print(f"  New branch params:  {_count_params(G) - _count_params(G.base):,}")
+    if is_residual_manifold:
+        print(f"  T1 backbone params: {_count_params(G.t1_backbone):,}")
+        print(f"  K_cal/K_dis:        {G.k_cal}/{G.k_dis}")
     print("=" * 70)
 
     if wandb_run is not None:
@@ -359,6 +451,14 @@ if __name__ == "__main__":
     # Train
     if is_residual_diffusion:
         out = train_residual_diffusion(
+            G, train_loader, val_loader,
+            device=device, epochs=EPOCHS,
+            data_range=DATA_RANGE,
+            verbose=True,
+            log_to_wandb=(wandb_run is not None),
+        )
+    elif is_residual_manifold:
+        out = train_residual_manifold(
             G, train_loader, val_loader,
             device=device, epochs=EPOCHS,
             data_range=DATA_RANGE,
@@ -406,6 +506,12 @@ if __name__ == "__main__":
             sample_steps=DIFF_TEST_SAMPLE_STEPS,
             num_samples=DIFF_NUM_SAMPLES,
         )
+    elif is_residual_manifold:
+        metrics = evaluate_and_save_residual_manifold(
+            G, test_loader, device=device,
+            out_dir=VOL_DIR, data_range=DATA_RANGE,
+            mmd_voxels=2048,
+        )
     else:
         metrics = evaluate_and_save(
             G, test_loader, device=device,
@@ -427,6 +533,9 @@ if __name__ == "__main__":
             "uncertainty_mean_cortex",
             "mean_abs_delta",
             "base_vs_fake_recon_improvement",
+            "base_vs_fake_roi_improvement",
+            "mean_abs_res_cal",
+            "mean_abs_res_dis",
         ]:
             if key in metrics:
                 test_log[f"test/{key}"] = metrics[key]
@@ -449,6 +558,12 @@ if __name__ == "__main__":
             output_files.extend([
                 os.path.join(OUT_RUN, "per_subject_diffusion.csv"),
                 os.path.join(CKPT_DIR, "best_diffusion.pth"),
+            ])
+        elif is_residual_manifold:
+            output_files.extend([
+                os.path.join(OUT_RUN, "per_subject_manifold.csv"),
+                os.path.join(OUT_RUN, "coefficients.csv"),
+                os.path.join(CKPT_DIR, "best_residual_manifold.pth"),
             ])
         else:
             output_files.extend([

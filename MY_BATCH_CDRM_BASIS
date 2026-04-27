@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=cdrm_basis
+#SBATCH -N 1
+#SBATCH --mem=64G
+#SBATCH -t 06:00:00
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier2_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --exclude=gpu02,gpua405,gpu01
+#SBATCH --output=slurm-%A_cdrm_basis.out
+#SBATCH --error=slurm-%A_cdrm_basis.err
+
+set -euo pipefail
+
+module load cuda/12.2
+module load cudnn/9.6.0.74-cuda12
+
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+export PYTHONUNBUFFERED=1
+
+# Pick the fold. This assumes PET_base cache has already been generated.
+export FOLD_INDEX=0
+export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
+export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold1_res128"
+
+mkdir -p "${CDRM_BASIS_DIR}"
+
+python -u tools/build_residual_manifold.py \
+  --cache-dir "${BASELINE_CACHE_DIR}" \
+  --basis-dir "${CDRM_BASIS_DIR}" \
+  --root-dir "${ROOT_DIR}" \
+  --fold-csv "${ROOT_DIR}/CV5_braak_strat/fold$((FOLD_INDEX + 1)).csv" \
+  --k-cal 6 \
+  --k-dis 6 \
+  --disease-target-mode abs_plus_contrast \
+  --contrast-lambda 1.0 \
+  --contrast-ref brain_minus_cortex \
+  --nmf-iters 200 \
+  --fit-iters 3 \
+  --hi-q 0.85

@@ -16,6 +16,20 @@ os.makedirs(OUT_RUN, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(VOL_DIR, exist_ok=True)
 
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name, None)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name, None)
+    return float(v) if v is not None else float(default)
+
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name, None)
+    return int(v) if v is not None else int(default)
+
 RESIZE_TO: Optional[Tuple[int,int,int]] = (128, 128, 128)
 RESAMPLE_BACK_TO_T1 = False
 
@@ -26,7 +40,7 @@ EVAL_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "1"))
 NUM_WORKERS    = int(os.environ.get("NUM_WORKERS", "2"))
 PIN_MEMORY     = True
 
-EPOCHS      = 150
+EPOCHS      = _env_int("EPOCHS", 150)
 LR_G        = 1e-4
 LR_D        = 4e-4
 GAMMA       = 1.0
@@ -45,20 +59,6 @@ FOLD_CSV   = os.path.join(SPLITS_DIR, f"fold{FOLD_INDEX+1}.csv")
 # =========================
 # Imbalance / Oversampling
 # =========================
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name, None)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-def _env_float(name: str, default: float) -> float:
-    v = os.environ.get(name, None)
-    return float(v) if v is not None else float(default)
-
-def _env_int(name: str, default: int) -> int:
-    v = os.environ.get(name, None)
-    return int(v) if v is not None else int(default)
-
 # Train-only oversampling (used only when fold CSV is used)
 OVERSAMPLE_ENABLE = _env_bool("OVERSAMPLE_ENABLE", True)
 # target fraction of label==3 in *training draws* (e.g. 0.35 => ~35%)
@@ -148,6 +148,28 @@ DIFF_LAMBDA_BRAAK = _env_float("DIFF_LAMBDA_BRAAK", 0.25)
 DIFF_VAL_SAMPLE_STEPS = _env_int("DIFF_VAL_SAMPLE_STEPS", 50)
 DIFF_TEST_SAMPLE_STEPS = _env_int("DIFF_TEST_SAMPLE_STEPS", 100)
 DIFF_NUM_SAMPLES = _env_int("DIFF_NUM_SAMPLES", 8)
+
+# =========================
+# Residual Manifold
+# =========================
+CDRM_BASIS_DIR = os.environ.get("CDRM_BASIS_DIR", "")
+CDRM_COEFF_CSV = os.environ.get("CDRM_COEFF_CSV", "")
+
+CDRM_K_CAL = _env_int("CDRM_K_CAL", 6)
+CDRM_K_DIS = _env_int("CDRM_K_DIS", 6)
+
+CDRM_LR = _env_float("CDRM_LR", 1e-4)
+CDRM_WEIGHT_DECAY = _env_float("CDRM_WEIGHT_DECAY", 1e-4)
+
+CDRM_LAMBDA_ROI = _env_float("CDRM_LAMBDA_ROI", 1.0)
+CDRM_LAMBDA_COEF = _env_float("CDRM_LAMBDA_COEF", 0.5)
+
+CDRM_T1_FREEZE = _env_bool("CDRM_T1_FREEZE", True)
+CDRM_STAT_DIM = _env_int("CDRM_STAT_DIM", 16)
+
+CDRM_DISEASE_TARGET_MODE = os.environ.get("CDRM_DISEASE_TARGET_MODE", "abs_plus_contrast")
+CDRM_CONTRAST_LAMBDA = _env_float("CDRM_CONTRAST_LAMBDA", 1.0)
+CDRM_CONTRAST_REF = os.environ.get("CDRM_CONTRAST_REF", "brain_minus_cortex")
 
 # =========================
 # Residual-Spatial-Prior settings

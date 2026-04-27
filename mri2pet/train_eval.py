@@ -23,11 +23,14 @@ from .config import (
     DIFF_RESIDUAL_MEAN, DIFF_RESIDUAL_STD, DIFF_X0_CLIP,
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
+    CDRM_COEFF_CSV, CDRM_LR, CDRM_WEIGHT_DECAY,
+    CDRM_LAMBDA_ROI, CDRM_LAMBDA_COEF,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
 from .utils import _safe_name, _save_nifti, _meta_unbatch, _resized_affine_for_scipy_zoom
 from .diffusion import make_beta_schedule, q_sample, predict_x0_from_eps, ddim_sample_loop
+from .residual_manifold import load_coeff_targets
 import wandb
 
 
@@ -107,6 +110,53 @@ def _extract_pet_base(metas: List[Dict[str, Any]], device: torch.device) -> Opti
             return None
         vals.append(torch.from_numpy(v) if isinstance(v, np.ndarray) else v)
     return torch.stack(vals, dim=0).to(device, non_blocking=True)
+
+
+_COEFF_TARGET_CACHE: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+_COEFF_SCALE_CACHE: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _coeff_targets_for_metas(
+    metas: List[Dict[str, Any]],
+    device: torch.device,
+    csv_path: str = CDRM_COEFF_CSV,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if csv_path not in _COEFF_TARGET_CACHE:
+        _COEFF_TARGET_CACHE[csv_path] = load_coeff_targets(csv_path)
+    targets = _COEFF_TARGET_CACHE[csv_path]
+    c_list, a_list = [], []
+    missing = []
+    for m in metas:
+        sid = str(m.get("sid", ""))
+        row = targets.get(sid)
+        if row is None:
+            missing.append(sid)
+            continue
+        c_list.append(torch.from_numpy(row["c"]))
+        a_list.append(torch.from_numpy(row["a"]))
+    if missing:
+        raise RuntimeError(f"Missing coefficient targets for {len(missing)} subjects. Examples: {missing[:6]}")
+    return (
+        torch.stack(c_list, dim=0).to(device=device, dtype=torch.float32, non_blocking=True),
+        torch.stack(a_list, dim=0).to(device=device, dtype=torch.float32, non_blocking=True),
+    )
+
+
+def _coeff_scales(csv_path: str, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    if csv_path not in _COEFF_TARGET_CACHE:
+        _COEFF_TARGET_CACHE[csv_path] = load_coeff_targets(csv_path)
+    if csv_path not in _COEFF_SCALE_CACHE:
+        targets = _COEFF_TARGET_CACHE[csv_path]
+        c = np.stack([row["c"] for row in targets.values()], axis=0).astype(np.float32)
+        a = np.stack([row["a"] for row in targets.values()], axis=0).astype(np.float32)
+        c_scale = np.maximum(c.std(axis=0), 1.0).astype(np.float32)
+        a_scale = np.maximum(a.std(axis=0), 1.0).astype(np.float32)
+        _COEFF_SCALE_CACHE[csv_path] = (c_scale, a_scale)
+    c_scale, a_scale = _COEFF_SCALE_CACHE[csv_path]
+    return (
+        torch.from_numpy(c_scale).to(device=device, dtype=torch.float32, non_blocking=True),
+        torch.from_numpy(a_scale).to(device=device, dtype=torch.float32, non_blocking=True),
+    )
 
 
 # =========================================================================
@@ -1699,6 +1749,364 @@ def train_residual_diffusion(
     return {"history": hist, "best_G": best_G_state}
 
 
+def train_residual_manifold(
+    G: nn.Module,
+    train_loader: Iterable,
+    val_loader: Optional[Iterable],
+    device: torch.device,
+    epochs: int = EPOCHS,
+    data_range: float = DATA_RANGE,
+    verbose: bool = True,
+    log_to_wandb: bool = False,
+) -> Dict[str, Any]:
+    G.to(device)
+    G.train()
+
+    params = [p for p in G.parameters() if p.requires_grad]
+    if not params:
+        raise RuntimeError("Residual manifold has no trainable parameters")
+    opt_G = torch.optim.AdamW(params, lr=CDRM_LR, weight_decay=CDRM_WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt_G, mode="min", factor=0.5, patience=LR_PLATEAU_PATIENCE
+    )
+
+    use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+    use_scaler = use_amp and amp_dtype == torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+
+    if verbose:
+        print(
+            "[CDRM] Residual manifold training: fixed basis maps, no in-loop augmentation. "
+            "Use tools/build_residual_manifold.py before this step.",
+            flush=True,
+        )
+        c_scale0, a_scale0 = _coeff_scales(CDRM_COEFF_CSV, device)
+        print(
+            f"[CDRM] coefficient loss scales: "
+            f"c[min={c_scale0.min().item():.3f}, max={c_scale0.max().item():.3f}] "
+            f"a[min={a_scale0.min().item():.3f}, max={a_scale0.max().item():.3f}]",
+            flush=True,
+        )
+        if AUG_ENABLE:
+            print("[CDRM][WARN] AUG_ENABLE is set, but residual_manifold skips augmentation internally.", flush=True)
+
+    best_val = float("inf")
+    best_G_state: Optional[Dict[str, torch.Tensor]] = None
+    patience_counter = 0
+    hist: Dict[str, list] = {
+        "train_G": [], "train_pet": [], "train_brain": [], "train_roi": [], "train_coef": [],
+        "val_recon": [], "val_roi": [], "val_score": [], "val_coef": [],
+        "val_base_recon": [], "val_base_roi": [],
+        "val_improve_recon": [], "val_improve_roi": [],
+        "mean_abs_res_cal": [], "mean_abs_res_dis": [],
+        "mean_a_low_stage": [], "mean_a_high_stage": [],
+    }
+
+    total_train_batches = len(train_loader) if hasattr(train_loader, "__len__") else None
+    print_every = 10
+
+    def _stage_list(metas: List[Dict[str, Any]]) -> List[int]:
+        out = []
+        for m in metas:
+            try:
+                out.append(int(m.get("stage_ord", -1)))
+            except Exception:
+                out.append(-1)
+        return out
+
+    for epoch in range(1, epochs + 1):
+        t0 = time.time()
+        G.train()
+        total_running = pet_running = brain_running = roi_running = coef_running = 0.0
+        n_batches = 0
+
+        if verbose:
+            total_str = str(total_train_batches) if total_train_batches is not None else "?"
+            print(
+                f"[CDRM][epoch {epoch:03d}/{epochs}] start train "
+                f"batches={total_str} lr={opt_G.param_groups[0]['lr']:.2e} "
+                f"lambda_roi={CDRM_LAMBDA_ROI} lambda_coef={CDRM_LAMBDA_COEF}",
+                flush=True,
+            )
+
+        for step, batch in enumerate(train_loader, start=1):
+            step_t0 = time.time()
+            if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                raise ValueError("Expected (mri, pet, meta) batch")
+            mri, pet, meta = batch
+            mri = mri.to(device, non_blocking=True)
+            pet = pet.to(device, non_blocking=True)
+            B = mri.size(0) if mri.dim() == 5 else 1
+            mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
+            pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+
+            metas = _meta_as_list(meta, B)
+            brain5, cortex5 = _extract_masks(metas, device)
+            flair5, clinical, _ = _extract_new_variant_inputs(metas, device)
+            pet_base5 = _extract_pet_base(metas, device)
+            c_tgt, a_tgt = _coeff_targets_for_metas(metas, device)
+            c_scale, a_scale = _coeff_scales(CDRM_COEFF_CSV, device)
+            if brain5 is None or cortex5 is None or flair5 is None or clinical is None or pet_base5 is None:
+                raise RuntimeError("Residual manifold training requires cached PET_base, FLAIR, clinical, brain/cortex masks")
+            if c_tgt.size(1) != getattr(G, "k_cal", c_tgt.size(1)) or a_tgt.size(1) != getattr(G, "k_dis", a_tgt.size(1)):
+                raise RuntimeError(
+                    f"Coefficient target dims c={tuple(c_tgt.shape)} a={tuple(a_tgt.shape)} "
+                    f"do not match model k_cal={getattr(G, 'k_cal', '?')} k_dis={getattr(G, 'k_dis', '?')}"
+                )
+
+            brain_f = brain5.float()
+            opt_G.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                pet_hat, aux = G(
+                    mri5,
+                    flair=flair5,
+                    pet_base=pet_base5,
+                    clinical=clinical,
+                    brain_mask=brain5,
+                    cortex_mask=cortex5,
+                    return_aux=True,
+                )
+            pet_hat_f = pet_hat.float()
+            brain_loss = _masked_mean_l1(pet_hat_f, pet5.float(), brain_f)
+            roi_loss = _masked_l1_high_uptake(pet_hat_f, pet5.float(), cortex5.float())
+            pet_loss = brain_loss + float(CDRM_LAMBDA_ROI) * roi_loss
+            coef_loss = (
+                F.smooth_l1_loss(aux["c_hat"].float() / c_scale, c_tgt.float() / c_scale)
+                + F.smooth_l1_loss(aux["a_hat"].float() / a_scale, a_tgt.float() / a_scale)
+            )
+            loss = pet_loss + float(CDRM_LAMBDA_COEF) * coef_loss
+
+            if use_scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt_G)
+                torch.nn.utils.clip_grad_norm_(params, 5.0)
+                scaler.step(opt_G)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, 5.0)
+                opt_G.step()
+
+            total_running += float(loss.detach().item())
+            pet_running += float(pet_loss.detach().item())
+            brain_running += float(brain_loss.detach().item())
+            roi_running += float(roi_loss.detach().item())
+            coef_running += float(coef_loss.detach().item())
+            n_batches += 1
+
+            if verbose and (step == 1 or step % print_every == 0 or step == total_train_batches):
+                elapsed = time.time() - t0
+                sec_per_batch = elapsed / max(1, step)
+                eta = ""
+                if total_train_batches is not None:
+                    eta_min = sec_per_batch * max(0, total_train_batches - step) / 60.0
+                    eta = f" eta_train={eta_min:.1f}m"
+                print(
+                    f"[CDRM][epoch {epoch:03d}] step {step}/{total_train_batches or '?'} "
+                    f"loss={loss.detach().item():.4f} pet={pet_loss.detach().item():.4f} "
+                    f"brain={brain_loss.detach().item():.4f} roi={roi_loss.detach().item():.4f} "
+                    f"coef={coef_loss.detach().item():.4f} "
+                    f"step_sec={time.time() - step_t0:.2f} avg_sec={sec_per_batch:.2f}{eta}",
+                    flush=True,
+                )
+
+        nb = max(1, n_batches)
+        avg_total = total_running / nb
+        avg_pet = pet_running / nb
+        avg_brain = brain_running / nb
+        avg_roi = roi_running / nb
+        avg_coef = coef_running / nb
+        train_sec = time.time() - t0
+        hist["train_G"].append(avg_total)
+        hist["train_pet"].append(avg_pet)
+        hist["train_brain"].append(avg_brain)
+        hist["train_roi"].append(avg_roi)
+        hist["train_coef"].append(avg_coef)
+
+        val_recon_epoch = val_roi_epoch = val_score_epoch = val_coef_epoch = None
+        val_base_recon_epoch = val_base_roi_epoch = None
+        val_improve_recon_epoch = val_improve_roi_epoch = None
+        mean_abs_res_cal_epoch = mean_abs_res_dis_epoch = None
+        mean_a_low_epoch = mean_a_high_epoch = None
+        val_sec_epoch = None
+
+        if val_loader is not None:
+            G.eval()
+            val_t0 = time.time()
+            val_recon_sum = val_roi_sum = val_coef_sum = 0.0
+            val_base_recon_sum = val_base_roi_sum = 0.0
+            res_cal_sum = res_dis_sum = 0.0
+            mean_a_low_vals, mean_a_high_vals = [], []
+            v_batches = 0
+            if verbose:
+                print(f"[CDRM][epoch {epoch:03d}] start validation", flush=True)
+
+            with torch.no_grad():
+                for v_step, batch in enumerate(val_loader, start=1):
+                    if not (isinstance(batch, (list, tuple)) and len(batch) == 3):
+                        raise ValueError("Expected (mri, pet, meta) batch")
+                    mri, pet, meta = batch
+                    mri = mri.to(device, non_blocking=True)
+                    pet = pet.to(device, non_blocking=True)
+                    Bv = mri.size(0) if mri.dim() == 5 else 1
+                    mri5 = mri if mri.dim() == 5 else mri.unsqueeze(0)
+                    pet5 = pet if pet.dim() == 5 else pet.unsqueeze(0)
+                    metas = _meta_as_list(meta, Bv)
+                    brain5, cortex5 = _extract_masks(metas, device)
+                    flair5, clinical, _ = _extract_new_variant_inputs(metas, device)
+                    pet_base5 = _extract_pet_base(metas, device)
+                    c_tgt, a_tgt = _coeff_targets_for_metas(metas, device)
+                    c_scale, a_scale = _coeff_scales(CDRM_COEFF_CSV, device)
+                    if brain5 is None or cortex5 is None or flair5 is None or clinical is None or pet_base5 is None:
+                        raise RuntimeError("Residual manifold validation requires cached PET_base and full meta")
+
+                    brain_f = brain5.float()
+                    with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+                        pet_hat, aux = G(
+                            mri5,
+                            flair=flair5,
+                            pet_base=pet_base5,
+                            clinical=clinical,
+                            brain_mask=brain5,
+                            cortex_mask=cortex5,
+                            return_aux=True,
+                        )
+                    pet_hat_f = pet_hat.float()
+                    val_recon_sum += _masked_mean_l1(pet_hat_f, pet5.float(), brain_f).item()
+                    val_base_recon_sum += _masked_mean_l1(pet_base5.float(), pet5.float(), brain_f).item()
+                    val_roi_sum += _masked_l1_high_uptake(pet_hat_f, pet5.float(), cortex5.float()).item()
+                    val_base_roi_sum += _masked_l1_high_uptake(pet_base5.float(), pet5.float(), cortex5.float()).item()
+                    val_coef_sum += (
+                        F.smooth_l1_loss(aux["c_hat"].float() / c_scale, c_tgt.float() / c_scale)
+                        + F.smooth_l1_loss(aux["a_hat"].float() / a_scale, a_tgt.float() / a_scale)
+                    ).item()
+                    den = brain_f.sum().clamp_min(1.0)
+                    res_cal_sum += float((aux["res_cal"].float().abs() * brain_f).sum().item() / den.item())
+                    res_dis_sum += float((aux["res_dis"].float().abs() * brain_f).sum().item() / den.item())
+                    stages = _stage_list(metas)
+                    a_mean = aux["a_hat"].float().mean(dim=1).detach().cpu().numpy()
+                    for st, av in zip(stages, a_mean):
+                        if st in (0, 1):
+                            mean_a_low_vals.append(float(av))
+                        if st >= 3:
+                            mean_a_high_vals.append(float(av))
+                    v_batches += 1
+
+                    if verbose and (v_step == 1 or v_step % 10 == 0):
+                        print(
+                            f"[CDRM][epoch {epoch:03d}] val step {v_step} "
+                            f"elapsed={time.time() - val_t0:.1f}s",
+                            flush=True,
+                        )
+
+            vb = max(1, v_batches)
+            val_recon_epoch = val_recon_sum / vb
+            val_roi_epoch = val_roi_sum / vb
+            val_coef_epoch = val_coef_sum / vb
+            val_base_recon_epoch = val_base_recon_sum / vb
+            val_base_roi_epoch = val_base_roi_sum / vb
+            val_improve_recon_epoch = val_base_recon_epoch - val_recon_epoch
+            val_improve_roi_epoch = val_base_roi_epoch - val_roi_epoch
+            val_score_epoch = val_recon_epoch + float(VAL_ROI_WEIGHT) * val_roi_epoch
+            mean_abs_res_cal_epoch = res_cal_sum / vb
+            mean_abs_res_dis_epoch = res_dis_sum / vb
+            mean_a_low_epoch = float(np.mean(mean_a_low_vals)) if mean_a_low_vals else float("nan")
+            mean_a_high_epoch = float(np.mean(mean_a_high_vals)) if mean_a_high_vals else float("nan")
+            val_sec_epoch = time.time() - val_t0
+
+            hist["val_recon"].append(val_recon_epoch)
+            hist["val_roi"].append(val_roi_epoch)
+            hist["val_score"].append(val_score_epoch)
+            hist["val_coef"].append(val_coef_epoch)
+            hist["val_base_recon"].append(val_base_recon_epoch)
+            hist["val_base_roi"].append(val_base_roi_epoch)
+            hist["val_improve_recon"].append(val_improve_recon_epoch)
+            hist["val_improve_roi"].append(val_improve_roi_epoch)
+            hist["mean_abs_res_cal"].append(mean_abs_res_cal_epoch)
+            hist["mean_abs_res_dis"].append(mean_abs_res_dis_epoch)
+            hist["mean_a_low_stage"].append(mean_a_low_epoch)
+            hist["mean_a_high_stage"].append(mean_a_high_epoch)
+
+            scheduler.step(val_score_epoch)
+            if val_score_epoch < best_val:
+                best_val = val_score_epoch
+                patience_counter = 0
+                best_G_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
+                torch.save(best_G_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
+            else:
+                patience_counter += 1
+
+            if verbose:
+                print(
+                    f"[CDRM][epoch {epoch:03d}/{epochs}] "
+                    f"train={avg_total:.4f} pet={avg_pet:.4f} brain={avg_brain:.4f} "
+                    f"roi={avg_roi:.4f} coef={avg_coef:.4f} | "
+                    f"val_recon={val_recon_epoch:.4f} val_roi={val_roi_epoch:.4f} "
+                    f"val_coef={val_coef_epoch:.4f} val_score={val_score_epoch:.4f} "
+                    f"base_recon={val_base_recon_epoch:.4f} base_roi={val_base_roi_epoch:.4f} "
+                    f"improve_recon={val_improve_recon_epoch:.4f} improve_roi={val_improve_roi_epoch:.4f} "
+                    f"|res_cal|={mean_abs_res_cal_epoch:.5f} |res_dis|={mean_abs_res_dis_epoch:.5f} "
+                    f"a_low={mean_a_low_epoch:.5f} a_high={mean_a_high_epoch:.5f} "
+                    f"best={best_val:.4f} patience={patience_counter}/{EARLY_STOP_PATIENCE} "
+                    f"epoch_sec={time.time() - t0:.1f}",
+                    flush=True,
+                )
+
+            if patience_counter >= EARLY_STOP_PATIENCE:
+                print(f"[CDRM] Early stopping at epoch {epoch} (patience={EARLY_STOP_PATIENCE})", flush=True)
+                break
+        elif verbose:
+            print(
+                f"[CDRM][epoch {epoch:03d}/{epochs}] train={avg_total:.4f} pet={avg_pet:.4f} "
+                f"brain={avg_brain:.4f} roi={avg_roi:.4f} coef={avg_coef:.4f} "
+                f"epoch_sec={time.time() - t0:.1f}",
+                flush=True,
+            )
+
+        if log_to_wandb and wandb.run is not None:
+            log_dict = {
+                "epoch": epoch,
+                "train/G_loss": avg_total,
+                "train/pet_loss": avg_pet,
+                "train/brain_l1": avg_brain,
+                "train/roi_loss": avg_roi,
+                "train/coef_loss": avg_coef,
+                "optim/lr_cdrm": opt_G.param_groups[0]["lr"],
+                "time/train_sec": train_sec,
+                "time/sec_per_train_batch": train_sec / nb,
+                "time/epoch_sec": time.time() - t0,
+            }
+            if val_recon_epoch is not None:
+                log_dict.update({
+                    "val/recon_loss": val_recon_epoch,
+                    "val/roi_loss": val_roi_epoch,
+                    "val/coef_loss": val_coef_epoch,
+                    "val/score": val_score_epoch,
+                    "val/best_score": best_val,
+                    "val/base_recon": val_base_recon_epoch,
+                    "val/base_roi": val_base_roi_epoch,
+                    "val/improve_recon": val_improve_recon_epoch,
+                    "val/improve_roi": val_improve_roi_epoch,
+                    "val/mean_abs_res_cal": mean_abs_res_cal_epoch,
+                    "val/mean_abs_res_dis": mean_abs_res_dis_epoch,
+                    "val/mean_a_low_stage": mean_a_low_epoch,
+                    "val/mean_a_high_stage": mean_a_high_epoch,
+                    "time/val_sec": val_sec_epoch,
+                })
+            wandb.log(log_dict, step=epoch)
+
+    if best_G_state is not None:
+        G.load_state_dict(best_G_state)
+    else:
+        best_G_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
+        torch.save(best_G_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
+
+    return {"history": hist, "best_G": best_G_state}
+
+
 # =========================================================================
 # Evaluation (shared, but variant-aware)
 # =========================================================================
@@ -2204,6 +2612,248 @@ def evaluate_and_save_diffusion(
         "base_vs_fake_recon_improvement": float(np.mean(base_improve_list)) if base_improve_list else float("nan"),
         "per_subject_diffusion_csv": diff_csv,
     }
+    summary = {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE": m_mse, "MSE_std": sd_mse, "MSE_lo95": lo_mse, "MSE_hi95": hi_mse,
+        "MMD": m_mmd, "MMD_std": sd_mmd, "MMD_lo95": lo_mmd, "MMD_hi95": hi_mmd,
+        "per_subject_csv": per_subj_csv,
+        **extra,
+    }
+    with open(summary_json, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    return {
+        "N": n_ssim,
+        "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,
+        "PSNR": m_psnr, "PSNR_std": sd_psnr, "PSNR_lo95": lo_psnr, "PSNR_hi95": hi_psnr,
+        "MSE": m_mse, "MSE_std": sd_mse, "MSE_lo95": lo_mse, "MSE_hi95": hi_mse,
+        "MMD": m_mmd, "MMD_std": sd_mmd, "MMD_lo95": lo_mmd, "MMD_hi95": hi_mmd,
+        "per_subject_csv": per_subj_csv,
+        "summary_json": summary_json,
+        **extra,
+    }
+
+
+@torch.no_grad()
+def evaluate_and_save_residual_manifold(
+    G: nn.Module,
+    test_loader: Iterable,
+    device: torch.device,
+    out_dir: str,
+    data_range: float = DATA_RANGE,
+    mmd_voxels: int = 2048,
+    resample_back_to_t1: bool = RESAMPLE_BACK_TO_T1,
+):
+    assert getattr(test_loader, "batch_size", 1) == 1, (
+        f"evaluate_and_save_residual_manifold requires batch_size=1, got {getattr(test_loader, 'batch_size', '?')}"
+    )
+    import json
+    try:
+        from scipy.stats import t as _t_dist
+        def _tcrit(df): return float(_t_dist.ppf(0.975, df)) if df > 0 else float('nan')
+    except Exception:
+        def _tcrit(df): return 1.96 if df > 0 else float('nan')
+
+    os.makedirs(out_dir, exist_ok=True)
+    G.to(device)
+    G.eval()
+    use_amp = AMP_ENABLE and device.type == "cuda"
+    amp_dtype = torch.float16
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+
+    sids, ssim_list, psnr_list, mse_list, mmd_list = [], [], [], [], []
+    base_improve_list, roi_improve_list = [], []
+    mean_abs_res_cal_list, mean_abs_res_dis_list = [], []
+    coeff_rows = []
+    run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
+
+    for i, batch in enumerate(test_loader):
+        subj_t0 = time.time()
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            mri, pet, meta = batch
+        else:
+            raise ValueError("Residual manifold evaluation requires (mri, pet, meta) batches")
+        meta = _meta_unbatch(meta)
+        sid = _safe_name(meta.get("sid", f"sample_{i:04d}"))
+        sids.append(sid)
+        subdir = os.path.join(out_dir, sid)
+        os.makedirs(subdir, exist_ok=True)
+
+        print(
+            f"[CDRM][test] subject {i + 1}/{len(test_loader) if hasattr(test_loader, '__len__') else '?'} {sid}",
+            flush=True,
+        )
+
+        mri_t = mri.to(device, non_blocking=True)
+        pet_t = pet.to(device, non_blocking=True)
+        mri5 = mri_t if mri_t.dim() == 5 else mri_t.unsqueeze(0)
+        pet5 = pet_t if pet_t.dim() == 5 else pet_t.unsqueeze(0)
+
+        metas_list = _meta_as_list(meta, 1)
+        flair5, clinical, _ = _extract_new_variant_inputs(metas_list, device)
+        brain5, cortex5 = _extract_masks(metas_list, device)
+        pet_base5 = _extract_pet_base(metas_list, device)
+        if brain5 is None or cortex5 is None or flair5 is None or clinical is None or pet_base5 is None:
+            raise RuntimeError(f"{sid}: residual manifold evaluation requires cached PET_base and full meta")
+
+        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
+            fake_t, aux = G(
+                mri5,
+                flair=flair5,
+                pet_base=pet_base5,
+                clinical=clinical,
+                brain_mask=brain5,
+                cortex_mask=cortex5,
+                return_aux=True,
+            )
+
+        brain_f = brain5.float()
+        cortex_f = cortex5.float()
+        fake_t = fake_t.float()
+        pet5_f = pet5.float()
+        pet_base5_f = pet_base5.float()
+        res_cal_t = aux["res_cal"].float()
+        res_dis_t = aux["res_dis"].float()
+        total_res_t = aux["res_total"].float()
+
+        ssim_val = ssim3d_masked(fake_t, pet5_f, brain_f, data_range=data_range).item()
+        psnr_val = masked_psnr(fake_t, pet5_f, brain_f, data_range=data_range)
+        mse_val = masked_mse(fake_t, pet5_f, brain_f).item()
+        mmd_val = mmd_gaussian(pet5_f, fake_t, num_voxels=mmd_voxels, mask=brain_f)
+        ssim_list.append(ssim_val)
+        psnr_list.append(psnr_val)
+        mse_list.append(mse_val)
+        mmd_list.append(mmd_val)
+
+        fake_recon = _masked_mean_l1(fake_t, pet5_f, brain_f).item()
+        base_recon = _masked_mean_l1(pet_base5_f, pet5_f, brain_f).item()
+        fake_roi = _masked_l1_high_uptake(fake_t, pet5_f, cortex_f).item()
+        base_roi = _masked_l1_high_uptake(pet_base5_f, pet5_f, cortex_f).item()
+        base_improve_list.append(base_recon - fake_recon)
+        roi_improve_list.append(base_roi - fake_roi)
+        brain_den = brain_f.sum().clamp_min(1.0)
+        mean_abs_res_cal_list.append(float((res_cal_t.abs() * brain_f).sum().item() / brain_den.item()))
+        mean_abs_res_dis_list.append(float((res_dis_t.abs() * brain_f).sum().item() / brain_den.item()))
+
+        coeff_row = {"sid": sid, "stage_ord": int(meta.get("stage_ord", -1))}
+        c_np = aux["c_hat"].squeeze(0).detach().cpu().numpy()
+        a_np = aux["a_hat"].squeeze(0).detach().cpu().numpy()
+        coeff_row.update({f"c{k}": float(c_np[k]) for k in range(c_np.shape[0])})
+        coeff_row.update({f"a{k}": float(a_np[k]) for k in range(a_np.shape[0])})
+        coeff_rows.append(coeff_row)
+
+        mri_np = mri5.squeeze(0).squeeze(0).cpu().numpy()
+        pet_np = pet5_f.squeeze(0).squeeze(0).cpu().numpy()
+        fake_np = fake_t.squeeze(0).squeeze(0).cpu().numpy()
+        base_np = pet_base5_f.squeeze(0).squeeze(0).cpu().numpy()
+        res_cal_np = res_cal_t.squeeze(0).squeeze(0).cpu().numpy()
+        res_dis_np = res_dis_t.squeeze(0).squeeze(0).cpu().numpy()
+        total_res_np = total_res_t.squeeze(0).squeeze(0).cpu().numpy()
+        err_np = np.abs(fake_np - pet_np)
+
+        cur_shape = tuple(mri_np.shape)
+        orig_shape = tuple(meta.get("orig_shape", cur_shape))
+        if resample_back_to_t1 and tuple(orig_shape) != tuple(cur_shape):
+            zf = (float(orig_shape[0]) / float(cur_shape[0]),
+                  float(orig_shape[1]) / float(cur_shape[1]),
+                  float(orig_shape[2]) / float(cur_shape[2]))
+            mri_np = nd_zoom(mri_np, zf, order=1)
+            pet_np = nd_zoom(pet_np, zf, order=1)
+            fake_np = nd_zoom(fake_np, zf, order=1)
+            base_np = nd_zoom(base_np, zf, order=1)
+            res_cal_np = nd_zoom(res_cal_np, zf, order=1)
+            res_dis_np = nd_zoom(res_dis_np, zf, order=1)
+            total_res_np = nd_zoom(total_res_np, zf, order=1)
+            err_np = nd_zoom(err_np, zf, order=1)
+            affine_to_use = meta.get("t1_affine", np.eye(4))
+        else:
+            affine_to_use = meta.get("model_affine", None)
+            if affine_to_use is None:
+                resized_to = meta.get("resized_to", None)
+                if resized_to is None or tuple(orig_shape) == tuple(cur_shape):
+                    affine_to_use = meta.get("t1_affine", np.eye(4))
+                else:
+                    affine_to_use = _resized_affine_for_scipy_zoom(
+                        meta.get("t1_affine", np.eye(4)),
+                        orig_shape=orig_shape,
+                        new_shape=cur_shape,
+                    )
+
+        _save_nifti(mri_np, affine_to_use, os.path.join(subdir, "MRI.nii.gz"))
+        _save_nifti(pet_np, affine_to_use, os.path.join(subdir, "PET_gt.nii.gz"))
+        _save_nifti(fake_np, affine_to_use, os.path.join(subdir, "PET_fake.nii.gz"))
+        _save_nifti(base_np, affine_to_use, os.path.join(subdir, "PET_base.nii.gz"))
+        _save_nifti(res_cal_np, affine_to_use, os.path.join(subdir, "PET_res_cal.nii.gz"))
+        _save_nifti(res_dis_np, affine_to_use, os.path.join(subdir, "PET_res_dis.nii.gz"))
+        _save_nifti(total_res_np, affine_to_use, os.path.join(subdir, "PET_total_residual.nii.gz"))
+        _save_nifti(err_np, affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
+
+        print(
+            f"[CDRM][test] {sid} done SSIM={ssim_val:.4f} PSNR={psnr_val:.2f} "
+            f"MSE={mse_val:.5f} MMD={mmd_val:.5f} "
+            f"base_improve={base_improve_list[-1]:.5f} roi_improve={roi_improve_list[-1]:.5f} "
+            f"|cal|={mean_abs_res_cal_list[-1]:.5f} |dis|={mean_abs_res_dis_list[-1]:.5f} "
+            f"sec={time.time() - subj_t0:.1f}",
+            flush=True,
+        )
+
+    def _mean_std_ci(vals):
+        a = np.asarray(vals, dtype=np.float64)
+        n = a.size
+        mean = float(a.mean()) if n > 0 else float("nan")
+        std = float(a.std(ddof=1)) if n > 1 else float("nan")
+        se = (std / np.sqrt(n)) if n > 1 else float("nan")
+        tcrit = _tcrit(n - 1)
+        lo = mean - tcrit * se if n > 1 else float("nan")
+        hi = mean + tcrit * se if n > 1 else float("nan")
+        return mean, std, n, lo, hi
+
+    m_ssim, sd_ssim, n_ssim, lo_ssim, hi_ssim = _mean_std_ci(ssim_list)
+    m_psnr, sd_psnr, n_psnr, lo_psnr, hi_psnr = _mean_std_ci(psnr_list)
+    m_mse, sd_mse, n_mse, lo_mse, hi_mse = _mean_std_ci(mse_list)
+    m_mmd, sd_mmd, n_mmd, lo_mmd, hi_mmd = _mean_std_ci(mmd_list)
+
+    per_subj_csv = os.path.join(run_dir, "per_subject_metrics.csv")
+    with open(per_subj_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["sid", "SSIM", "PSNR", "MSE", "MMD"])
+        for row in zip(sids, ssim_list, psnr_list, mse_list, mmd_list):
+            w.writerow(row)
+
+    coeff_csv = os.path.join(run_dir, "coefficients.csv")
+    coeff_cols = []
+    for row in coeff_rows:
+        for key in row:
+            if key not in coeff_cols:
+                coeff_cols.append(key)
+    with open(coeff_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=coeff_cols)
+        w.writeheader()
+        for row in coeff_rows:
+            w.writerow(row)
+
+    manifold_csv = os.path.join(run_dir, "per_subject_manifold.csv")
+    with open(manifold_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "sid", "base_vs_fake_recon_improvement", "base_vs_fake_roi_improvement",
+            "mean_abs_res_cal", "mean_abs_res_dis",
+        ])
+        for row in zip(sids, base_improve_list, roi_improve_list, mean_abs_res_cal_list, mean_abs_res_dis_list):
+            w.writerow(row)
+
+    extra = {
+        "base_vs_fake_recon_improvement": float(np.mean(base_improve_list)) if base_improve_list else float("nan"),
+        "base_vs_fake_roi_improvement": float(np.mean(roi_improve_list)) if roi_improve_list else float("nan"),
+        "mean_abs_res_cal": float(np.mean(mean_abs_res_cal_list)) if mean_abs_res_cal_list else float("nan"),
+        "mean_abs_res_dis": float(np.mean(mean_abs_res_dis_list)) if mean_abs_res_dis_list else float("nan"),
+        "coefficients_csv": coeff_csv,
+        "per_subject_manifold_csv": manifold_csv,
+    }
+    summary_json = os.path.join(run_dir, "test_metrics_summary.json")
     summary = {
         "N": n_ssim,
         "SSIM": m_ssim, "SSIM_std": sd_ssim, "SSIM_lo95": lo_ssim, "SSIM_hi95": hi_ssim,

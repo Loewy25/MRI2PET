@@ -1,0 +1,71 @@
+#!/bin/bash
+#SBATCH --job-name=cdrm_mri2pet
+#SBATCH -N 1
+#SBATCH --mem=32G
+#SBATCH -t 24:00:00
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier2_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --exclude=gpu02,gpua405,gpu01
+#SBATCH --output=slurm-%A_cdrm.out
+#SBATCH --error=slurm-%A_cdrm.err
+
+set -euo pipefail
+
+module load cuda/12.2
+module load cudnn/9.6.0.74-cuda12
+
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+export PYTHONUNBUFFERED=1
+export WANDB__SERVICE_WAIT=300
+# Run `wandb login` once on the cluster, or export WANDB_API_KEY before sbatch.
+
+export RUN_NAME="2025_cdrm_fold1_os50"
+export FOLD_INDEX=0
+export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
+
+export MODEL_VARIANT="residual_manifold"
+
+# Existing baseline cache from the diffusion workflow.
+export USE_BASELINE_CACHE=1
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
+
+# Pretrained baseline Generator for the T1 feature extractor.
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os65/checkpoints/best_G.pth"
+
+# Built by MY_BATCH_CDRM_BASIS.
+export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold1_res128"
+export CDRM_COEFF_CSV="${CDRM_BASIS_DIR}/coeff_targets.csv"
+
+export CDRM_K_CAL=6
+export CDRM_K_DIS=6
+export CDRM_LR=1e-4
+export CDRM_WEIGHT_DECAY=1e-4
+export CDRM_LAMBDA_ROI=1.0
+export CDRM_LAMBDA_COEF=0.5
+export CDRM_T1_FREEZE=1
+export CDRM_STAT_DIM=16
+export CDRM_DISEASE_TARGET_MODE="abs_plus_contrast"
+export CDRM_CONTRAST_LAMBDA=1.0
+export CDRM_CONTRAST_REF="brain_minus_cortex"
+
+export EPOCHS=150
+export BATCH_SIZE=1
+export EVAL_BATCH_SIZE=1
+export AMP_ENABLE=1
+export USE_CHECKPOINT=1
+
+# Fixed residual basis maps make spatial/intensity augmentation invalid for this first version.
+export AUG_ENABLE=0
+
+export OVERSAMPLE_ENABLE=1
+export OVERSAMPLE_LABEL3_TARGET=0.5
+
+export ROI_HI_Q=0.85
+export ROI_HI_LAMBDA=2.5
+export ROI_HI_MIN_VOXELS=32
+export VAL_ROI_WEIGHT=0.02
+
+python -u main.py

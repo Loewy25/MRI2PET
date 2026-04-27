@@ -2,6 +2,7 @@
 import math
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ from .config import (
     USE_FLAIR,
     USE_SPATIAL_PRIOR,
 )
+from .residual_manifold import load_basis_arrays
 from .utils import _pad_or_crop_to
 
 
@@ -669,6 +671,206 @@ def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
     return emb
+
+
+# =========================================================================
+# Residual manifold coefficient predictor
+# =========================================================================
+class CompactEncoder3D(nn.Module):
+    def __init__(self, in_ch: int = 1, z_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv3d(in_ch, 16, kernel_size=3, stride=2, padding=1, bias=True),
+            _group_norm(16),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1, bias=True),
+            _group_norm(32),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1, bias=True),
+            _group_norm(64),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(64, 128, kernel_size=3, stride=2, padding=1, bias=True),
+            _group_norm(128),
+            nn.SiLU(inplace=True),
+            nn.AdaptiveAvgPool3d(1),
+            nn.Flatten(),
+            nn.Linear(128, z_dim),
+            nn.LayerNorm(z_dim),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class ResidualManifoldNet(nn.Module):
+    def __init__(
+        self,
+        basis_dir: str,
+        clinical_dim: int = 10,
+        stat_dim: int = 16,
+        t1_freeze: bool = True,
+        use_checkpoint: bool = USE_CHECKPOINT,
+        z_dim: int = 128,
+    ):
+        super().__init__()
+        B_cal, B_dis = load_basis_arrays(basis_dir)
+        if B_cal.shape[1:] != B_dis.shape[1:]:
+            raise ValueError(f"B_cal shape {B_cal.shape} and B_dis shape {B_dis.shape} are incompatible")
+        if int(stat_dim) != 16:
+            raise ValueError("ResidualManifoldNet currently uses exactly 16 PET_base/FLAIR statistics")
+
+        self.k_cal = int(B_cal.shape[0])
+        self.k_dis = int(B_dis.shape[0])
+        self.t1_freeze = bool(t1_freeze)
+        self.stat_dim = 16
+
+        self.register_buffer("B_cal", torch.from_numpy(B_cal[:, None].astype(np.float32)))
+        self.register_buffer("B_dis", torch.from_numpy(B_dis[:, None].astype(np.float32)))
+
+        self.t1_backbone = Generator(in_ch=1, out_ch=1, use_checkpoint=use_checkpoint)
+        self.t1_proj = nn.Sequential(
+            nn.Linear(512, z_dim),
+            nn.LayerNorm(z_dim),
+            nn.SiLU(inplace=True),
+        )
+        if self.t1_freeze:
+            self.t1_backbone.use_checkpoint = False
+            for p in self.t1_backbone.parameters():
+                p.requires_grad = False
+
+        self.flair_encoder = CompactEncoder3D(in_ch=1, z_dim=z_dim)
+        self.petbase_encoder = CompactEncoder3D(in_ch=1, z_dim=z_dim)
+        self.clinical_encoder = nn.Sequential(
+            nn.LayerNorm(clinical_dim),
+            nn.Linear(clinical_dim, 64),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.10),
+            nn.Linear(64, z_dim),
+            nn.LayerNorm(z_dim),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.10),
+        )
+        self.stat_encoder = nn.Sequential(
+            nn.LayerNorm(self.stat_dim),
+            nn.Linear(self.stat_dim, 64),
+            nn.SiLU(inplace=True),
+            nn.Linear(64, z_dim),
+            nn.LayerNorm(z_dim),
+            nn.SiLU(inplace=True),
+        )
+        self.fusion = nn.Sequential(
+            nn.Linear(z_dim * 5, 512),
+            nn.LayerNorm(512),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.15),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.15),
+            nn.Linear(256, z_dim),
+            nn.LayerNorm(z_dim),
+            nn.SiLU(inplace=True),
+        )
+        self.c_head = nn.Linear(z_dim, self.k_cal)
+        self.a_head = nn.Linear(z_dim, self.k_dis)
+
+    @staticmethod
+    def _masked_mean_std(x: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        vals = x[mask]
+        if vals.numel() == 0:
+            z = torch.zeros((), device=x.device, dtype=x.dtype)
+            return z, z
+        mean = vals.mean()
+        std = vals.std(unbiased=False) if vals.numel() > 1 else torch.zeros((), device=x.device, dtype=x.dtype)
+        return mean, std
+
+    @staticmethod
+    def _masked_top_mean(x: torch.Tensor, mask: torch.Tensor, q: float = 0.85) -> torch.Tensor:
+        vals = x[mask]
+        if vals.numel() == 0:
+            return torch.zeros((), device=x.device, dtype=x.dtype)
+        if vals.numel() == 1:
+            return vals.mean()
+        thr = torch.quantile(vals.float(), float(q)).to(dtype=x.dtype)
+        top = vals[vals >= thr]
+        return top.mean() if top.numel() > 0 else vals.mean()
+
+    def _stats_for_volume(self, x: torch.Tensor, brain_mask: torch.Tensor, cortex_mask: torch.Tensor) -> torch.Tensor:
+        rows = []
+        for b in range(x.size(0)):
+            xb = x[b, 0]
+            brain = brain_mask[b, 0] > 0.5
+            cortex = (cortex_mask[b, 0] > 0.5) & brain
+            nonctx = brain & (~cortex)
+            brain_mean, brain_std = self._masked_mean_std(xb, brain)
+            ctx_mean, ctx_std = self._masked_mean_std(xb, cortex)
+            non_mean, non_std = self._masked_mean_std(xb, nonctx)
+            ctx_minus_non = ctx_mean - non_mean
+            top_ctx_mean = self._masked_top_mean(xb, cortex)
+            rows.append(torch.stack([
+                brain_mean, brain_std, ctx_mean, ctx_std,
+                non_mean, non_std, ctx_minus_non, top_ctx_mean,
+            ]))
+        return torch.stack(rows, dim=0)
+
+    def _stat_features(self, pet_base: torch.Tensor, flair: torch.Tensor,
+                       brain_mask: torch.Tensor, cortex_mask: torch.Tensor) -> torch.Tensor:
+        return torch.cat([
+            self._stats_for_volume(pet_base.float(), brain_mask.float(), cortex_mask.float()),
+            self._stats_for_volume(flair.float(), brain_mask.float(), cortex_mask.float()),
+        ], dim=1)
+
+    def _t1_latent(self, t1: torch.Tensor) -> torch.Tensor:
+        if self.t1_freeze:
+            with torch.no_grad():
+                _, feats = self.t1_backbone(t1, return_features=True)
+        else:
+            _, feats = self.t1_backbone(t1, return_features=True)
+        z = F.adaptive_avg_pool3d(feats["b"].float(), 1).flatten(1)
+        return self.t1_proj(z)
+
+    def forward(
+        self,
+        t1: torch.Tensor,
+        flair: torch.Tensor,
+        pet_base: torch.Tensor,
+        clinical: torch.Tensor,
+        brain_mask: torch.Tensor,
+        cortex_mask: torch.Tensor,
+        return_aux: bool = False,
+    ):
+        z_t1 = self._t1_latent(t1)
+        z_flair = self.flair_encoder(flair)
+        z_petbase = self.petbase_encoder(pet_base)
+        z_clinical = self.clinical_encoder(clinical.float())
+        stats = self._stat_features(pet_base, flair, brain_mask, cortex_mask).to(
+            device=clinical.device,
+            dtype=clinical.dtype,
+        )
+        z_stats = self.stat_encoder(stats.float())
+        z = self.fusion(torch.cat([z_t1, z_flair, z_petbase, z_clinical, z_stats], dim=1))
+
+        c_hat = self.c_head(z)
+        a_hat = F.softplus(self.a_head(z))
+        res_cal = torch.einsum("bk,kcdhw->bcdhw", c_hat.float(), self.B_cal.float()).to(dtype=pet_base.dtype)
+        res_dis = torch.einsum("bk,kcdhw->bcdhw", a_hat.float(), self.B_dis.float()).to(dtype=pet_base.dtype)
+        brain = brain_mask.to(device=pet_base.device, dtype=pet_base.dtype)
+        pet_fake = (pet_base + res_cal + res_dis) * brain
+
+        if not return_aux:
+            return pet_fake
+        aux: Dict[str, Any] = {
+            "pet_base": pet_base,
+            "res_cal": res_cal * brain,
+            "res_dis": res_dis * brain,
+            "res_total": (res_cal + res_dis) * brain,
+            "c_hat": c_hat,
+            "a_hat": a_hat,
+            "stats": stats,
+            "z_fuse": z,
+        }
+        return pet_fake, aux
 
 
 class FiLMResBlock3D(nn.Module):
