@@ -32,6 +32,7 @@ from mri2pet.config import (
     USE_CHECKPOINT, AMP_ENABLE,
     LR_PLATEAU_PATIENCE, EARLY_STOP_PATIENCE, VAL_ROI_WEIGHT,
     MASK_GLOBAL_RECON,
+    EVAL_ONLY, EVAL_CKPT,
 )
 
 from mri2pet.data import build_loaders
@@ -72,6 +73,8 @@ def init_wandb_run():
         "run_name": RUN_NAME,
         "model_variant": MODEL_VARIANT,
         "epochs": EPOCHS,
+        "eval_only": EVAL_ONLY,
+        "eval_ckpt": EVAL_CKPT,
         "gamma": GAMMA,
         "data_range": DATA_RANGE,
         "batch_size": BATCH_SIZE,
@@ -208,6 +211,20 @@ def load_generator_weights_into_t1_backbone(model, ckpt_path: str):
     model.t1_backbone.load_state_dict(state, strict=True)
 
 
+def load_model_weights(model, ckpt_path: str):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt
+    for key in ("state_dict", "model_state_dict", "G", "generator"):
+        if isinstance(state, dict) and key in state and isinstance(state[key], dict):
+            state = state[key]
+            break
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Unsupported checkpoint format: {ckpt_path}")
+    if all(k.startswith("module.") for k in state.keys()):
+        state = {k[len("module."):]: v for k, v in state.items()}
+    model.load_state_dict(state, strict=True)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("MRI2PET Training Run")
@@ -222,6 +239,7 @@ if __name__ == "__main__":
     print(f"Resize to:      {RESIZE_TO}")
     print(f"Batch size:     {BATCH_SIZE}  (eval: {EVAL_BATCH_SIZE})")
     print(f"Epochs:         {EPOCHS}")
+    print(f"Eval only:      {EVAL_ONLY}  ckpt={EVAL_CKPT or '(auto from run dir)'}")
     print(f"LR_G:           {LR_G}  LR_D: {LR_D}")
     print(f"AMP:            {AMP_ENABLE}  Checkpoint: {USE_CHECKPOINT}")
     if MODEL_VARIANT == "residual_diffusion":
@@ -448,48 +466,63 @@ if __name__ == "__main__":
         if D is not None:
             wandb.watch(D, log="gradients", log_freq=50)
 
-    # Train
-    if is_residual_diffusion:
-        out = train_residual_diffusion(
-            G, train_loader, val_loader,
-            device=device, epochs=EPOCHS,
-            data_range=DATA_RANGE,
-            verbose=True,
-            log_to_wandb=(wandb_run is not None),
-        )
-    elif is_residual_manifold:
-        out = train_residual_manifold(
-            G, train_loader, val_loader,
-            device=device, epochs=EPOCHS,
-            data_range=DATA_RANGE,
-            verbose=True,
-            log_to_wandb=(wandb_run is not None),
-        )
-    elif is_prompt_residual:
-        out = train_residual_spatial_prior(
-            G, D, train_loader, val_loader,
-            device=device, epochs=EPOCHS, gamma=GAMMA,
-            data_range=DATA_RANGE,
-            verbose=True,
-            log_to_wandb=(wandb_run is not None),
-        )
+    # Train, unless this is a checkpoint-only evaluation rerun.
+    if EVAL_ONLY:
+        if EVAL_CKPT:
+            eval_ckpt = EVAL_CKPT
+        elif is_residual_diffusion:
+            eval_ckpt = os.path.join(CKPT_DIR, "best_diffusion.pth")
+        elif is_residual_manifold:
+            eval_ckpt = os.path.join(CKPT_DIR, "best_residual_manifold.pth")
+        else:
+            eval_ckpt = os.path.join(CKPT_DIR, "best_G.pth")
+        if not os.path.isfile(eval_ckpt):
+            raise FileNotFoundError(f"EVAL_ONLY checkpoint not found: {eval_ckpt}")
+        print(f"Evaluation-only mode: loading checkpoint {eval_ckpt}")
+        load_model_weights(G, eval_ckpt)
+        print("Evaluation-only checkpoint loaded successfully.")
     else:
-        out = train_paggan(
-            G, D, train_loader, val_loader,
-            device=device, epochs=EPOCHS, gamma=GAMMA,
-            data_range=DATA_RANGE,
-            verbose=True,
-            log_to_wandb=(wandb_run is not None),
-        )
+        if is_residual_diffusion:
+            out = train_residual_diffusion(
+                G, train_loader, val_loader,
+                device=device, epochs=EPOCHS,
+                data_range=DATA_RANGE,
+                verbose=True,
+                log_to_wandb=(wandb_run is not None),
+            )
+        elif is_residual_manifold:
+            out = train_residual_manifold(
+                G, train_loader, val_loader,
+                device=device, epochs=EPOCHS,
+                data_range=DATA_RANGE,
+                verbose=True,
+                log_to_wandb=(wandb_run is not None),
+            )
+        elif is_prompt_residual:
+            out = train_residual_spatial_prior(
+                G, D, train_loader, val_loader,
+                device=device, epochs=EPOCHS, gamma=GAMMA,
+                data_range=DATA_RANGE,
+                verbose=True,
+                log_to_wandb=(wandb_run is not None),
+            )
+        else:
+            out = train_paggan(
+                G, D, train_loader, val_loader,
+                device=device, epochs=EPOCHS, gamma=GAMMA,
+                data_range=DATA_RANGE,
+                verbose=True,
+                log_to_wandb=(wandb_run is not None),
+            )
 
-    # Save curves & CSV
-    curves_path = os.path.join(OUT_RUN, "loss_curves.png")
-    save_loss_curves(out["history"], curves_path)
-    print(f"Saved loss curves to: {curves_path}")
+        # Save curves & CSV
+        curves_path = os.path.join(OUT_RUN, "loss_curves.png")
+        save_loss_curves(out["history"], curves_path)
+        print(f"Saved loss curves to: {curves_path}")
 
-    csv_path = os.path.join(OUT_RUN, "training_log.csv")
-    save_history_csv(out["history"], csv_path)
-    print(f"Saved training log CSV to: {csv_path}")
+        csv_path = os.path.join(OUT_RUN, "training_log.csv")
+        save_history_csv(out["history"], csv_path)
+        print(f"Saved training log CSV to: {csv_path}")
 
     # Evaluate + Save — clear VOL_DIR first to avoid stale leftovers from prior runs
     import shutil

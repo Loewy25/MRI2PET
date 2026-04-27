@@ -30,6 +30,9 @@ def _env_int(name: str, default: int) -> int:
     v = os.environ.get(name, None)
     return int(v) if v is not None else int(default)
 
+EVAL_ONLY = _env_bool("EVAL_ONLY", False)
+EVAL_CKPT = os.environ.get("EVAL_CKPT", "")
+
 RESIZE_TO: Optional[Tuple[int,int,int]] = (128, 128, 128)
 RESAMPLE_BACK_TO_T1 = False
 
