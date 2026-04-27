@@ -33,7 +33,7 @@ export USE_BASELINE_CACHE=1
 export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold1_res128"
 
 # Pretrained baseline Generator for the T1 feature extractor.
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os65/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os5/checkpoints/best_G.pth"
 
 # Built by MY_BATCH_CDRM_BASIS.
 export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold1_res128"
