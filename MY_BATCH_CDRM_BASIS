@@ -24,7 +24,7 @@ export PYTHONUNBUFFERED=1
 export FOLD_INDEX=4
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold5_res128"
-export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold5_res128"
+export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold5_res128_kdis10_c2"
 
 mkdir -p "${CDRM_BASIS_DIR}"
 
@@ -34,9 +34,9 @@ python -u tools/build_residual_manifold.py \
   --root-dir "${ROOT_DIR}" \
   --fold-csv "${ROOT_DIR}/CV5_braak_strat/fold$((FOLD_INDEX + 1)).csv" \
   --k-cal 6 \
-  --k-dis 6 \
+  --k-dis 10 \
   --disease-target-mode abs_plus_contrast \
-  --contrast-lambda 1.0 \
+  --contrast-lambda 2.0 \
   --contrast-ref brain_minus_cortex \
   --nmf-iters 200 \
   --fit-iters 3 \

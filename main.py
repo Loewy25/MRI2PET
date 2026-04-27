@@ -20,7 +20,9 @@ from mri2pet.config import (
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
     CDRM_BASIS_DIR, CDRM_COEFF_CSV, CDRM_K_CAL, CDRM_K_DIS,
-    CDRM_LR, CDRM_WEIGHT_DECAY, CDRM_LAMBDA_ROI, CDRM_LAMBDA_COEF,
+    CDRM_LR, CDRM_WEIGHT_DECAY, CDRM_LAMBDA_ROI,
+    CDRM_LAMBDA_C_COEF, CDRM_LAMBDA_A_COEF,
+    CDRM_A_STAGE_WEIGHT_2, CDRM_A_STAGE_WEIGHT_3,
     CDRM_T1_FREEZE, CDRM_STAT_DIM,
     CDRM_DISEASE_TARGET_MODE, CDRM_CONTRAST_LAMBDA, CDRM_CONTRAST_REF,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
@@ -152,7 +154,10 @@ def init_wandb_run():
             "cdrm_lr": CDRM_LR,
             "cdrm_weight_decay": CDRM_WEIGHT_DECAY,
             "cdrm_lambda_roi": CDRM_LAMBDA_ROI,
-            "cdrm_lambda_coef": CDRM_LAMBDA_COEF,
+            "cdrm_lambda_c_coef": CDRM_LAMBDA_C_COEF,
+            "cdrm_lambda_a_coef": CDRM_LAMBDA_A_COEF,
+            "cdrm_a_stage_weight_2": CDRM_A_STAGE_WEIGHT_2,
+            "cdrm_a_stage_weight_3": CDRM_A_STAGE_WEIGHT_3,
             "cdrm_t1_freeze": CDRM_T1_FREEZE,
             "cdrm_stat_dim": CDRM_STAT_DIM,
             "cdrm_disease_target_mode": CDRM_DISEASE_TARGET_MODE,
@@ -260,8 +265,13 @@ if __name__ == "__main__":
         print(f"  basis_dir={CDRM_BASIS_DIR}  coeff_csv={CDRM_COEFF_CSV}")
         print(f"  K_cal={CDRM_K_CAL} K_dis={CDRM_K_DIS} lr={CDRM_LR} wd={CDRM_WEIGHT_DECAY}")
         print(
-            f"  lambdas roi={CDRM_LAMBDA_ROI} coef={CDRM_LAMBDA_COEF} "
+            f"  lambdas roi={CDRM_LAMBDA_ROI} c_coef={CDRM_LAMBDA_C_COEF} "
+            f"a_coef={CDRM_LAMBDA_A_COEF} "
             f"t1_freeze={CDRM_T1_FREEZE} stat_dim={CDRM_STAT_DIM}"
+        )
+        print(
+            f"  disease coefficient stage weights: "
+            f"stage0/1=1.0 stage2={CDRM_A_STAGE_WEIGHT_2} stage3={CDRM_A_STAGE_WEIGHT_3}"
         )
         print(
             f"  basis mode={CDRM_DISEASE_TARGET_MODE} "

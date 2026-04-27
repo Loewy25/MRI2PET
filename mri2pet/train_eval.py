@@ -24,7 +24,8 @@ from .config import (
     DIFF_LAMBDA_X0, DIFF_LAMBDA_ROI, DIFF_LAMBDA_BRAAK,
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
     CDRM_COEFF_CSV, CDRM_LR, CDRM_WEIGHT_DECAY,
-    CDRM_LAMBDA_ROI, CDRM_LAMBDA_COEF,
+    CDRM_LAMBDA_ROI, CDRM_LAMBDA_C_COEF, CDRM_LAMBDA_A_COEF,
+    CDRM_A_STAGE_WEIGHT_2, CDRM_A_STAGE_WEIGHT_3,
 )
 
 from .losses import l1_loss, ssim3d, psnr, mmd_gaussian, ssim3d_masked, masked_mse, masked_psnr
@@ -1797,7 +1798,8 @@ def train_residual_manifold(
     best_G_state: Optional[Dict[str, torch.Tensor]] = None
     patience_counter = 0
     hist: Dict[str, list] = {
-        "train_G": [], "train_pet": [], "train_brain": [], "train_roi": [], "train_coef": [],
+        "train_G": [], "train_pet": [], "train_brain": [], "train_roi": [],
+        "train_coef": [], "train_c_coef": [], "train_a_coef": [],
         "val_recon": [], "val_roi": [], "val_score": [], "val_coef": [],
         "val_base_recon": [], "val_base_roi": [],
         "val_improve_recon": [], "val_improve_roi": [],
@@ -1823,10 +1825,21 @@ def train_residual_manifold(
                 out.append(-1)
         return out
 
+    def _a_stage_weights(metas: List[Dict[str, Any]], device: torch.device) -> torch.Tensor:
+        stages = _stage_list(metas)
+        weights = torch.ones((len(stages),), device=device, dtype=torch.float32)
+        for idx, st in enumerate(stages):
+            if st >= 3:
+                weights[idx] = float(CDRM_A_STAGE_WEIGHT_3)
+            elif st == 2:
+                weights[idx] = float(CDRM_A_STAGE_WEIGHT_2)
+        return weights
+
     for epoch in range(1, epochs + 1):
         t0 = time.time()
         G.train()
-        total_running = pet_running = brain_running = roi_running = coef_running = 0.0
+        total_running = pet_running = brain_running = roi_running = 0.0
+        coef_running = c_coef_running = a_coef_running = 0.0
         n_batches = 0
 
         if verbose:
@@ -1834,7 +1847,9 @@ def train_residual_manifold(
             print(
                 f"[CDRM][epoch {epoch:03d}/{epochs}] start train "
                 f"batches={total_str} lr={opt_G.param_groups[0]['lr']:.2e} "
-                f"lambda_roi={CDRM_LAMBDA_ROI} lambda_coef={CDRM_LAMBDA_COEF}",
+                f"lambda_roi={CDRM_LAMBDA_ROI} "
+                f"lambda_c_coef={CDRM_LAMBDA_C_COEF} lambda_a_coef={CDRM_LAMBDA_A_COEF} "
+                f"a_stage_w2={CDRM_A_STAGE_WEIGHT_2} a_stage_w3={CDRM_A_STAGE_WEIGHT_3}",
                 flush=True,
             )
 
@@ -1879,11 +1894,20 @@ def train_residual_manifold(
             brain_loss = _masked_mean_l1(pet_hat_f, pet5.float(), brain_f)
             roi_loss = _masked_l1_high_uptake(pet_hat_f, pet5.float(), cortex5.float())
             pet_loss = brain_loss + float(CDRM_LAMBDA_ROI) * roi_loss
-            coef_loss = (
-                F.smooth_l1_loss(aux["c_hat"].float() / c_scale, c_tgt.float() / c_scale)
-                + F.smooth_l1_loss(aux["a_hat"].float() / a_scale, a_tgt.float() / a_scale)
+            c_loss = F.smooth_l1_loss(
+                aux["c_hat"].float() / c_scale,
+                c_tgt.float() / c_scale,
             )
-            loss = pet_loss + float(CDRM_LAMBDA_COEF) * coef_loss
+            a_err = F.smooth_l1_loss(
+                aux["a_hat"].float() / a_scale,
+                a_tgt.float() / a_scale,
+                reduction="none",
+            )
+            a_per_subject = a_err.mean(dim=1)
+            a_weights = _a_stage_weights(metas, device)
+            a_loss = (a_per_subject * a_weights).sum() / a_weights.sum().clamp_min(1.0)
+            coef_loss = float(CDRM_LAMBDA_C_COEF) * c_loss + float(CDRM_LAMBDA_A_COEF) * a_loss
+            loss = pet_loss + coef_loss
 
             if use_scaler:
                 scaler.scale(loss).backward()
@@ -1901,6 +1925,8 @@ def train_residual_manifold(
             brain_running += float(brain_loss.detach().item())
             roi_running += float(roi_loss.detach().item())
             coef_running += float(coef_loss.detach().item())
+            c_coef_running += float(c_loss.detach().item())
+            a_coef_running += float(a_loss.detach().item())
             n_batches += 1
 
             if verbose and (step == 1 or step % print_every == 0 or step == total_train_batches):
@@ -1915,6 +1941,7 @@ def train_residual_manifold(
                     f"loss={loss.detach().item():.4f} pet={pet_loss.detach().item():.4f} "
                     f"brain={brain_loss.detach().item():.4f} roi={roi_loss.detach().item():.4f} "
                     f"coef={coef_loss.detach().item():.4f} "
+                    f"c={c_loss.detach().item():.4f} a={a_loss.detach().item():.4f} "
                     f"step_sec={time.time() - step_t0:.2f} avg_sec={sec_per_batch:.2f}{eta}",
                     flush=True,
                 )
@@ -1925,12 +1952,16 @@ def train_residual_manifold(
         avg_brain = brain_running / nb
         avg_roi = roi_running / nb
         avg_coef = coef_running / nb
+        avg_c_coef = c_coef_running / nb
+        avg_a_coef = a_coef_running / nb
         train_sec = time.time() - t0
         hist["train_G"].append(avg_total)
         hist["train_pet"].append(avg_pet)
         hist["train_brain"].append(avg_brain)
         hist["train_roi"].append(avg_roi)
         hist["train_coef"].append(avg_coef)
+        hist["train_c_coef"].append(avg_c_coef)
+        hist["train_a_coef"].append(avg_a_coef)
 
         val_recon_epoch = val_roi_epoch = val_score_epoch = val_coef_epoch = None
         val_base_recon_epoch = val_base_roi_epoch = None
@@ -2098,7 +2129,8 @@ def train_residual_manifold(
                 print(
                     f"[CDRM][epoch {epoch:03d}/{epochs}] "
                     f"train={avg_total:.4f} pet={avg_pet:.4f} brain={avg_brain:.4f} "
-                    f"roi={avg_roi:.4f} coef={avg_coef:.4f} | "
+                    f"roi={avg_roi:.4f} coef={avg_coef:.4f} "
+                    f"c_coef={avg_c_coef:.4f} a_coef={avg_a_coef:.4f} | "
                     f"val_recon={val_recon_epoch:.4f} val_roi={val_roi_epoch:.4f} "
                     f"val_score={val_score_epoch:.4f} "
                     f"base_recon={val_base_recon_epoch:.4f} base_roi={val_base_roi_epoch:.4f} "
@@ -2119,6 +2151,7 @@ def train_residual_manifold(
             print(
                 f"[CDRM][epoch {epoch:03d}/{epochs}] train={avg_total:.4f} pet={avg_pet:.4f} "
                 f"brain={avg_brain:.4f} roi={avg_roi:.4f} coef={avg_coef:.4f} "
+                f"c_coef={avg_c_coef:.4f} a_coef={avg_a_coef:.4f} "
                 f"epoch_sec={time.time() - t0:.1f}",
                 flush=True,
             )
@@ -2131,6 +2164,8 @@ def train_residual_manifold(
                 "train/brain_l1": avg_brain,
                 "train/roi_loss": avg_roi,
                 "train/coef_loss": avg_coef,
+                "train/c_coef_loss": avg_c_coef,
+                "train/a_coef_loss": avg_a_coef,
                 "optim/lr_cdrm": opt_G.param_groups[0]["lr"],
                 "time/train_sec": train_sec,
                 "time/sec_per_train_batch": train_sec / nb,
