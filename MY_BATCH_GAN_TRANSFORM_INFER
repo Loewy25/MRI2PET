@@ -30,14 +30,4 @@ mkdir -p "${OUT_TRANSFORM_DIR}"
 
 python -u tools/infer_baseline_gan_transforms.py \
   --checkpoint "${BASE_PRETRAIN_CKPT}" \
-  --root-dir "${ROOT_DIR}" \
-  --fold-csv "${ROOT_DIR}/CV5_braak_strat/fold$((FOLD_INDEX + 1)).csv" \
-  --out-dir "${OUT_TRANSFORM_DIR}" \
-  --split train \
-  --transforms identity,flip_lr,rot_pos,rot_neg,shift_lr_pos,shift_lr_neg \
-  --lr-axis 0 \
-  --rot-deg 5 \
-  --shift-vox 4 \
-  --max-subjects 0 \
-  --save-input 1 \
-  --save-gt 1
+  --out-dir "${OUT_TRANSFORM_DIR}"
