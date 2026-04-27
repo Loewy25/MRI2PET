@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=gan_aug_probe
+#SBATCH -N 1
+#SBATCH --mem=32G
+#SBATCH -t 08:00:00
+#SBATCH --gres=gpu:tesla_a100:1
+#SBATCH --partition=tier2_gpu
+#SBATCH --account=shinjini_kundu
+#SBATCH --exclude=gpu02,gpua405,gpu01
+#SBATCH --output=slurm-%A_gan_aug_probe.out
+#SBATCH --error=slurm-%A_gan_aug_probe.err
+
+set -euo pipefail
+
+module load cuda/12.2
+module load cudnn/9.6.0.74-cuda12
+
+. ~/miniconda3/bin/activate
+conda activate pasta
+
+export PYTHONUNBUFFERED=1
+export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
+export FOLD_INDEX=0
+
+# Use the exact baseline checkpoint you want to probe.
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os65/checkpoints/best_G.pth"
+export OUT_PROBE_DIR="/scratch/l.peiwang/gan_aug_probe/fold1_train"
+
+mkdir -p "${OUT_PROBE_DIR}"
+
+python -u tools/probe_baseline_gan_aug.py \
+  --checkpoint "${BASE_PRETRAIN_CKPT}" \
+  --root-dir "${ROOT_DIR}" \
+  --fold-csv "${ROOT_DIR}/CV5_braak_strat/fold$((FOLD_INDEX + 1)).csv" \
+  --out-dir "${OUT_PROBE_DIR}" \
+  --split train \
+  --lr-axis 0 \
+  --rot-deg 5 \
+  --shift-vox 4 \
+  --max-subjects 0 \
+  --save-volumes 1 \
+  --save-volume-limit 30
