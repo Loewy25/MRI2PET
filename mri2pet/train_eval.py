@@ -2804,8 +2804,8 @@ def evaluate_and_save_residual_manifold(
         mean_abs_res_dis_list.append(float((res_dis_t.abs() * brain_f).sum().item() / brain_den.item()))
 
         coeff_row = {"sid": sid, "stage_ord": int(meta.get("stage_ord", -1))}
-        c_np = aux["c_hat"].squeeze(0).detach().cpu().numpy()
-        a_np = aux["a_hat"].squeeze(0).detach().cpu().numpy()
+        c_np = aux["c_hat"].squeeze(0).detach().float().cpu().numpy()
+        a_np = aux["a_hat"].squeeze(0).detach().float().cpu().numpy()
         coeff_row.update({f"c{k}": float(c_np[k]) for k in range(c_np.shape[0])})
         coeff_row.update({f"a{k}": float(a_np[k]) for k in range(a_np.shape[0])})
         coeff_rows.append(coeff_row)
