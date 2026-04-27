@@ -19,8 +19,11 @@ module load cudnn/9.6.0.74-cuda12
 conda activate pasta
 
 export PYTHONUNBUFFERED=1
+if [[ -f "${HOME}/.wandb_api_key" ]]; then
+  export WANDB_API_KEY="$(cat "${HOME}/.wandb_api_key")"
+fi
 export WANDB__SERVICE_WAIT=300
-# Run `wandb login` once on the cluster, or export WANDB_API_KEY before sbatch.
+# Create ~/.wandb_api_key once on the cluster, or export WANDB_API_KEY before sbatch.
 
 export RUN_NAME="2025_cdrm_fold1_kdis10_c2_os4"
 export FOLD_INDEX=0
