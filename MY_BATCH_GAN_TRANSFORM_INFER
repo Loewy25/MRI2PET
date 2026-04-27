@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gan_aug_probe
+#SBATCH --job-name=gan_transform_infer
 #SBATCH -N 1
 #SBATCH --mem=32G
 #SBATCH -t 08:00:00
@@ -7,8 +7,8 @@
 #SBATCH --partition=tier2_gpu
 #SBATCH --account=shinjini_kundu
 #SBATCH --exclude=gpu02,gpua405,gpu01
-#SBATCH --output=slurm-%A_gan_aug_probe.out
-#SBATCH --error=slurm-%A_gan_aug_probe.err
+#SBATCH --output=slurm-%A_gan_transform_infer.out
+#SBATCH --error=slurm-%A_gan_transform_infer.err
 
 set -euo pipefail
 
@@ -22,21 +22,22 @@ export PYTHONUNBUFFERED=1
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 export FOLD_INDEX=0
 
-# Use the exact baseline checkpoint you want to probe.
+# Use the baseline model for the same fold you want to visualize.
 export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold1_os65/checkpoints/best_G.pth"
-export OUT_PROBE_DIR="/scratch/l.peiwang/gan_aug_probe/fold1_train"
+export OUT_TRANSFORM_DIR="/scratch/l.peiwang/gan_transform_infer/fold1_train"
 
-mkdir -p "${OUT_PROBE_DIR}"
+mkdir -p "${OUT_TRANSFORM_DIR}"
 
-python -u tools/probe_baseline_gan_aug.py \
+python -u tools/infer_baseline_gan_transforms.py \
   --checkpoint "${BASE_PRETRAIN_CKPT}" \
   --root-dir "${ROOT_DIR}" \
   --fold-csv "${ROOT_DIR}/CV5_braak_strat/fold$((FOLD_INDEX + 1)).csv" \
-  --out-dir "${OUT_PROBE_DIR}" \
+  --out-dir "${OUT_TRANSFORM_DIR}" \
   --split train \
+  --transforms identity,flip_lr,rot_pos,rot_neg,shift_lr_pos,shift_lr_neg \
   --lr-axis 0 \
   --rot-deg 5 \
   --shift-vox 4 \
   --max-subjects 0 \
-  --save-volumes 1 \
-  --save-volume-limit 30
+  --save-input 1 \
+  --save-gt 1
