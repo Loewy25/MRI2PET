@@ -20,11 +20,11 @@ conda activate pasta
 
 export PYTHONUNBUFFERED=1
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
-export FOLD_INDEX=4
+export FOLD_INDEX=3
 
 # Use the baseline model for the same fold you want to visualize.
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold5_os65/checkpoints/best_G.pth"
-export OUT_TRANSFORM_DIR="/scratch/l.peiwang/gan_transform_infer/fold5_train"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold4_os65/checkpoints/best_G.pth"
+export OUT_TRANSFORM_DIR="/scratch/l.peiwang/gan_transform_infer/fold4_train"
 
 mkdir -p "${OUT_TRANSFORM_DIR}"
 
