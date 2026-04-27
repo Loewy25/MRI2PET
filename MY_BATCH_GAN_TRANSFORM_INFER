@@ -36,8 +36,9 @@ python -u tools/infer_baseline_gan_transforms.py \
   --split train \
   --transforms identity,flip_lr,rot_pos,rot_neg,shift_lr_pos,shift_lr_neg \
   --lr-axis 0 \
-  --rot-deg 5 \
-  --shift-vox 4 \
+  --rot-deg 15 \
+  --shift-vox 12 \
   --max-subjects 0 \
   --save-input 1 \
-  --save-gt 1
+  --save-gt 1 \
+  --save-diff 1

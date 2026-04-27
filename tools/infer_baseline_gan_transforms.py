@@ -44,6 +44,7 @@ def _parse_args():
     )
     p.add_argument("--save-input", type=int, default=1, help="Also save transformed MRI_input.nii.gz.")
     p.add_argument("--save-gt", type=int, default=1, help="Also save transformed PET_gt.nii.gz for visual reference.")
+    p.add_argument("--save-diff", type=int, default=1, help="Also save abs-difference maps versus identity.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -169,6 +170,11 @@ def main():
         mri_np = mri_t.squeeze(0).numpy().astype(np.float32)
         pet_np = pet_t.squeeze(0).numpy().astype(np.float32)
         brain_np = meta["brain_mask"].astype(np.float32)
+        brain_id = brain_np > 0.5
+        fake_id = None
+        if int(args.save_diff):
+            fake_id = _run_gan(G, mri_np, device)
+            fake_id[~brain_id] = 0.0
         affine = _affine_for_meta(meta)
         sid_safe = _safe_name(sid)
 
@@ -177,24 +183,50 @@ def main():
             out_sub = os.path.join(args.out_dir, sid_safe, transform_name)
             os.makedirs(out_sub, exist_ok=True)
 
-            mri_x = _transform(mri_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=1)
-            brain_x = _transform(brain_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=0) > 0.5
-            fake_x = _run_gan(G, mri_x, device)
-            fake_x[~brain_x] = 0.0
+            if transform_name == "identity" and fake_id is not None:
+                mri_x = mri_np.copy()
+                brain_x = brain_id.copy()
+                fake_x = fake_id.copy()
+            else:
+                mri_x = _transform(mri_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=1)
+                brain_x = _transform(brain_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=0) > 0.5
+                fake_x = _run_gan(G, mri_x, device)
+                fake_x[~brain_x] = 0.0
 
             fake_path = os.path.join(out_sub, "PET_fake.nii.gz")
             _save_nifti(fake_x, affine, fake_path)
 
             input_path = ""
             gt_path = ""
+            mri_diff_path = ""
+            fake_diff_path = ""
+            gt_diff_path = ""
             if int(args.save_input):
                 input_path = os.path.join(out_sub, "MRI_input.nii.gz")
                 _save_nifti(mri_x, affine, input_path)
             if int(args.save_gt):
-                pet_x = _transform(pet_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=1)
+                if transform_name == "identity":
+                    pet_x = pet_np.copy()
+                else:
+                    pet_x = _transform(pet_np, transform_name, args.lr_axis, args.rot_deg, args.shift_vox, order=1)
                 pet_x[~brain_x] = 0.0
                 gt_path = os.path.join(out_sub, "PET_gt.nii.gz")
                 _save_nifti(pet_x, affine, gt_path)
+            if int(args.save_diff):
+                union_brain = np.logical_or(brain_id, brain_x)
+                mri_diff = np.abs(mri_x - mri_np).astype(np.float32)
+                mri_diff[~union_brain] = 0.0
+                fake_diff = np.abs(fake_x - fake_id).astype(np.float32)
+                fake_diff[~union_brain] = 0.0
+                mri_diff_path = os.path.join(out_sub, "MRI_absdiff_from_identity.nii.gz")
+                fake_diff_path = os.path.join(out_sub, "PET_fake_absdiff_from_identity.nii.gz")
+                _save_nifti(mri_diff, affine, mri_diff_path)
+                _save_nifti(fake_diff, affine, fake_diff_path)
+                if int(args.save_gt):
+                    pet_diff = np.abs(pet_x - pet_np).astype(np.float32)
+                    pet_diff[~union_brain] = 0.0
+                    gt_diff_path = os.path.join(out_sub, "PET_gt_absdiff_from_identity.nii.gz")
+                    _save_nifti(pet_diff, affine, gt_diff_path)
 
             rows.append({
                 "sid": sid,
@@ -203,6 +235,9 @@ def main():
                 "PET_fake": fake_path,
                 "MRI_input": input_path,
                 "PET_gt": gt_path,
+                "MRI_absdiff_from_identity": mri_diff_path,
+                "PET_fake_absdiff_from_identity": fake_diff_path,
+                "PET_gt_absdiff_from_identity": gt_diff_path,
                 "sec": time.time() - item_t0,
             })
             done = (s_idx - 1) * len(transforms) + t_idx
@@ -215,7 +250,11 @@ def main():
         print(f"[gan-transform] subject {s_idx}/{len(split_sids)} {sid} done sec={time.time() - subj_t0:.1f}", flush=True)
 
     with open(manifest_path, "w", newline="") as f:
-        cols = ["sid", "stage_ord", "transform", "PET_fake", "MRI_input", "PET_gt", "sec"]
+        cols = [
+            "sid", "stage_ord", "transform", "PET_fake", "MRI_input", "PET_gt",
+            "MRI_absdiff_from_identity", "PET_fake_absdiff_from_identity",
+            "PET_gt_absdiff_from_identity", "sec",
+        ]
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for row in rows:
