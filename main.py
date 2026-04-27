@@ -564,6 +564,9 @@ if __name__ == "__main__":
                 os.path.join(OUT_RUN, "per_subject_manifold.csv"),
                 os.path.join(OUT_RUN, "coefficients.csv"),
                 os.path.join(CKPT_DIR, "best_residual_manifold.pth"),
+                os.path.join(CDRM_BASIS_DIR, "basis_manifest.json"),
+                os.path.join(CDRM_BASIS_DIR, "oracle_metrics.csv"),
+                os.path.join(CDRM_BASIS_DIR, "coeff_targets.csv"),
             ])
         else:
             output_files.extend([

@@ -1801,6 +1801,12 @@ def train_residual_manifold(
         "val_recon": [], "val_roi": [], "val_score": [], "val_coef": [],
         "val_base_recon": [], "val_base_roi": [],
         "val_improve_recon": [], "val_improve_roi": [],
+        "val_stage0_recon": [], "val_stage0_roi": [],
+        "val_stage0_base_recon": [], "val_stage0_base_roi": [],
+        "val_stage0_improve_recon": [], "val_stage0_improve_roi": [],
+        "val_stage3_recon": [], "val_stage3_roi": [],
+        "val_stage3_base_recon": [], "val_stage3_base_roi": [],
+        "val_stage3_improve_recon": [], "val_stage3_improve_roi": [],
         "mean_abs_res_cal": [], "mean_abs_res_dis": [],
         "mean_a_low_stage": [], "mean_a_high_stage": [],
     }
@@ -1936,10 +1942,20 @@ def train_residual_manifold(
         if val_loader is not None:
             G.eval()
             val_t0 = time.time()
-            val_recon_sum = val_roi_sum = val_coef_sum = 0.0
+            val_recon_sum = val_roi_sum = 0.0
             val_base_recon_sum = val_base_roi_sum = 0.0
             res_cal_sum = res_dis_sum = 0.0
             mean_a_low_vals, mean_a_high_vals = [], []
+            stage_stats = {
+                s: {
+                    "n": 0,
+                    "recon": 0.0,
+                    "roi": 0.0,
+                    "base_recon": 0.0,
+                    "base_roi": 0.0,
+                }
+                for s in (0, 1, 2, 3)
+            }
             v_batches = 0
             if verbose:
                 print(f"[CDRM][epoch {epoch:03d}] start validation", flush=True)
@@ -1958,8 +1974,6 @@ def train_residual_manifold(
                     brain5, cortex5 = _extract_masks(metas, device)
                     flair5, clinical, _ = _extract_new_variant_inputs(metas, device)
                     pet_base5 = _extract_pet_base(metas, device)
-                    c_tgt, a_tgt = _coeff_targets_for_metas(metas, device)
-                    c_scale, a_scale = _coeff_scales(CDRM_COEFF_CSV, device)
                     if brain5 is None or cortex5 is None or flair5 is None or clinical is None or pet_base5 is None:
                         raise RuntimeError("Residual manifold validation requires cached PET_base and full meta")
 
@@ -1979,20 +1993,28 @@ def train_residual_manifold(
                     val_base_recon_sum += _masked_mean_l1(pet_base5.float(), pet5.float(), brain_f).item()
                     val_roi_sum += _masked_l1_high_uptake(pet_hat_f, pet5.float(), cortex5.float()).item()
                     val_base_roi_sum += _masked_l1_high_uptake(pet_base5.float(), pet5.float(), cortex5.float()).item()
-                    val_coef_sum += (
-                        F.smooth_l1_loss(aux["c_hat"].float() / c_scale, c_tgt.float() / c_scale)
-                        + F.smooth_l1_loss(aux["a_hat"].float() / a_scale, a_tgt.float() / a_scale)
-                    ).item()
                     den = brain_f.sum().clamp_min(1.0)
                     res_cal_sum += float((aux["res_cal"].float().abs() * brain_f).sum().item() / den.item())
                     res_dis_sum += float((aux["res_dis"].float().abs() * brain_f).sum().item() / den.item())
                     stages = _stage_list(metas)
                     a_mean = aux["a_hat"].float().mean(dim=1).detach().cpu().numpy()
-                    for st, av in zip(stages, a_mean):
+                    for b_idx, (st, av) in enumerate(zip(stages, a_mean)):
                         if st in (0, 1):
                             mean_a_low_vals.append(float(av))
                         if st >= 3:
                             mean_a_high_vals.append(float(av))
+                        if st in stage_stats:
+                            sl = slice(b_idx, b_idx + 1)
+                            brain_b = brain_f[sl]
+                            cortex_b = cortex5.float()[sl]
+                            pet_b = pet5.float()[sl]
+                            fake_b = pet_hat_f[sl]
+                            base_b = pet_base5.float()[sl]
+                            stage_stats[st]["n"] += 1
+                            stage_stats[st]["recon"] += _masked_mean_l1(fake_b, pet_b, brain_b).item()
+                            stage_stats[st]["roi"] += _masked_l1_high_uptake(fake_b, pet_b, cortex_b).item()
+                            stage_stats[st]["base_recon"] += _masked_mean_l1(base_b, pet_b, brain_b).item()
+                            stage_stats[st]["base_roi"] += _masked_l1_high_uptake(base_b, pet_b, cortex_b).item()
                     v_batches += 1
 
                     if verbose and (v_step == 1 or v_step % 10 == 0):
@@ -2005,7 +2027,7 @@ def train_residual_manifold(
             vb = max(1, v_batches)
             val_recon_epoch = val_recon_sum / vb
             val_roi_epoch = val_roi_sum / vb
-            val_coef_epoch = val_coef_sum / vb
+            val_coef_epoch = float("nan")
             val_base_recon_epoch = val_base_recon_sum / vb
             val_base_roi_epoch = val_base_roi_sum / vb
             val_improve_recon_epoch = val_base_recon_epoch - val_recon_epoch
@@ -2017,6 +2039,32 @@ def train_residual_manifold(
             mean_a_high_epoch = float(np.mean(mean_a_high_vals)) if mean_a_high_vals else float("nan")
             val_sec_epoch = time.time() - val_t0
 
+            stage_epoch: Dict[int, Dict[str, float]] = {}
+            for st, vals in stage_stats.items():
+                n_stage = max(1, int(vals["n"]))
+                if vals["n"] > 0:
+                    recon_st = vals["recon"] / n_stage
+                    roi_st = vals["roi"] / n_stage
+                    base_recon_st = vals["base_recon"] / n_stage
+                    base_roi_st = vals["base_roi"] / n_stage
+                    stage_epoch[st] = {
+                        "recon": recon_st,
+                        "roi": roi_st,
+                        "base_recon": base_recon_st,
+                        "base_roi": base_roi_st,
+                        "improve_recon": base_recon_st - recon_st,
+                        "improve_roi": base_roi_st - roi_st,
+                    }
+                else:
+                    stage_epoch[st] = {
+                        "recon": float("nan"),
+                        "roi": float("nan"),
+                        "base_recon": float("nan"),
+                        "base_roi": float("nan"),
+                        "improve_recon": float("nan"),
+                        "improve_roi": float("nan"),
+                    }
+
             hist["val_recon"].append(val_recon_epoch)
             hist["val_roi"].append(val_roi_epoch)
             hist["val_score"].append(val_score_epoch)
@@ -2025,6 +2073,13 @@ def train_residual_manifold(
             hist["val_base_roi"].append(val_base_roi_epoch)
             hist["val_improve_recon"].append(val_improve_recon_epoch)
             hist["val_improve_roi"].append(val_improve_roi_epoch)
+            for st in (0, 3):
+                hist[f"val_stage{st}_recon"].append(stage_epoch[st]["recon"])
+                hist[f"val_stage{st}_roi"].append(stage_epoch[st]["roi"])
+                hist[f"val_stage{st}_base_recon"].append(stage_epoch[st]["base_recon"])
+                hist[f"val_stage{st}_base_roi"].append(stage_epoch[st]["base_roi"])
+                hist[f"val_stage{st}_improve_recon"].append(stage_epoch[st]["improve_recon"])
+                hist[f"val_stage{st}_improve_roi"].append(stage_epoch[st]["improve_roi"])
             hist["mean_abs_res_cal"].append(mean_abs_res_cal_epoch)
             hist["mean_abs_res_dis"].append(mean_abs_res_dis_epoch)
             hist["mean_a_low_stage"].append(mean_a_low_epoch)
@@ -2045,9 +2100,11 @@ def train_residual_manifold(
                     f"train={avg_total:.4f} pet={avg_pet:.4f} brain={avg_brain:.4f} "
                     f"roi={avg_roi:.4f} coef={avg_coef:.4f} | "
                     f"val_recon={val_recon_epoch:.4f} val_roi={val_roi_epoch:.4f} "
-                    f"val_coef={val_coef_epoch:.4f} val_score={val_score_epoch:.4f} "
+                    f"val_score={val_score_epoch:.4f} "
                     f"base_recon={val_base_recon_epoch:.4f} base_roi={val_base_roi_epoch:.4f} "
                     f"improve_recon={val_improve_recon_epoch:.4f} improve_roi={val_improve_roi_epoch:.4f} "
+                    f"stage0_roi={stage_epoch[0]['roi']:.4f} stage0_imp_roi={stage_epoch[0]['improve_roi']:.4f} "
+                    f"stage3_roi={stage_epoch[3]['roi']:.4f} stage3_imp_roi={stage_epoch[3]['improve_roi']:.4f} "
                     f"|res_cal|={mean_abs_res_cal_epoch:.5f} |res_dis|={mean_abs_res_dis_epoch:.5f} "
                     f"a_low={mean_a_low_epoch:.5f} a_high={mean_a_high_epoch:.5f} "
                     f"best={best_val:.4f} patience={patience_counter}/{EARLY_STOP_PATIENCE} "
@@ -2083,7 +2140,6 @@ def train_residual_manifold(
                 log_dict.update({
                     "val/recon_loss": val_recon_epoch,
                     "val/roi_loss": val_roi_epoch,
-                    "val/coef_loss": val_coef_epoch,
                     "val/score": val_score_epoch,
                     "val/best_score": best_val,
                     "val/base_recon": val_base_recon_epoch,
@@ -2096,6 +2152,15 @@ def train_residual_manifold(
                     "val/mean_a_high_stage": mean_a_high_epoch,
                     "time/val_sec": val_sec_epoch,
                 })
+                for st in (0, 3):
+                    log_dict.update({
+                        f"val/stage{st}_recon": stage_epoch[st]["recon"],
+                        f"val/stage{st}_roi": stage_epoch[st]["roi"],
+                        f"val/stage{st}_base_recon": stage_epoch[st]["base_recon"],
+                        f"val/stage{st}_base_roi": stage_epoch[st]["base_roi"],
+                        f"val/stage{st}_improve_recon": stage_epoch[st]["improve_recon"],
+                        f"val/stage{st}_improve_roi": stage_epoch[st]["improve_roi"],
+                    })
             wandb.log(log_dict, step=epoch)
 
     if best_G_state is not None:
