@@ -22,6 +22,7 @@ export PYTHONUNBUFFERED=1
 if [[ -f "${HOME}/.wandb_api_key" ]]; then
   export WANDB_API_KEY="$(cat "${HOME}/.wandb_api_key")"
 fi
+export WANDB_API_KEY="${WANDB_API_KEY:-"b8c85c848af247ca775dabc571ae0012a4c36877"}"
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
   echo "[ERROR] WANDB_API_KEY is not set. Create ~/.wandb_api_key or export WANDB_API_KEY before sbatch." >&2
   exit 1
