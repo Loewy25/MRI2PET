@@ -25,6 +25,7 @@ from mri2pet.config import (
     CDRM_A_STAGE_WEIGHT_2, CDRM_A_STAGE_WEIGHT_3,
     CDRM_T1_FREEZE, CDRM_STAT_DIM,
     CDRM_DISEASE_TARGET_MODE, CDRM_CONTRAST_LAMBDA, CDRM_CONTRAST_REF,
+    CDRM_CAL_STAGE_MAX, CDRM_DIS_STAGE_MIN,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
@@ -163,6 +164,8 @@ def init_wandb_run():
             "cdrm_disease_target_mode": CDRM_DISEASE_TARGET_MODE,
             "cdrm_contrast_lambda": CDRM_CONTRAST_LAMBDA,
             "cdrm_contrast_ref": CDRM_CONTRAST_REF,
+            "cdrm_cal_stage_max": CDRM_CAL_STAGE_MAX,
+            "cdrm_dis_stage_min": CDRM_DIS_STAGE_MIN,
         })
 
     try:
@@ -277,6 +280,7 @@ if __name__ == "__main__":
             f"  basis mode={CDRM_DISEASE_TARGET_MODE} "
             f"contrast_lambda={CDRM_CONTRAST_LAMBDA} contrast_ref={CDRM_CONTRAST_REF}"
         )
+        print(f"  basis pools: calibration stage<={CDRM_CAL_STAGE_MAX} disease stage>={CDRM_DIS_STAGE_MIN}")
         if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
             raise RuntimeError("MODEL_VARIANT=residual_manifold requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
         if not (CDRM_BASIS_DIR and os.path.isdir(CDRM_BASIS_DIR)):
@@ -609,6 +613,8 @@ if __name__ == "__main__":
                 os.path.join(CKPT_DIR, "best_residual_manifold.pth"),
                 os.path.join(CDRM_BASIS_DIR, "basis_manifest.json"),
                 os.path.join(CDRM_BASIS_DIR, "oracle_metrics.csv"),
+                os.path.join(CDRM_BASIS_DIR, "val_oracle_metrics.csv"),
+                os.path.join(CDRM_BASIS_DIR, "test_oracle_metrics.csv"),
                 os.path.join(CDRM_BASIS_DIR, "coeff_targets.csv"),
             ])
         else:

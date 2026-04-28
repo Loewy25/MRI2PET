@@ -19,8 +19,10 @@ os.environ["USE_BASELINE_CACHE"] = "0"
 
 from mri2pet.config import (
     BASELINE_CACHE_DIR,
+    CDRM_CAL_STAGE_MAX,
     CDRM_CONTRAST_LAMBDA,
     CDRM_CONTRAST_REF,
+    CDRM_DIS_STAGE_MIN,
     CDRM_DISEASE_TARGET_MODE,
     CDRM_K_CAL,
     CDRM_K_DIS,
@@ -50,6 +52,10 @@ def _parse_args():
     p.add_argument("--contrast-lambda", type=float, default=CDRM_CONTRAST_LAMBDA)
     p.add_argument("--contrast-ref", default=CDRM_CONTRAST_REF,
                    choices=("brain_minus_cortex", "brain", "wholebrain_nobg"))
+    p.add_argument("--cal-stage-max", type=int, default=CDRM_CAL_STAGE_MAX,
+                   help="Use only train subjects with stage_ord <= this value to build B_cal.")
+    p.add_argument("--dis-stage-min", type=int, default=CDRM_DIS_STAGE_MIN,
+                   help="Use train subjects with stage_ord >= this value to build B_dis.")
     p.add_argument("--hi-q", type=float, default=0.85)
     p.add_argument("--ridge", type=float, default=1e-4)
     p.add_argument("--fit-iters", type=int, default=3)
@@ -113,13 +119,16 @@ def _build_calibration_basis(raw_residuals: np.ndarray, brain_any: np.ndarray, k
     mean_map = mean_flat.reshape(shape)
     basis.append(_normalize_basis_map(mean_map, brain_any))
 
-    n_pc = max(0, k_cal - 1)
+    n_pc = min(max(0, k_cal - 1), eigvals.shape[0])
     for j in range(n_pc):
         ev = float(max(eigvals[j], 1e-12))
         comp_flat = (eigvecs[:, j].astype(np.float32) @ raw_residuals) / np.sqrt(ev * max(1, v))
         comp = comp_flat.reshape(shape)
         basis.append(_normalize_basis_map(comp, brain_any))
         print(f"[cdrm-basis]   PC{j + 1}: eig={eigvals[j]:.6e}", flush=True)
+    while len(basis) < k_cal:
+        print(f"[cdrm-basis][WARN] padding B_cal component {len(basis)} with zeros", flush=True)
+        basis.append(np.zeros(shape, dtype=np.float32))
 
     B_cal = np.stack(basis, axis=0).astype(np.float32)
     print(f"[cdrm-basis] B_cal shape={B_cal.shape}", flush=True)
@@ -210,7 +219,7 @@ def _high_cortex_mask(pet_true: np.ndarray, cortex: np.ndarray, q: float) -> np.
     return np.logical_and(cortex, pet_true >= thr)
 
 
-def _summarize_oracle(rows: List[Dict[str, float]]) -> None:
+def _summarize_oracle(rows: List[Dict[str, float]], split_name: str = "train") -> None:
     by_stage = defaultdict(list)
     for row in rows:
         by_stage[int(row["stage_ord"])].append(row)
@@ -218,7 +227,7 @@ def _summarize_oracle(rows: List[Dict[str, float]]) -> None:
     def _print_group(name: str, group_rows: List[Dict[str, float]]):
         if not group_rows:
             return
-        print(f"[cdrm-oracle] summary group={name} n={len(group_rows)}", flush=True)
+        print(f"[cdrm-oracle][{split_name}] summary group={name} n={len(group_rows)}", flush=True)
         for key in [
             "base_brain_l1", "cal_brain_l1", "oracle_brain_l1",
             "base_hi_l1", "cal_hi_l1", "oracle_hi_l1",
@@ -227,11 +236,87 @@ def _summarize_oracle(rows: List[Dict[str, float]]) -> None:
             vals = np.asarray([r[key] for r in group_rows], dtype=np.float64)
             vals = vals[np.isfinite(vals)]
             if vals.size:
-                print(f"[cdrm-oracle]   {key}: mean={vals.mean():.6f} std={vals.std():.6f}", flush=True)
+                print(f"[cdrm-oracle][{split_name}]   {key}: mean={vals.mean():.6f} std={vals.std():.6f}", flush=True)
 
     _print_group("all", rows)
     for stage in sorted(by_stage):
         _print_group(f"stage{stage}", by_stage[stage])
+
+
+def _write_oracle_metrics(
+    *,
+    csv_path: str,
+    split_name: str,
+    sids: List[str],
+    ds: KariAV1451Dataset,
+    sid_to_idx: Dict[str, int],
+    cache_dir: str,
+    B_cal: np.ndarray,
+    B_dis: np.ndarray,
+    ridge: float,
+    fit_iters: int,
+    hi_q: float,
+) -> List[Dict[str, float]]:
+    rows: List[Dict[str, float]] = []
+    print(f"[cdrm-oracle][{split_name}] evaluating fitted oracle n={len(sids)}", flush=True)
+    for i, sid in enumerate(sids):
+        item_t0 = time.time()
+        pet_true, pet_base, brain, cortex, stage, _ = _load_subject(ds, sid_to_idx, cache_dir, sid)
+        residual = (pet_true - pet_base).astype(np.float32)
+        c, a = fit_joint_coefficients(
+            residual,
+            B_cal,
+            B_dis,
+            brain,
+            ridge=float(ridge),
+            iters=int(fit_iters),
+        )
+        res_cal = np.einsum("k,kdhw->dhw", c, B_cal).astype(np.float32)
+        res_total = reconstruct_from_basis(c, a, B_cal, B_dis)
+        pet_cal = (pet_base + res_cal).astype(np.float32)
+        pet_oracle = (pet_base + res_total).astype(np.float32)
+        hi_ctx = _high_cortex_mask(pet_true, cortex, float(hi_q))
+        row = {
+            "sid": sid,
+            "stage_ord": int(stage),
+            "base_brain_l1": _masked_l1(pet_base, pet_true, brain),
+            "cal_brain_l1": _masked_l1(pet_cal, pet_true, brain),
+            "oracle_brain_l1": _masked_l1(pet_oracle, pet_true, brain),
+            "base_hi_l1": _masked_l1(pet_base, pet_true, hi_ctx),
+            "cal_hi_l1": _masked_l1(pet_cal, pet_true, hi_ctx),
+            "oracle_hi_l1": _masked_l1(pet_oracle, pet_true, hi_ctx),
+            "mean_abs_res_cal": float(np.mean(np.abs(res_cal[brain]))) if np.any(brain) else float("nan"),
+            "mean_abs_res_dis": float(np.mean(np.abs((res_total - res_cal)[brain]))) if np.any(brain) else float("nan"),
+            "mean_a": float(np.mean(a)) if a.size else float("nan"),
+        }
+        row["oracle_improve_brain"] = row["base_brain_l1"] - row["oracle_brain_l1"]
+        row["oracle_improve_hi"] = row["base_hi_l1"] - row["oracle_hi_l1"]
+        rows.append(row)
+        if i == 0 or (i + 1) % 10 == 0 or (i + 1) == len(sids):
+            print(
+                f"[cdrm-oracle][{split_name}]   {i + 1}/{len(sids)} sid={sid} stage={stage} "
+                f"base_hi={row['base_hi_l1']:.5f} oracle_hi={row['oracle_hi_l1']:.5f} "
+                f"improve_hi={row['oracle_improve_hi']:.5f} "
+                f"|cal|={row['mean_abs_res_cal']:.5f} |dis|={row['mean_abs_res_dis']:.5f} "
+                f"sec={time.time() - item_t0:.1f}",
+                flush=True,
+            )
+
+    cols = [
+        "sid", "stage_ord",
+        "base_brain_l1", "cal_brain_l1", "oracle_brain_l1",
+        "base_hi_l1", "cal_hi_l1", "oracle_hi_l1",
+        "oracle_improve_brain", "oracle_improve_hi",
+        "mean_abs_res_cal", "mean_abs_res_dis", "mean_a",
+    ]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=cols)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({c: row.get(c, "") for c in cols})
+    _summarize_oracle(rows, split_name=split_name)
+    print(f"[cdrm-oracle][{split_name}] csv={csv_path}", flush=True)
+    return rows
 
 
 def main():
@@ -256,20 +341,21 @@ def main():
     print(
         f"[cdrm-basis] k_cal={args.k_cal} k_dis={args.k_dis} "
         f"mode={args.disease_target_mode} contrast_lambda={args.contrast_lambda} "
-        f"contrast_ref={args.contrast_ref} resize_to={RESIZE_TO}",
+        f"contrast_ref={args.contrast_ref} cal_stage_max={args.cal_stage_max} "
+        f"dis_stage_min={args.dis_stage_min} resize_to={RESIZE_TO}",
         flush=True,
     )
     print("=" * 70, flush=True)
 
     ds = KariAV1451Dataset(root_dir=args.root_dir, resize_to=RESIZE_TO)
     sid_to_idx = _sid_index(ds)
-    train_sids, _, _, _ = _read_fold_csv_lists(args.fold_csv)
+    train_sids, val_sids, test_sids, _ = _read_fold_csv_lists(args.fold_csv)
     if args.max_subjects and args.max_subjects > 0:
         train_sids = train_sids[: int(args.max_subjects)]
         print(f"[cdrm-basis][SMOKE] limiting train subjects to {len(train_sids)}", flush=True)
-    missing = [sid for sid in train_sids if sid not in sid_to_idx]
+    missing = [sid for sid in (train_sids + val_sids + test_sids) if sid not in sid_to_idx]
     if missing:
-        raise RuntimeError(f"{len(missing)} train subjects not found on disk. Examples: {missing[:8]}")
+        raise RuntimeError(f"{len(missing)} fold subjects not found on disk. Examples: {missing[:8]}")
     idx_train = [sid_to_idx[sid] for sid in train_sids]
     ds.set_clinical_stats(_compute_clinical_stats(ds, idx_train))
 
@@ -299,7 +385,21 @@ def main():
                 flush=True,
             )
 
-    B_cal = _build_calibration_basis(raw_residuals, brain_any, int(args.k_cal))
+    cal_indices = [i for i, st in enumerate(stages) if int(st) <= int(args.cal_stage_max)]
+    if not cal_indices:
+        raise RuntimeError(
+            f"No train subjects with stage_ord <= cal_stage_max={args.cal_stage_max}; "
+            "cannot build calibration basis."
+        )
+    cal_counts = defaultdict(int)
+    for i in cal_indices:
+        cal_counts[int(stages[i])] += 1
+    print(
+        f"[cdrm-basis] calibration pool: stage<= {args.cal_stage_max}, "
+        f"n={len(cal_indices)}, counts={dict(sorted(cal_counts.items()))}",
+        flush=True,
+    )
+    B_cal = _build_calibration_basis(raw_residuals[np.asarray(cal_indices)].copy(), brain_any, int(args.k_cal))
     del raw_residuals
 
     disease_rows = []
@@ -321,7 +421,7 @@ def main():
             contrast_lambda=float(args.contrast_lambda),
             contrast_ref=args.contrast_ref,
         )
-        if stage >= 3:
+        if stage >= int(args.dis_stage_min):
             disease_rows.append(target.reshape(-1))
             disease_sids.append(sid)
             disease_stages.append(stage)
@@ -335,8 +435,8 @@ def main():
 
     if len(disease_rows) < int(args.k_dis):
         print(
-            f"[cdrm-basis][WARN] only {len(disease_rows)} stage3 subjects for k_dis={args.k_dis}; "
-            "adding stage2 subjects to disease-basis pool.",
+            f"[cdrm-basis][WARN] only {len(disease_rows)} stage>={args.dis_stage_min} subjects "
+            f"for k_dis={args.k_dis}; adding stage2+ subjects to disease-basis pool.",
             flush=True,
         )
         disease_rows = []
@@ -379,14 +479,15 @@ def main():
 
     coeff_csv = os.path.join(args.basis_dir, "coeff_targets.csv")
     oracle_csv = os.path.join(args.basis_dir, "oracle_metrics.csv")
-    oracle_rows: List[Dict[str, float]] = []
+    val_oracle_csv = os.path.join(args.basis_dir, "val_oracle_metrics.csv")
+    test_oracle_csv = os.path.join(args.basis_dir, "test_oracle_metrics.csv")
     coeff_cols = (
         ["sid", "stage_ord"]
         + [f"c{k}" for k in range(B_cal.shape[0])]
         + [f"a{k}" for k in range(B_dis.shape[0])]
     )
 
-    print("[cdrm-basis] pass3 coefficient targets + oracle metrics", flush=True)
+    print("[cdrm-basis] pass3 train coefficient targets", flush=True)
     with open(coeff_csv, "w", newline="") as f_coeff:
         writer = csv.DictWriter(f_coeff, fieldnames=coeff_cols)
         writer.writeheader()
@@ -402,28 +503,6 @@ def main():
                 ridge=float(args.ridge),
                 iters=int(args.fit_iters),
             )
-            res_cal = np.einsum("k,kdhw->dhw", c, B_cal).astype(np.float32)
-            res_total = reconstruct_from_basis(c, a, B_cal, B_dis)
-            pet_cal = (pet_base + res_cal).astype(np.float32)
-            pet_oracle = (pet_base + res_total).astype(np.float32)
-            hi_ctx = _high_cortex_mask(pet_true, cortex, float(args.hi_q))
-            row = {
-                "sid": sid,
-                "stage_ord": int(stage),
-                "base_brain_l1": _masked_l1(pet_base, pet_true, brain),
-                "cal_brain_l1": _masked_l1(pet_cal, pet_true, brain),
-                "oracle_brain_l1": _masked_l1(pet_oracle, pet_true, brain),
-                "base_hi_l1": _masked_l1(pet_base, pet_true, hi_ctx),
-                "cal_hi_l1": _masked_l1(pet_cal, pet_true, hi_ctx),
-                "oracle_hi_l1": _masked_l1(pet_oracle, pet_true, hi_ctx),
-                "mean_abs_res_cal": float(np.mean(np.abs(res_cal[brain]))) if np.any(brain) else float("nan"),
-                "mean_abs_res_dis": float(np.mean(np.abs((res_total - res_cal)[brain]))) if np.any(brain) else float("nan"),
-                "mean_a": float(np.mean(a)) if a.size else float("nan"),
-            }
-            row["oracle_improve_brain"] = row["base_brain_l1"] - row["oracle_brain_l1"]
-            row["oracle_improve_hi"] = row["base_hi_l1"] - row["oracle_hi_l1"]
-            oracle_rows.append(row)
-
             coeff_row = {"sid": sid, "stage_ord": int(stage)}
             coeff_row.update({f"c{k}": float(c[k]) for k in range(B_cal.shape[0])})
             coeff_row.update({f"a{k}": float(a[k]) for k in range(B_dis.shape[0])})
@@ -431,25 +510,50 @@ def main():
 
             if i == 0 or (i + 1) % 10 == 0 or (i + 1) == n:
                 print(
-                    f"[cdrm-basis]   coeff/oracle {i + 1}/{n} sid={sid} stage={stage} "
-                    f"base_hi={row['base_hi_l1']:.5f} oracle_hi={row['oracle_hi_l1']:.5f} "
-                    f"improve_hi={row['oracle_improve_hi']:.5f} "
+                    f"[cdrm-basis]   coeff target {i + 1}/{n} sid={sid} stage={stage} "
                     f"sec={time.time() - item_t0:.1f}",
                     flush=True,
                 )
 
-    with open(oracle_csv, "w", newline="") as f_oracle:
-        cols = [
-            "sid", "stage_ord",
-            "base_brain_l1", "cal_brain_l1", "oracle_brain_l1",
-            "base_hi_l1", "cal_hi_l1", "oracle_hi_l1",
-            "oracle_improve_brain", "oracle_improve_hi",
-            "mean_abs_res_cal", "mean_abs_res_dis", "mean_a",
-        ]
-        writer = csv.DictWriter(f_oracle, fieldnames=cols)
-        writer.writeheader()
-        for row in oracle_rows:
-            writer.writerow({c: row.get(c, "") for c in cols})
+    _write_oracle_metrics(
+        csv_path=oracle_csv,
+        split_name="train",
+        sids=train_sids,
+        ds=ds,
+        sid_to_idx=sid_to_idx,
+        cache_dir=args.cache_dir,
+        B_cal=B_cal,
+        B_dis=B_dis,
+        ridge=float(args.ridge),
+        fit_iters=int(args.fit_iters),
+        hi_q=float(args.hi_q),
+    )
+    _write_oracle_metrics(
+        csv_path=val_oracle_csv,
+        split_name="val",
+        sids=val_sids,
+        ds=ds,
+        sid_to_idx=sid_to_idx,
+        cache_dir=args.cache_dir,
+        B_cal=B_cal,
+        B_dis=B_dis,
+        ridge=float(args.ridge),
+        fit_iters=int(args.fit_iters),
+        hi_q=float(args.hi_q),
+    )
+    _write_oracle_metrics(
+        csv_path=test_oracle_csv,
+        split_name="test",
+        sids=test_sids,
+        ds=ds,
+        sid_to_idx=sid_to_idx,
+        cache_dir=args.cache_dir,
+        B_cal=B_cal,
+        B_dis=B_dis,
+        ridge=float(args.ridge),
+        fit_iters=int(args.fit_iters),
+        hi_q=float(args.hi_q),
+    )
 
     manifest = {
         "root_dir": args.root_dir,
@@ -459,10 +563,16 @@ def main():
         "resize_to": RESIZE_TO,
         "shape": shape,
         "n_train": n,
+        "n_validation": len(val_sids),
+        "n_test": len(test_sids),
         "k_cal": int(args.k_cal),
         "k_dis": int(args.k_dis),
         "calibration_basis": "mean_residual_plus_signed_pca",
+        "cal_stage_max": int(args.cal_stage_max),
+        "calibration_pool_sids": [train_sids[i] for i in cal_indices],
+        "calibration_pool_stages": [int(stages[i]) for i in cal_indices],
         "disease_basis": "nonnegative_nmf",
+        "dis_stage_min": int(args.dis_stage_min),
         "disease_pool_sids": disease_sids,
         "disease_pool_stages": disease_stages,
         "disease_target_mode": args.disease_target_mode,
@@ -479,14 +589,17 @@ def main():
             "B_dis": os.path.join(args.basis_dir, "B_dis.npy"),
             "coeff_targets": coeff_csv,
             "oracle_metrics": oracle_csv,
+            "val_oracle_metrics": val_oracle_csv,
+            "test_oracle_metrics": test_oracle_csv,
         },
     }
     with open(os.path.join(args.basis_dir, "basis_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    _summarize_oracle(oracle_rows)
     print(f"[cdrm-basis] coeff_csv={coeff_csv}", flush=True)
     print(f"[cdrm-basis] oracle_csv={oracle_csv}", flush=True)
+    print(f"[cdrm-basis] val_oracle_csv={val_oracle_csv}", flush=True)
+    print(f"[cdrm-basis] test_oracle_csv={test_oracle_csv}", flush=True)
     print(f"[cdrm-basis] manifest={os.path.join(args.basis_dir, 'basis_manifest.json')}", flush=True)
     print(f"[cdrm-basis] total_sec={time.time() - t0:.1f}", flush=True)
 

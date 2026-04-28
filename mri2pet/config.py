@@ -177,6 +177,8 @@ CDRM_STAT_DIM = _env_int("CDRM_STAT_DIM", 16)
 CDRM_DISEASE_TARGET_MODE = os.environ.get("CDRM_DISEASE_TARGET_MODE", "abs_plus_contrast")
 CDRM_CONTRAST_LAMBDA = _env_float("CDRM_CONTRAST_LAMBDA", 1.0)
 CDRM_CONTRAST_REF = os.environ.get("CDRM_CONTRAST_REF", "brain_minus_cortex")
+CDRM_CAL_STAGE_MAX = _env_int("CDRM_CAL_STAGE_MAX", 2)
+CDRM_DIS_STAGE_MIN = _env_int("CDRM_DIS_STAGE_MIN", 3)
 
 # =========================
 # Residual-Spatial-Prior settings
