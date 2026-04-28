@@ -21,10 +21,10 @@ conda activate pasta
 export PYTHONUNBUFFERED=1
 
 # Pick the fold. This assumes PET_base cache has already been generated.
-export FOLD_INDEX=4
+export FOLD_INDEX=2
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
-export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold5_res128"
-export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold5_res128_lowcal2_kdis10_c2"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold3_res128"
+export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold3_res128_lowcal2_kdis10_c2"
 
 mkdir -p "${CDRM_BASIS_DIR}"
 
