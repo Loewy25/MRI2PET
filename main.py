@@ -480,6 +480,9 @@ if __name__ == "__main__":
         if D is not None:
             wandb.watch(D, log="gradients", log_freq=50)
 
+    curves_path = os.path.join(OUT_RUN, "loss_curves.png")
+    csv_path = os.path.join(OUT_RUN, "training_log.csv")
+
     # Train, unless this is a checkpoint-only evaluation rerun.
     if EVAL_ONLY:
         if EVAL_CKPT:
@@ -530,11 +533,9 @@ if __name__ == "__main__":
             )
 
         # Save curves & CSV
-        curves_path = os.path.join(OUT_RUN, "loss_curves.png")
         save_loss_curves(out["history"], curves_path)
         print(f"Saved loss curves to: {curves_path}")
 
-        csv_path = os.path.join(OUT_RUN, "training_log.csv")
         save_history_csv(out["history"], csv_path)
         print(f"Saved training log CSV to: {csv_path}")
 

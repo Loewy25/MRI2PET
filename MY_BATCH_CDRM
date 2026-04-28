@@ -22,6 +22,11 @@ export PYTHONUNBUFFERED=1
 if [[ -f "${HOME}/.wandb_api_key" ]]; then
   export WANDB_API_KEY="$(cat "${HOME}/.wandb_api_key")"
 fi
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+  echo "[ERROR] WANDB_API_KEY is not set. Create ~/.wandb_api_key or export WANDB_API_KEY before sbatch." >&2
+  exit 1
+fi
+export WANDB_MODE=online
 export WANDB__SERVICE_WAIT=300
 # Create ~/.wandb_api_key once on the cluster, or export WANDB_API_KEY before sbatch.
 
