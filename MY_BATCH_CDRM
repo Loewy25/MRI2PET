@@ -31,21 +31,21 @@ export WANDB_MODE=online
 export WANDB__SERVICE_WAIT=300
 # Create ~/.wandb_api_key once on the cluster, or export WANDB_API_KEY before sbatch.
 
-export RUN_NAME="2025_cdrm_gate_fold3_lowcal2_kdis10_c2_os5"
-export FOLD_INDEX=2
+export RUN_NAME="2025_cdrm_gate_fold2_lowcal2_kdis10_c2_os5"
+export FOLD_INDEX=1
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 
 export MODEL_VARIANT="residual_manifold"
 
 # Existing baseline cache from the diffusion workflow.
 export USE_BASELINE_CACHE=1
-export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold3_res128"
+export BASELINE_CACHE_DIR="/scratch/l.peiwang/pet_base_cache/fold2_res128"
 
 # Pretrained baseline Generator for the T1 feature extractor.
-export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold3_os5/checkpoints/best_G.pth"
+export BASE_PRETRAIN_CKPT="/home/l.peiwang/MRI2PET/2025baseline_flair_fold2_os5/checkpoints/best_G.pth"
 
 # Built by MY_BATCH_CDRM_BASIS.
-export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold3_res128_lowcal2_kdis10_c2"
+export CDRM_BASIS_DIR="/scratch/l.peiwang/cdrm_basis/fold2_res128_lowcal2_kdis10_c2"
 export CDRM_COEFF_CSV="${CDRM_BASIS_DIR}/coeff_targets.csv"
 
 export CDRM_K_CAL=6
