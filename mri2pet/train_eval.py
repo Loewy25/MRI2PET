@@ -1809,8 +1809,9 @@ def train_residual_manifold(
         "val_stage3_recon": [], "val_stage3_roi": [],
         "val_stage3_base_recon": [], "val_stage3_base_roi": [],
         "val_stage3_improve_recon": [], "val_stage3_improve_roi": [],
-        "mean_abs_res_cal": [], "mean_abs_res_dis": [],
+        "mean_abs_res_cal": [], "mean_abs_res_dis": [], "mean_abs_res_dis_raw": [],
         "mean_a_low_stage": [], "mean_a_high_stage": [],
+        "mean_gate_cortex": [], "mean_gate_low_stage": [], "mean_gate_high_stage": [],
     }
 
     total_train_batches = len(train_loader) if hasattr(train_loader, "__len__") else None
@@ -1967,7 +1968,9 @@ def train_residual_manifold(
         val_base_recon_epoch = val_base_roi_epoch = None
         val_improve_recon_epoch = val_improve_roi_epoch = None
         mean_abs_res_cal_epoch = mean_abs_res_dis_epoch = None
+        mean_abs_res_dis_raw_epoch = None
         mean_a_low_epoch = mean_a_high_epoch = None
+        mean_gate_cortex_epoch = mean_gate_low_epoch = mean_gate_high_epoch = None
         val_sec_epoch = None
 
         if val_loader is not None:
@@ -1975,8 +1978,9 @@ def train_residual_manifold(
             val_t0 = time.time()
             val_recon_sum = val_roi_sum = 0.0
             val_base_recon_sum = val_base_roi_sum = 0.0
-            res_cal_sum = res_dis_sum = 0.0
+            res_cal_sum = res_dis_sum = res_dis_raw_sum = 0.0
             mean_a_low_vals, mean_a_high_vals = [], []
+            gate_cortex_vals, gate_low_vals, gate_high_vals = [], [], []
             stage_stats = {
                 s: {
                     "n": 0,
@@ -2028,6 +2032,23 @@ def train_residual_manifold(
                     res_cal_sum += float((aux["res_cal"].float().abs() * brain_f).sum().item() / den.item())
                     res_dis_sum += float((aux["res_dis"].float().abs() * brain_f).sum().item() / den.item())
                     stages = _stage_list(metas)
+                    res_dis_raw = aux.get("res_dis_raw", aux["res_dis"]).float()
+                    res_dis_raw_sum += float((res_dis_raw.abs() * brain_f).sum().item() / den.item())
+                    gate = aux.get("disease_gate", None)
+                    if gate is not None:
+                        gate_f = gate.float()
+                        cortex_f = cortex5.float()
+                        for b_idx, st in enumerate(stages):
+                            cortex_b = cortex_f[b_idx:b_idx + 1]
+                            cortex_den = cortex_b.sum().clamp_min(1.0)
+                            gate_ctx_mean = float(
+                                (gate_f[b_idx:b_idx + 1] * cortex_b).sum().item() / cortex_den.item()
+                            )
+                            gate_cortex_vals.append(gate_ctx_mean)
+                            if st in (0, 1):
+                                gate_low_vals.append(gate_ctx_mean)
+                            if st >= 3:
+                                gate_high_vals.append(gate_ctx_mean)
                     a_mean = aux["a_hat"].float().mean(dim=1).detach().cpu().numpy()
                     for b_idx, (st, av) in enumerate(zip(stages, a_mean)):
                         if st in (0, 1):
@@ -2066,8 +2087,12 @@ def train_residual_manifold(
             val_score_epoch = val_recon_epoch + float(VAL_ROI_WEIGHT) * val_roi_epoch
             mean_abs_res_cal_epoch = res_cal_sum / vb
             mean_abs_res_dis_epoch = res_dis_sum / vb
+            mean_abs_res_dis_raw_epoch = res_dis_raw_sum / vb
             mean_a_low_epoch = float(np.mean(mean_a_low_vals)) if mean_a_low_vals else float("nan")
             mean_a_high_epoch = float(np.mean(mean_a_high_vals)) if mean_a_high_vals else float("nan")
+            mean_gate_cortex_epoch = float(np.mean(gate_cortex_vals)) if gate_cortex_vals else float("nan")
+            mean_gate_low_epoch = float(np.mean(gate_low_vals)) if gate_low_vals else float("nan")
+            mean_gate_high_epoch = float(np.mean(gate_high_vals)) if gate_high_vals else float("nan")
             val_sec_epoch = time.time() - val_t0
 
             stage_epoch: Dict[int, Dict[str, float]] = {}
@@ -2113,8 +2138,12 @@ def train_residual_manifold(
                 hist[f"val_stage{st}_improve_roi"].append(stage_epoch[st]["improve_roi"])
             hist["mean_abs_res_cal"].append(mean_abs_res_cal_epoch)
             hist["mean_abs_res_dis"].append(mean_abs_res_dis_epoch)
+            hist["mean_abs_res_dis_raw"].append(mean_abs_res_dis_raw_epoch)
             hist["mean_a_low_stage"].append(mean_a_low_epoch)
             hist["mean_a_high_stage"].append(mean_a_high_epoch)
+            hist["mean_gate_cortex"].append(mean_gate_cortex_epoch)
+            hist["mean_gate_low_stage"].append(mean_gate_low_epoch)
+            hist["mean_gate_high_stage"].append(mean_gate_high_epoch)
 
             scheduler.step(val_score_epoch)
             if val_score_epoch < best_val:
@@ -2137,8 +2166,11 @@ def train_residual_manifold(
                     f"improve_recon={val_improve_recon_epoch:.4f} improve_roi={val_improve_roi_epoch:.4f} "
                     f"stage0_roi={stage_epoch[0]['roi']:.4f} stage0_imp_roi={stage_epoch[0]['improve_roi']:.4f} "
                     f"stage3_roi={stage_epoch[3]['roi']:.4f} stage3_imp_roi={stage_epoch[3]['improve_roi']:.4f} "
-                    f"|res_cal|={mean_abs_res_cal_epoch:.5f} |res_dis|={mean_abs_res_dis_epoch:.5f} "
+                    f"|res_cal|={mean_abs_res_cal_epoch:.5f} "
+                    f"|res_dis_raw|={mean_abs_res_dis_raw_epoch:.5f} |res_dis|={mean_abs_res_dis_epoch:.5f} "
                     f"a_low={mean_a_low_epoch:.5f} a_high={mean_a_high_epoch:.5f} "
+                    f"gate_ctx={mean_gate_cortex_epoch:.3f} "
+                    f"gate_low={mean_gate_low_epoch:.3f} gate_high={mean_gate_high_epoch:.3f} "
                     f"best={best_val:.4f} patience={patience_counter}/{EARLY_STOP_PATIENCE} "
                     f"epoch_sec={time.time() - t0:.1f}",
                     flush=True,
@@ -2183,8 +2215,12 @@ def train_residual_manifold(
                     "val/improve_roi": val_improve_roi_epoch,
                     "val/mean_abs_res_cal": mean_abs_res_cal_epoch,
                     "val/mean_abs_res_dis": mean_abs_res_dis_epoch,
+                    "val/mean_abs_res_dis_raw": mean_abs_res_dis_raw_epoch,
                     "val/mean_a_low_stage": mean_a_low_epoch,
                     "val/mean_a_high_stage": mean_a_high_epoch,
+                    "val/mean_gate_cortex": mean_gate_cortex_epoch,
+                    "val/mean_gate_low_stage": mean_gate_low_epoch,
+                    "val/mean_gate_high_stage": mean_gate_high_epoch,
                     "time/val_sec": val_sec_epoch,
                 })
                 for st in (0, 3):
@@ -2766,7 +2802,8 @@ def evaluate_and_save_residual_manifold(
 
     sids, ssim_list, psnr_list, mse_list, mmd_list = [], [], [], [], []
     base_improve_list, roi_improve_list = [], []
-    mean_abs_res_cal_list, mean_abs_res_dis_list = [], []
+    mean_abs_res_cal_list, mean_abs_res_dis_list, mean_abs_res_dis_raw_list = [], [], []
+    mean_disease_gate_cortex_list = []
     coeff_rows = []
     run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
 
@@ -2817,6 +2854,8 @@ def evaluate_and_save_residual_manifold(
         pet_base5_f = pet_base5.float()
         res_cal_t = aux["res_cal"].float()
         res_dis_t = aux["res_dis"].float()
+        res_dis_raw_t = aux.get("res_dis_raw", res_dis_t).float()
+        disease_gate_t = aux.get("disease_gate", torch.ones_like(res_dis_t)).float()
         total_res_t = aux["res_total"].float()
 
         ssim_val = ssim3d_masked(fake_t, pet5_f, brain_f, data_range=data_range).item()
@@ -2837,6 +2876,11 @@ def evaluate_and_save_residual_manifold(
         brain_den = brain_f.sum().clamp_min(1.0)
         mean_abs_res_cal_list.append(float((res_cal_t.abs() * brain_f).sum().item() / brain_den.item()))
         mean_abs_res_dis_list.append(float((res_dis_t.abs() * brain_f).sum().item() / brain_den.item()))
+        mean_abs_res_dis_raw_list.append(float((res_dis_raw_t.abs() * brain_f).sum().item() / brain_den.item()))
+        cortex_den = cortex_f.sum().clamp_min(1.0)
+        mean_disease_gate_cortex_list.append(
+            float((disease_gate_t * cortex_f).sum().item() / cortex_den.item())
+        )
 
         coeff_row = {"sid": sid, "stage_ord": int(meta.get("stage_ord", -1))}
         c_np = aux["c_hat"].squeeze(0).detach().float().cpu().numpy()
@@ -2851,6 +2895,8 @@ def evaluate_and_save_residual_manifold(
         base_np = pet_base5_f.squeeze(0).squeeze(0).cpu().numpy()
         res_cal_np = res_cal_t.squeeze(0).squeeze(0).cpu().numpy()
         res_dis_np = res_dis_t.squeeze(0).squeeze(0).cpu().numpy()
+        res_dis_raw_np = res_dis_raw_t.squeeze(0).squeeze(0).cpu().numpy()
+        disease_gate_np = disease_gate_t.squeeze(0).squeeze(0).cpu().numpy()
         total_res_np = total_res_t.squeeze(0).squeeze(0).cpu().numpy()
         err_np = np.abs(fake_np - pet_np)
 
@@ -2866,6 +2912,8 @@ def evaluate_and_save_residual_manifold(
             base_np = nd_zoom(base_np, zf, order=1)
             res_cal_np = nd_zoom(res_cal_np, zf, order=1)
             res_dis_np = nd_zoom(res_dis_np, zf, order=1)
+            res_dis_raw_np = nd_zoom(res_dis_raw_np, zf, order=1)
+            disease_gate_np = nd_zoom(disease_gate_np, zf, order=1)
             total_res_np = nd_zoom(total_res_np, zf, order=1)
             err_np = nd_zoom(err_np, zf, order=1)
             affine_to_use = meta.get("t1_affine", np.eye(4))
@@ -2888,6 +2936,8 @@ def evaluate_and_save_residual_manifold(
         _save_nifti(base_np, affine_to_use, os.path.join(subdir, "PET_base.nii.gz"))
         _save_nifti(res_cal_np, affine_to_use, os.path.join(subdir, "PET_res_cal.nii.gz"))
         _save_nifti(res_dis_np, affine_to_use, os.path.join(subdir, "PET_res_dis.nii.gz"))
+        _save_nifti(res_dis_raw_np, affine_to_use, os.path.join(subdir, "PET_res_dis_raw.nii.gz"))
+        _save_nifti(disease_gate_np, affine_to_use, os.path.join(subdir, "PET_disease_gate.nii.gz"))
         _save_nifti(total_res_np, affine_to_use, os.path.join(subdir, "PET_total_residual.nii.gz"))
         _save_nifti(err_np, affine_to_use, os.path.join(subdir, "PET_abs_error.nii.gz"))
 
@@ -2895,7 +2945,9 @@ def evaluate_and_save_residual_manifold(
             f"[CDRM][test] {sid} done SSIM={ssim_val:.4f} PSNR={psnr_val:.2f} "
             f"MSE={mse_val:.5f} MMD={mmd_val:.5f} "
             f"base_improve={base_improve_list[-1]:.5f} roi_improve={roi_improve_list[-1]:.5f} "
-            f"|cal|={mean_abs_res_cal_list[-1]:.5f} |dis|={mean_abs_res_dis_list[-1]:.5f} "
+            f"|cal|={mean_abs_res_cal_list[-1]:.5f} "
+            f"|dis_raw|={mean_abs_res_dis_raw_list[-1]:.5f} |dis|={mean_abs_res_dis_list[-1]:.5f} "
+            f"gate_ctx={mean_disease_gate_cortex_list[-1]:.3f} "
             f"sec={time.time() - subj_t0:.1f}",
             flush=True,
         )
@@ -2940,16 +2992,29 @@ def evaluate_and_save_residual_manifold(
         w = csv.writer(f)
         w.writerow([
             "sid", "base_vs_fake_recon_improvement", "base_vs_fake_roi_improvement",
-            "mean_abs_res_cal", "mean_abs_res_dis",
+            "mean_abs_res_cal", "mean_abs_res_dis_raw", "mean_abs_res_dis",
+            "mean_disease_gate_cortex",
         ])
-        for row in zip(sids, base_improve_list, roi_improve_list, mean_abs_res_cal_list, mean_abs_res_dis_list):
+        for row in zip(
+            sids,
+            base_improve_list,
+            roi_improve_list,
+            mean_abs_res_cal_list,
+            mean_abs_res_dis_raw_list,
+            mean_abs_res_dis_list,
+            mean_disease_gate_cortex_list,
+        ):
             w.writerow(row)
 
     extra = {
         "base_vs_fake_recon_improvement": float(np.mean(base_improve_list)) if base_improve_list else float("nan"),
         "base_vs_fake_roi_improvement": float(np.mean(roi_improve_list)) if roi_improve_list else float("nan"),
         "mean_abs_res_cal": float(np.mean(mean_abs_res_cal_list)) if mean_abs_res_cal_list else float("nan"),
+        "mean_abs_res_dis_raw": float(np.mean(mean_abs_res_dis_raw_list)) if mean_abs_res_dis_raw_list else float("nan"),
         "mean_abs_res_dis": float(np.mean(mean_abs_res_dis_list)) if mean_abs_res_dis_list else float("nan"),
+        "mean_disease_gate_cortex": (
+            float(np.mean(mean_disease_gate_cortex_list)) if mean_disease_gate_cortex_list else float("nan")
+        ),
         "coefficients_csv": coeff_csv,
         "per_subject_manifold_csv": manifold_csv,
     }

@@ -26,6 +26,7 @@ from mri2pet.config import (
     CDRM_T1_FREEZE, CDRM_STAT_DIM,
     CDRM_DISEASE_TARGET_MODE, CDRM_CONTRAST_LAMBDA, CDRM_CONTRAST_REF,
     CDRM_CAL_STAGE_MAX, CDRM_DIS_STAGE_MIN,
+    CDRM_USE_SPATIAL_GATE, CDRM_GATE_LOWRES, CDRM_GATE_COND_CH,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
@@ -166,6 +167,9 @@ def init_wandb_run():
             "cdrm_contrast_ref": CDRM_CONTRAST_REF,
             "cdrm_cal_stage_max": CDRM_CAL_STAGE_MAX,
             "cdrm_dis_stage_min": CDRM_DIS_STAGE_MIN,
+            "cdrm_use_spatial_gate": CDRM_USE_SPATIAL_GATE,
+            "cdrm_gate_lowres": CDRM_GATE_LOWRES,
+            "cdrm_gate_cond_ch": CDRM_GATE_COND_CH,
         })
 
     try:
@@ -281,6 +285,10 @@ if __name__ == "__main__":
             f"contrast_lambda={CDRM_CONTRAST_LAMBDA} contrast_ref={CDRM_CONTRAST_REF}"
         )
         print(f"  basis pools: calibration stage<={CDRM_CAL_STAGE_MAX} disease stage>={CDRM_DIS_STAGE_MIN}")
+        print(
+            f"  spatial_gate={CDRM_USE_SPATIAL_GATE} "
+            f"gate_lowres={CDRM_GATE_LOWRES} gate_cond_ch={CDRM_GATE_COND_CH}"
+        )
         if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
             raise RuntimeError("MODEL_VARIANT=residual_manifold requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
         if not (CDRM_BASIS_DIR and os.path.isdir(CDRM_BASIS_DIR)):
@@ -583,7 +591,9 @@ if __name__ == "__main__":
             "base_vs_fake_recon_improvement",
             "base_vs_fake_roi_improvement",
             "mean_abs_res_cal",
+            "mean_abs_res_dis_raw",
             "mean_abs_res_dis",
+            "mean_disease_gate_cortex",
         ]:
             if key in metrics:
                 test_log[f"test/{key}"] = metrics[key]

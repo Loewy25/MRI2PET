@@ -31,7 +31,7 @@ export WANDB_MODE=online
 export WANDB__SERVICE_WAIT=300
 # Create ~/.wandb_api_key once on the cluster, or export WANDB_API_KEY before sbatch.
 
-export RUN_NAME="2025_cdrm_fold1_lowcal3_kdis10_c2_os65"
+export RUN_NAME="2025_cdrm_gate_fold1_lowcal3_kdis10_c2_os65"
 export FOLD_INDEX=0
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 
@@ -64,6 +64,9 @@ export CDRM_CONTRAST_LAMBDA=2.0
 export CDRM_CONTRAST_REF="brain_minus_cortex"
 export CDRM_CAL_STAGE_MAX=2
 export CDRM_DIS_STAGE_MIN=3
+export CDRM_USE_SPATIAL_GATE=1
+export CDRM_GATE_LOWRES=32
+export CDRM_GATE_COND_CH=8
 
 export EPOCHS=150
 export BATCH_SIZE=1

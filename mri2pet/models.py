@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .config import (
+    CDRM_GATE_COND_CH,
+    CDRM_GATE_LOWRES,
+    CDRM_USE_SPATIAL_GATE,
     DETACH_BASE_LATENT_FOR_PRIOR,
     DIFF_EMB_DIM,
     DIFF_UNET_BASE_CH,
@@ -703,6 +706,66 @@ class CompactEncoder3D(nn.Module):
         return self.net(x)
 
 
+class SpatialDiseaseGate3D(nn.Module):
+    """
+    Low-resolution spatial gate for the disease residual.
+
+    The output range is [0, 2]. The last conv is zero-initialized, so the
+    initial gate is 1 and the model starts as the original CDRM.
+    """
+    def __init__(self, cond_dim: int, cond_ch: int = 8, lowres: int = 32):
+        super().__init__()
+        self.cond_ch = int(cond_ch)
+        self.lowres = int(lowres)
+
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, self.cond_ch),
+            nn.SiLU(inplace=True),
+        )
+
+        in_ch = 4 + self.cond_ch  # T1, FLAIR, PET_base, cortex_mask, condition map
+        self.net = nn.Sequential(
+            nn.Conv3d(in_ch, 16, kernel_size=3, padding=1, bias=True),
+            _group_norm(16),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(16, 16, kernel_size=3, padding=1, bias=True),
+            _group_norm(16),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(16, 1, kernel_size=3, padding=1, bias=True),
+        )
+
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(
+        self,
+        t1: torch.Tensor,
+        flair: torch.Tensor,
+        pet_base: torch.Tensor,
+        brain_mask: torch.Tensor,
+        cortex_mask: torch.Tensor,
+        z: torch.Tensor,
+    ) -> torch.Tensor:
+        bsz = t1.size(0)
+        target_shape = tuple(int(s) for s in t1.shape[2:])
+        low_shape = tuple(max(1, min(self.lowres, s)) for s in target_shape)
+
+        t1_l = F.interpolate(t1.float(), size=low_shape, mode="trilinear", align_corners=False)
+        flair_l = F.interpolate(flair.float(), size=low_shape, mode="trilinear", align_corners=False)
+        pet_l = F.interpolate(pet_base.float(), size=low_shape, mode="trilinear", align_corners=False)
+        cortex_l = F.interpolate(cortex_mask.float(), size=low_shape, mode="nearest")
+
+        cond = self.cond_proj(z.float()).view(bsz, self.cond_ch, 1, 1, 1)
+        cond = cond.expand(bsz, self.cond_ch, *low_shape)
+
+        x = torch.cat([t1_l, flair_l, pet_l, cortex_l, cond], dim=1)
+        logits_l = self.net(x)
+        logits = F.interpolate(logits_l, size=target_shape, mode="trilinear", align_corners=False)
+
+        gate = 2.0 * torch.sigmoid(logits)
+        return gate * brain_mask.float()
+
+
 class ResidualManifoldNet(nn.Module):
     def __init__(
         self,
@@ -774,6 +837,15 @@ class ResidualManifoldNet(nn.Module):
         )
         self.c_head = nn.Linear(z_dim, self.k_cal)
         self.a_head = nn.Linear(z_dim, self.k_dis)
+        self.use_spatial_gate = bool(CDRM_USE_SPATIAL_GATE)
+        if self.use_spatial_gate:
+            self.disease_gate = SpatialDiseaseGate3D(
+                cond_dim=z_dim,
+                cond_ch=CDRM_GATE_COND_CH,
+                lowres=CDRM_GATE_LOWRES,
+            )
+        else:
+            self.disease_gate = None
 
     @staticmethod
     def _masked_mean_std(x: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -854,8 +926,22 @@ class ResidualManifoldNet(nn.Module):
         c_hat = self.c_head(z)
         a_hat = F.softplus(self.a_head(z))
         res_cal = torch.einsum("bk,kcdhw->bcdhw", c_hat.float(), self.B_cal.float()).to(dtype=pet_base.dtype)
-        res_dis = torch.einsum("bk,kcdhw->bcdhw", a_hat.float(), self.B_dis.float()).to(dtype=pet_base.dtype)
+        res_dis_raw = torch.einsum("bk,kcdhw->bcdhw", a_hat.float(), self.B_dis.float()).to(dtype=pet_base.dtype)
         brain = brain_mask.to(device=pet_base.device, dtype=pet_base.dtype)
+
+        if self.use_spatial_gate and self.disease_gate is not None:
+            disease_gate = self.disease_gate(
+                t1=t1,
+                flair=flair,
+                pet_base=pet_base,
+                brain_mask=brain_mask,
+                cortex_mask=cortex_mask,
+                z=z,
+            ).to(dtype=pet_base.dtype)
+        else:
+            disease_gate = torch.ones_like(res_dis_raw, dtype=pet_base.dtype, device=pet_base.device) * brain
+
+        res_dis = res_dis_raw * disease_gate
         pet_fake = (pet_base + res_cal + res_dis) * brain
 
         if not return_aux:
@@ -864,7 +950,9 @@ class ResidualManifoldNet(nn.Module):
             "pet_base": pet_base,
             "res_cal": res_cal * brain,
             "res_dis": res_dis * brain,
+            "res_dis_raw": res_dis_raw * brain,
             "res_total": (res_cal + res_dis) * brain,
+            "disease_gate": disease_gate * brain,
             "c_hat": c_hat,
             "a_hat": a_hat,
             "stats": stats,

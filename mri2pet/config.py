@@ -181,6 +181,13 @@ CDRM_CAL_STAGE_MAX = _env_int("CDRM_CAL_STAGE_MAX", 2)
 CDRM_DIS_STAGE_MIN = _env_int("CDRM_DIS_STAGE_MIN", 3)
 
 # =========================
+# CDRM spatial disease gate
+# =========================
+CDRM_USE_SPATIAL_GATE = _env_bool("CDRM_USE_SPATIAL_GATE", False)
+CDRM_GATE_LOWRES = _env_int("CDRM_GATE_LOWRES", 32)
+CDRM_GATE_COND_CH = _env_int("CDRM_GATE_COND_CH", 8)
+
+# =========================
 # Residual-Spatial-Prior settings
 # =========================
 FREEZE_BASE_EPOCHS = _env_int("FREEZE_BASE_EPOCHS", 10)
