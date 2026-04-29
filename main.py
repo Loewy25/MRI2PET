@@ -21,12 +21,13 @@ from mri2pet.config import (
     DIFF_VAL_SAMPLE_STEPS, DIFF_TEST_SAMPLE_STEPS, DIFF_NUM_SAMPLES,
     CDRM_BASIS_DIR, CDRM_COEFF_CSV, CDRM_K_CAL, CDRM_K_DIS,
     CDRM_LR, CDRM_WEIGHT_DECAY, CDRM_LAMBDA_ROI,
-    CDRM_LAMBDA_C_COEF, CDRM_LAMBDA_A_COEF,
+    CDRM_LAMBDA_C_COEF, CDRM_LAMBDA_A_COEF, CDRM_LAMBDA_DISEASE,
+    CDRM_CAL_WARMUP_EPOCHS, CDRM_DIS_WARMUP_EPOCHS, CDRM_USE_DISEASE_SUPERVISION,
     CDRM_A_STAGE_WEIGHT_2, CDRM_A_STAGE_WEIGHT_3,
     CDRM_T1_FREEZE, CDRM_STAT_DIM,
     CDRM_DISEASE_TARGET_MODE, CDRM_CONTRAST_LAMBDA, CDRM_CONTRAST_REF,
     CDRM_CAL_STAGE_MAX, CDRM_DIS_STAGE_MIN,
-    CDRM_USE_SPATIAL_GATE, CDRM_GATE_LOWRES, CDRM_GATE_COND_CH,
+    CDRM_USE_SPATIAL_GATE, CDRM_GATE_LOWRES, CDRM_GATE_COND_CH, CDRM_GATE_SCALE,
     FREEZE_BASE_EPOCHS, BASE_LR_MULT, DETACH_BASE_LATENT_FOR_PRIOR,
     LAMBDA_BRAAK, LAMBDA_DELTA_SUP,
     CLINICAL_DIM, PROMPT_HIDDEN_DIM,
@@ -158,6 +159,10 @@ def init_wandb_run():
             "cdrm_lambda_roi": CDRM_LAMBDA_ROI,
             "cdrm_lambda_c_coef": CDRM_LAMBDA_C_COEF,
             "cdrm_lambda_a_coef": CDRM_LAMBDA_A_COEF,
+            "cdrm_lambda_disease": CDRM_LAMBDA_DISEASE,
+            "cdrm_use_disease_supervision": CDRM_USE_DISEASE_SUPERVISION,
+            "cdrm_cal_warmup_epochs": CDRM_CAL_WARMUP_EPOCHS,
+            "cdrm_dis_warmup_epochs": CDRM_DIS_WARMUP_EPOCHS,
             "cdrm_a_stage_weight_2": CDRM_A_STAGE_WEIGHT_2,
             "cdrm_a_stage_weight_3": CDRM_A_STAGE_WEIGHT_3,
             "cdrm_t1_freeze": CDRM_T1_FREEZE,
@@ -170,6 +175,7 @@ def init_wandb_run():
             "cdrm_use_spatial_gate": CDRM_USE_SPATIAL_GATE,
             "cdrm_gate_lowres": CDRM_GATE_LOWRES,
             "cdrm_gate_cond_ch": CDRM_GATE_COND_CH,
+            "cdrm_gate_scale": CDRM_GATE_SCALE,
         })
 
     try:
@@ -273,8 +279,12 @@ if __name__ == "__main__":
         print(f"  K_cal={CDRM_K_CAL} K_dis={CDRM_K_DIS} lr={CDRM_LR} wd={CDRM_WEIGHT_DECAY}")
         print(
             f"  lambdas roi={CDRM_LAMBDA_ROI} c_coef={CDRM_LAMBDA_C_COEF} "
-            f"a_coef={CDRM_LAMBDA_A_COEF} "
+            f"a_coef={CDRM_LAMBDA_A_COEF} disease={CDRM_LAMBDA_DISEASE} "
             f"t1_freeze={CDRM_T1_FREEZE} stat_dim={CDRM_STAT_DIM}"
+        )
+        print(
+            f"  disease_supervision={CDRM_USE_DISEASE_SUPERVISION} "
+            f"cal_warmup={CDRM_CAL_WARMUP_EPOCHS} dis_warmup={CDRM_DIS_WARMUP_EPOCHS}"
         )
         print(
             f"  disease coefficient stage weights: "
@@ -287,7 +297,8 @@ if __name__ == "__main__":
         print(f"  basis pools: calibration stage<={CDRM_CAL_STAGE_MAX} disease stage>={CDRM_DIS_STAGE_MIN}")
         print(
             f"  spatial_gate={CDRM_USE_SPATIAL_GATE} "
-            f"gate_lowres={CDRM_GATE_LOWRES} gate_cond_ch={CDRM_GATE_COND_CH}"
+            f"gate_lowres={CDRM_GATE_LOWRES} gate_cond_ch={CDRM_GATE_COND_CH} "
+            f"gate_scale={CDRM_GATE_SCALE}"
         )
         if not (USE_BASELINE_CACHE and BASELINE_CACHE_DIR):
             raise RuntimeError("MODEL_VARIANT=residual_manifold requires USE_BASELINE_CACHE=1 and BASELINE_CACHE_DIR")
@@ -594,6 +605,12 @@ if __name__ == "__main__":
             "mean_abs_res_dis_raw",
             "mean_abs_res_dis",
             "mean_disease_gate_cortex",
+            "disease_mae_B12",
+            "disease_mae_B34",
+            "disease_mae_B56",
+            "disease_corr_B12",
+            "disease_corr_B34",
+            "disease_corr_B56",
         ]:
             if key in metrics:
                 test_log[f"test/{key}"] = metrics[key]

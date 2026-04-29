@@ -11,7 +11,9 @@ from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from .config import (
     CDRM_GATE_COND_CH,
     CDRM_GATE_LOWRES,
+    CDRM_GATE_SCALE,
     CDRM_USE_SPATIAL_GATE,
+    CDRM_USE_DISEASE_SUPERVISION,
     DETACH_BASE_LATENT_FOR_PRIOR,
     DIFF_EMB_DIM,
     DIFF_UNET_BASE_CH,
@@ -710,13 +712,14 @@ class SpatialDiseaseGate3D(nn.Module):
     """
     Low-resolution spatial gate for the disease residual.
 
-    The output range is [0, 2]. The last conv is zero-initialized, so the
+    The output range is [1 - gate_scale, 1 + gate_scale]. The last conv is zero-initialized, so the
     initial gate is 1 and the model starts as the original CDRM.
     """
-    def __init__(self, cond_dim: int, cond_ch: int = 8, lowres: int = 32):
+    def __init__(self, cond_dim: int, cond_ch: int = 8, lowres: int = 32, gate_scale: float = 0.5):
         super().__init__()
         self.cond_ch = int(cond_ch)
         self.lowres = int(lowres)
+        self.gate_scale = float(gate_scale)
 
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, self.cond_ch),
@@ -765,7 +768,7 @@ class SpatialDiseaseGate3D(nn.Module):
             logits_l = self.net(x)
             logits = F.interpolate(logits_l.float(), size=target_shape, mode="trilinear", align_corners=False)
 
-            gate = 2.0 * torch.sigmoid(logits)
+            gate = 1.0 + self.gate_scale * torch.tanh(logits)
             return gate * brain_mask.float()
 
 
@@ -838,17 +841,81 @@ class ResidualManifoldNet(nn.Module):
             nn.LayerNorm(z_dim),
             nn.SiLU(inplace=True),
         )
+        self.use_disease_supervision = bool(CDRM_USE_DISEASE_SUPERVISION)
         self.c_head = nn.Linear(z_dim, self.k_cal)
-        self.a_head = nn.Linear(z_dim, self.k_dis)
+        if self.use_disease_supervision:
+            self.disease_head = nn.Sequential(
+                nn.Linear(z_dim, 128),
+                nn.SiLU(inplace=True),
+                nn.Linear(128, 3),
+            )
+            self.a_head = nn.Sequential(
+                nn.Linear(z_dim + 3, 128),
+                nn.SiLU(inplace=True),
+                nn.Linear(128, self.k_dis),
+            )
+        else:
+            self.disease_head = None
+            self.a_head = nn.Linear(z_dim, self.k_dis)
         self.use_spatial_gate = bool(CDRM_USE_SPATIAL_GATE)
         if self.use_spatial_gate:
             self.disease_gate = SpatialDiseaseGate3D(
                 cond_dim=z_dim,
                 cond_ch=CDRM_GATE_COND_CH,
                 lowres=CDRM_GATE_LOWRES,
+                gate_scale=CDRM_GATE_SCALE,
             )
         else:
             self.disease_gate = None
+
+    @staticmethod
+    def _set_module_trainable(module: Optional[nn.Module], trainable: bool) -> None:
+        if module is None:
+            return
+        for p in module.parameters():
+            p.requires_grad = bool(trainable)
+
+    def set_training_phase(self, phase: str) -> None:
+        """
+        Toggle trainable CDRM components for staged disease-supervised training.
+
+        calibration: train shared encoders/fusion + c_head, disable disease branch updates.
+        disease: freeze shared calibration path, train disease_head/a_head/gate only.
+        joint: train all CDRM heads and compact encoders; respect t1_freeze for the backbone.
+        """
+        phase = str(phase)
+        if not self.use_disease_supervision:
+            phase = "joint"
+
+        shared_modules = [
+            self.t1_proj,
+            self.flair_encoder,
+            self.petbase_encoder,
+            self.clinical_encoder,
+            self.stat_encoder,
+            self.fusion,
+        ]
+        disease_modules = [self.disease_head, self.a_head, self.disease_gate]
+
+        if phase == "calibration":
+            shared_trainable = True
+            c_trainable = True
+            disease_trainable = False
+        elif phase == "disease":
+            shared_trainable = False
+            c_trainable = False
+            disease_trainable = True
+        else:
+            shared_trainable = True
+            c_trainable = True
+            disease_trainable = True
+
+        self._set_module_trainable(self.t1_backbone, shared_trainable and not self.t1_freeze)
+        for module in shared_modules:
+            self._set_module_trainable(module, shared_trainable)
+        self._set_module_trainable(self.c_head, c_trainable)
+        for module in disease_modules:
+            self._set_module_trainable(module, disease_trainable)
 
     @staticmethod
     def _masked_mean_std(x: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -927,7 +994,14 @@ class ResidualManifoldNet(nn.Module):
         z = self.fusion(torch.cat([z_t1, z_flair, z_petbase, z_clinical, z_stats], dim=1))
 
         c_hat = self.c_head(z)
-        a_hat = F.softplus(self.a_head(z))
+        if self.use_disease_supervision and self.disease_head is not None:
+            disease_pred = self.disease_head(z)
+            a_in = torch.cat([z, disease_pred], dim=1)
+            raw_a = self.a_head(a_in)
+        else:
+            disease_pred = torch.zeros(z.size(0), 3, device=z.device, dtype=z.dtype)
+            raw_a = self.a_head(z)
+        a_hat = F.softplus(raw_a)
         res_cal = torch.einsum("bk,kcdhw->bcdhw", c_hat.float(), self.B_cal.float()).to(dtype=pet_base.dtype)
         res_dis_raw = torch.einsum("bk,kcdhw->bcdhw", a_hat.float(), self.B_dis.float()).to(dtype=pet_base.dtype)
         brain = brain_mask.to(device=pet_base.device, dtype=pet_base.dtype)
@@ -958,6 +1032,7 @@ class ResidualManifoldNet(nn.Module):
             "disease_gate": disease_gate * brain,
             "c_hat": c_hat,
             "a_hat": a_hat,
+            "disease_pred": disease_pred,
             "stats": stats,
             "z_fuse": z,
         }
