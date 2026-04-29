@@ -750,20 +750,23 @@ class SpatialDiseaseGate3D(nn.Module):
         target_shape = tuple(int(s) for s in t1.shape[2:])
         low_shape = tuple(max(1, min(self.lowres, s)) for s in target_shape)
 
-        t1_l = F.interpolate(t1.float(), size=low_shape, mode="trilinear", align_corners=False)
-        flair_l = F.interpolate(flair.float(), size=low_shape, mode="trilinear", align_corners=False)
-        pet_l = F.interpolate(pet_base.float(), size=low_shape, mode="trilinear", align_corners=False)
-        cortex_l = F.interpolate(cortex_mask.float(), size=low_shape, mode="nearest")
+        # PyTorch 2.0 CUDA does not support trilinear upsampling for bfloat16.
+        # Keep this small low-res gate in fp32 even when the main model uses AMP.
+        with torch.cuda.amp.autocast(enabled=False):
+            t1_l = F.interpolate(t1.float(), size=low_shape, mode="trilinear", align_corners=False)
+            flair_l = F.interpolate(flair.float(), size=low_shape, mode="trilinear", align_corners=False)
+            pet_l = F.interpolate(pet_base.float(), size=low_shape, mode="trilinear", align_corners=False)
+            cortex_l = F.interpolate(cortex_mask.float(), size=low_shape, mode="nearest")
 
-        cond = self.cond_proj(z.float()).view(bsz, self.cond_ch, 1, 1, 1)
-        cond = cond.expand(bsz, self.cond_ch, *low_shape)
+            cond = self.cond_proj(z.float()).view(bsz, self.cond_ch, 1, 1, 1)
+            cond = cond.expand(bsz, self.cond_ch, *low_shape)
 
-        x = torch.cat([t1_l, flair_l, pet_l, cortex_l, cond], dim=1)
-        logits_l = self.net(x)
-        logits = F.interpolate(logits_l, size=target_shape, mode="trilinear", align_corners=False)
+            x = torch.cat([t1_l, flair_l, pet_l, cortex_l, cond], dim=1)
+            logits_l = self.net(x)
+            logits = F.interpolate(logits_l.float(), size=target_shape, mode="trilinear", align_corners=False)
 
-        gate = 2.0 * torch.sigmoid(logits)
-        return gate * brain_mask.float()
+            gate = 2.0 * torch.sigmoid(logits)
+            return gate * brain_mask.float()
 
 
 class ResidualManifoldNet(nn.Module):
