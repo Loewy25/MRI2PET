@@ -31,7 +31,7 @@ export WANDB_MODE=online
 export WANDB__SERVICE_WAIT=300
 # Create ~/.wandb_api_key once on the cluster, or export WANDB_API_KEY before sbatch.
 
-export RUN_NAME="2025_cdrm_gate_fold1_lowcal3_kdis10_c2_os65"
+export RUN_NAME="2025_cdrm_gate_fold1_lowcal2_kdis10_c2_os65"
 export FOLD_INDEX=0
 export ROOT_DIR="/scratch/l.peiwang/kari_flair_all"
 
