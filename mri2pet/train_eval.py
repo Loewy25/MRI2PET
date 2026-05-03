@@ -26,6 +26,7 @@ from .config import (
     CDRM_COEFF_CSV, CDRM_LR, CDRM_WEIGHT_DECAY,
     CDRM_LAMBDA_ROI, CDRM_LAMBDA_C_COEF, CDRM_LAMBDA_A_COEF,
     CDRM_LAMBDA_DISEASE, CDRM_CAL_WARMUP_EPOCHS, CDRM_DIS_WARMUP_EPOCHS,
+    CDRM_DISEASE_WARMUP_USE_BRAIN_L1, CDRM_JOINT_BRAIN_WEIGHT, CDRM_JOINT_ROI_WEIGHT,
     CDRM_USE_DISEASE_SUPERVISION,
     CDRM_CAL_STAGE_MAX,
     CDRM_A_STAGE_WEIGHT_2, CDRM_A_STAGE_WEIGHT_3,
@@ -115,6 +116,32 @@ def _corr_1d(x: torch.Tensor, y: torch.Tensor) -> float:
     yv = yf - yf.mean()
     den = torch.sqrt((xv.square().sum() * yv.square().sum()).clamp_min(1e-12))
     return float((xv * yv).sum().item() / den.item())
+
+
+def _gate_cortex_stats(gate: torch.Tensor, cortex_mask: torch.Tensor) -> Dict[str, float]:
+    vals = gate.float()[cortex_mask.float() > 0.5]
+    if vals.numel() == 0:
+        return {
+            "mean": float("nan"),
+            "std": float("nan"),
+            "top10": float("nan"),
+            "bottom10": float("nan"),
+            "top_bottom_ratio": float("nan"),
+        }
+    vals = vals.flatten()
+    k = max(1, int(np.ceil(0.10 * int(vals.numel()))))
+    top_vals = torch.topk(vals, k=k, largest=True).values
+    bottom_vals = torch.topk(vals, k=k, largest=False).values
+    top_mean = top_vals.mean()
+    bottom_mean = bottom_vals.mean()
+    ratio = top_mean / bottom_mean.clamp_min(1e-6)
+    return {
+        "mean": float(vals.mean().item()),
+        "std": float(vals.std(unbiased=False).item()) if vals.numel() > 1 else 0.0,
+        "top10": float(top_mean.item()),
+        "bottom10": float(bottom_mean.item()),
+        "top_bottom_ratio": float(ratio.item()),
+    }
 
 
 def _extract_pet_base(metas: List[Dict[str, Any]], device: torch.device) -> Optional[torch.Tensor]:
@@ -1808,20 +1835,26 @@ def train_residual_manifold(
         print(
             f"[CDRM] disease supervision={CDRM_USE_DISEASE_SUPERVISION} "
             f"lambda_disease={CDRM_LAMBDA_DISEASE} "
-            f"cal_warmup={CDRM_CAL_WARMUP_EPOCHS} dis_warmup={CDRM_DIS_WARMUP_EPOCHS}",
+            f"cal_warmup={CDRM_CAL_WARMUP_EPOCHS} dis_warmup={CDRM_DIS_WARMUP_EPOCHS} "
+            f"disease_brain_l1={CDRM_DISEASE_WARMUP_USE_BRAIN_L1} "
+            f"joint_brain_w={CDRM_JOINT_BRAIN_WEIGHT} joint_roi_w={CDRM_JOINT_ROI_WEIGHT}",
             flush=True,
         )
         if AUG_ENABLE:
             print("[CDRM][WARN] AUG_ENABLE is set, but residual_manifold skips augmentation internally.", flush=True)
 
-    best_val = float("inf")
-    best_G_state: Optional[Dict[str, torch.Tensor]] = None
+    best_global = float("inf")
+    best_disease = float("inf")
+    best_global_state: Optional[Dict[str, torch.Tensor]] = None
+    best_disease_state: Optional[Dict[str, torch.Tensor]] = None
     patience_counter = 0
     hist: Dict[str, list] = {
         "train_G": [], "train_pet": [], "train_brain": [], "train_roi": [],
         "train_coef": [], "train_c_coef": [], "train_a_coef": [],
         "cdrm_phase_id": [],
-        "val_recon": [], "val_roi": [], "val_score": [], "val_coef": [],
+        "val_recon": [], "val_roi": [], "val_score": [], "val_global_score": [],
+        "val_disease_score": [], "best_global_score": [], "best_disease_score": [],
+        "val_coef": [],
         "val_base_recon": [], "val_base_roi": [],
         "val_improve_recon": [], "val_improve_roi": [],
         "val_stage0_recon": [], "val_stage0_roi": [],
@@ -1833,6 +1866,8 @@ def train_residual_manifold(
         "mean_abs_res_cal": [], "mean_abs_res_dis": [], "mean_abs_res_dis_raw": [],
         "mean_a_low_stage": [], "mean_a_high_stage": [],
         "mean_gate_cortex": [], "mean_gate_low_stage": [], "mean_gate_high_stage": [],
+        "gate_std_cortex": [], "gate_top10_cortex": [],
+        "gate_bottom10_cortex": [], "gate_top_bottom_ratio": [],
         "train_disease": [], "val_disease": [],
         "val_disease_mae_B12": [], "val_disease_mae_B34": [], "val_disease_mae_B56": [],
         "val_disease_corr_B12": [], "val_disease_corr_B34": [], "val_disease_corr_B56": [],
@@ -1915,6 +1950,7 @@ def train_residual_manifold(
                 f"[CDRM][epoch {epoch:03d}/{epochs}] start train "
                 f"phase={phase} batches={total_str} lr={opt_G.param_groups[0]['lr']:.2e} "
                 f"lambda_roi={CDRM_LAMBDA_ROI} "
+                f"joint_brain_w={CDRM_JOINT_BRAIN_WEIGHT} joint_roi_w={CDRM_JOINT_ROI_WEIGHT} "
                 f"lambda_c_coef={CDRM_LAMBDA_C_COEF} lambda_a_coef={CDRM_LAMBDA_A_COEF} "
                 f"lambda_disease={CDRM_LAMBDA_DISEASE} "
                 f"a_stage_w2={CDRM_A_STAGE_WEIGHT_2} a_stage_w3={CDRM_A_STAGE_WEIGHT_3}",
@@ -1964,6 +2000,11 @@ def train_residual_manifold(
             if phase == "calibration":
                 pet_hat_loss_f = (pet_base5.float() + aux["res_cal"].float()) * brain_f
                 pet_weights = _calibration_pet_weights(metas, device)
+            elif phase == "disease":
+                pet_hat_loss_f = (
+                    pet_base5.float() + aux["res_cal"].float().detach() + aux["res_dis"].float()
+                ) * brain_f
+                pet_weights = torch.ones((pet_hat_f.size(0),), device=device, dtype=torch.float32)
             else:
                 pet_hat_loss_f = pet_hat_f
                 pet_weights = torch.ones((pet_hat_f.size(0),), device=device, dtype=torch.float32)
@@ -1974,9 +2015,10 @@ def train_residual_manifold(
             if phase == "calibration":
                 pet_loss = brain_loss
             elif phase == "disease":
-                pet_loss = float(CDRM_LAMBDA_ROI) * roi_loss
+                brain_term = brain_loss if bool(CDRM_DISEASE_WARMUP_USE_BRAIN_L1) else brain_loss.detach() * 0.0
+                pet_loss = float(CDRM_JOINT_BRAIN_WEIGHT) * brain_term + float(CDRM_JOINT_ROI_WEIGHT) * roi_loss
             else:
-                pet_loss = brain_loss + float(CDRM_LAMBDA_ROI) * roi_loss
+                pet_loss = float(CDRM_JOINT_BRAIN_WEIGHT) * brain_loss + float(CDRM_JOINT_ROI_WEIGHT) * roi_loss
             c_loss = F.smooth_l1_loss(
                 aux["c_hat"].float() / c_scale,
                 c_tgt.float() / c_scale,
@@ -2066,12 +2108,15 @@ def train_residual_manifold(
         hist["cdrm_phase_id"].append(_phase_id(phase))
 
         val_recon_epoch = val_roi_epoch = val_score_epoch = val_coef_epoch = None
+        val_disease_score_epoch = None
         val_base_recon_epoch = val_base_roi_epoch = None
         val_improve_recon_epoch = val_improve_roi_epoch = None
         mean_abs_res_cal_epoch = mean_abs_res_dis_epoch = None
         mean_abs_res_dis_raw_epoch = None
         mean_a_low_epoch = mean_a_high_epoch = None
         mean_gate_cortex_epoch = mean_gate_low_epoch = mean_gate_high_epoch = None
+        gate_std_cortex_epoch = gate_top10_cortex_epoch = None
+        gate_bottom10_cortex_epoch = gate_top_bottom_ratio_epoch = None
         val_disease_epoch = None
         val_disease_mae_epoch = None
         val_disease_corr_epoch = None
@@ -2086,6 +2131,7 @@ def train_residual_manifold(
             res_cal_sum = res_dis_sum = res_dis_raw_sum = 0.0
             mean_a_low_vals, mean_a_high_vals = [], []
             gate_cortex_vals, gate_low_vals, gate_high_vals = [], [], []
+            gate_std_vals, gate_top10_vals, gate_bottom10_vals, gate_ratio_vals = [], [], [], []
             all_disease_pred, all_disease_gt = [], []
             stage_stats = {
                 s: {
@@ -2159,14 +2205,16 @@ def train_residual_manifold(
                     gate = aux.get("disease_gate", None)
                     if gate is not None:
                         gate_f = gate.float()
-                        cortex_f = cortex5.float()
+                        cortex_f = cortex5.float() * brain_f
                         for b_idx, st in enumerate(stages):
                             cortex_b = cortex_f[b_idx:b_idx + 1]
-                            cortex_den = cortex_b.sum().clamp_min(1.0)
-                            gate_ctx_mean = float(
-                                (gate_f[b_idx:b_idx + 1] * cortex_b).sum().item() / cortex_den.item()
-                            )
+                            gate_stats = _gate_cortex_stats(gate_f[b_idx:b_idx + 1], cortex_b)
+                            gate_ctx_mean = gate_stats["mean"]
                             gate_cortex_vals.append(gate_ctx_mean)
+                            gate_std_vals.append(gate_stats["std"])
+                            gate_top10_vals.append(gate_stats["top10"])
+                            gate_bottom10_vals.append(gate_stats["bottom10"])
+                            gate_ratio_vals.append(gate_stats["top_bottom_ratio"])
                             if st in (0, 1):
                                 gate_low_vals.append(gate_ctx_mean)
                             if st >= 3:
@@ -2215,6 +2263,10 @@ def train_residual_manifold(
             mean_gate_cortex_epoch = float(np.mean(gate_cortex_vals)) if gate_cortex_vals else float("nan")
             mean_gate_low_epoch = float(np.mean(gate_low_vals)) if gate_low_vals else float("nan")
             mean_gate_high_epoch = float(np.mean(gate_high_vals)) if gate_high_vals else float("nan")
+            gate_std_cortex_epoch = float(np.mean(gate_std_vals)) if gate_std_vals else float("nan")
+            gate_top10_cortex_epoch = float(np.mean(gate_top10_vals)) if gate_top10_vals else float("nan")
+            gate_bottom10_cortex_epoch = float(np.mean(gate_bottom10_vals)) if gate_bottom10_vals else float("nan")
+            gate_top_bottom_ratio_epoch = float(np.mean(gate_ratio_vals)) if gate_ratio_vals else float("nan")
             val_disease_epoch = val_disease_sum / vb if bool(CDRM_USE_DISEASE_SUPERVISION) else float("nan")
             if all_disease_pred:
                 dp = torch.cat(all_disease_pred, dim=0)
@@ -2249,9 +2301,24 @@ def train_residual_manifold(
                         "improve_roi": float("nan"),
                     }
 
+            def _finite_or_zero(x: float) -> float:
+                xf = float(x)
+                return xf if np.isfinite(xf) else 0.0
+
+            stage0_improve_roi = _finite_or_zero(stage_epoch[0]["improve_roi"])
+            stage3_improve_roi = _finite_or_zero(stage_epoch[3]["improve_roi"])
+            val_disease_score_epoch = (
+                float(val_roi_epoch)
+                - 2.0 * stage3_improve_roi
+                - 0.5 * _finite_or_zero(val_improve_roi_epoch)
+                + 2.0 * max(0.0, -stage0_improve_roi)
+            )
+
             hist["val_recon"].append(val_recon_epoch)
             hist["val_roi"].append(val_roi_epoch)
             hist["val_score"].append(val_score_epoch)
+            hist["val_global_score"].append(val_score_epoch)
+            hist["val_disease_score"].append(val_disease_score_epoch)
             hist["val_coef"].append(val_coef_epoch)
             hist["val_base_recon"].append(val_base_recon_epoch)
             hist["val_base_roi"].append(val_base_roi_epoch)
@@ -2272,6 +2339,10 @@ def train_residual_manifold(
             hist["mean_gate_cortex"].append(mean_gate_cortex_epoch)
             hist["mean_gate_low_stage"].append(mean_gate_low_epoch)
             hist["mean_gate_high_stage"].append(mean_gate_high_epoch)
+            hist["gate_std_cortex"].append(gate_std_cortex_epoch)
+            hist["gate_top10_cortex"].append(gate_top10_cortex_epoch)
+            hist["gate_bottom10_cortex"].append(gate_bottom10_cortex_epoch)
+            hist["gate_top_bottom_ratio"].append(gate_top_bottom_ratio_epoch)
             hist["val_disease"].append(val_disease_epoch)
             if val_disease_mae_epoch is not None:
                 hist["val_disease_mae_B12"].append(val_disease_mae_epoch[0])
@@ -2284,36 +2355,54 @@ def train_residual_manifold(
 
             can_update_best = phase != "calibration"
             if can_update_best:
-                scheduler.step(val_score_epoch)
-                if val_score_epoch < best_val:
-                    best_val = val_score_epoch
+                scheduler.step(val_disease_score_epoch)
+                if val_score_epoch < best_global:
+                    best_global = val_score_epoch
+                    best_global_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
+                    torch.save(best_global_state, os.path.join(CKPT_DIR, "best_global.pth"))
+                if val_disease_score_epoch < best_disease:
+                    best_disease = val_disease_score_epoch
                     patience_counter = 0
-                    best_G_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
-                    torch.save(best_G_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
+                    best_disease_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
+                    torch.save(best_disease_state, os.path.join(CKPT_DIR, "best_disease.pth"))
+                    torch.save(best_disease_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
                 else:
                     patience_counter += 1
+            hist["best_global_score"].append(best_global)
+            hist["best_disease_score"].append(best_disease)
 
             if verbose:
                 disease_mae_b56 = val_disease_mae_epoch[2] if val_disease_mae_epoch is not None else float("nan")
                 disease_corr_b56 = val_disease_corr_epoch[2] if val_disease_corr_epoch is not None else float("nan")
                 print(
                     f"[CDRM][epoch {epoch:03d}/{epochs}] "
-                    f"phase={phase} train={avg_total:.4f} pet={avg_pet:.4f} brain={avg_brain:.4f} "
-                    f"roi={avg_roi:.4f} coef={avg_coef:.4f} "
-                    f"c_coef={avg_c_coef:.4f} a_coef={avg_a_coef:.4f} disease={avg_disease:.4f} | "
+                    f"phase={phase} train/G_loss={avg_total:.4f} train/pet_loss={avg_pet:.4f} "
+                    f"train/brain_l1={avg_brain:.4f} train/roi_loss={avg_roi:.4f} "
+                    f"train/coef_loss={avg_coef:.4f} "
+                    f"train/c_coef_loss={avg_c_coef:.4f} train/a_coef_loss={avg_a_coef:.4f} "
+                    f"train/disease_loss={avg_disease:.4f} | "
                     f"val_recon={val_recon_epoch:.4f} val_roi={val_roi_epoch:.4f} "
-                    f"val_score={val_score_epoch:.4f} val_disease={val_disease_epoch:.4f} "
-                    f"disease_mae_B56={disease_mae_b56:.4f} disease_corr_B56={disease_corr_b56:.4f} "
+                    f"val_score={val_score_epoch:.4f} val_disease_score={val_disease_score_epoch:.4f} "
+                    f"val/disease_loss={val_disease_epoch:.4f} "
+                    f"val/disease_mae_B56={disease_mae_b56:.4f} val/disease_corr_B56={disease_corr_b56:.4f} "
                     f"base_recon={val_base_recon_epoch:.4f} base_roi={val_base_roi_epoch:.4f} "
-                    f"improve_recon={val_improve_recon_epoch:.4f} improve_roi={val_improve_roi_epoch:.4f} "
-                    f"stage0_roi={stage_epoch[0]['roi']:.4f} stage0_imp_roi={stage_epoch[0]['improve_roi']:.4f} "
-                    f"stage3_roi={stage_epoch[3]['roi']:.4f} stage3_imp_roi={stage_epoch[3]['improve_roi']:.4f} "
+                    f"val/improve_recon={val_improve_recon_epoch:.4f} "
+                    f"val/improve_roi={val_improve_roi_epoch:.4f} "
+                    f"stage0_roi={stage_epoch[0]['roi']:.4f} "
+                    f"val/stage0_improve_roi={stage_epoch[0]['improve_roi']:.4f} "
+                    f"stage3_roi={stage_epoch[3]['roi']:.4f} "
+                    f"val/stage3_improve_roi={stage_epoch[3]['improve_roi']:.4f} "
                     f"|res_cal|={mean_abs_res_cal_epoch:.5f} "
                     f"|res_dis_raw|={mean_abs_res_dis_raw_epoch:.5f} |res_dis|={mean_abs_res_dis_epoch:.5f} "
                     f"a_low={mean_a_low_epoch:.5f} a_high={mean_a_high_epoch:.5f} "
-                    f"gate_ctx={mean_gate_cortex_epoch:.3f} "
+                    f"gate_mean_cortex={mean_gate_cortex_epoch:.3f} "
+                    f"gate_std_cortex={gate_std_cortex_epoch:.3f} "
+                    f"gate_top10_cortex={gate_top10_cortex_epoch:.3f} "
+                    f"gate_bottom10_cortex={gate_bottom10_cortex_epoch:.3f} "
+                    f"gate_top_bottom_ratio={gate_top_bottom_ratio_epoch:.3f} "
                     f"gate_low={mean_gate_low_epoch:.3f} gate_high={mean_gate_high_epoch:.3f} "
-                    f"best={best_val:.4f} patience={patience_counter}/{EARLY_STOP_PATIENCE} "
+                    f"best_global={best_global:.4f} best_disease={best_disease:.4f} "
+                    f"patience={patience_counter}/{EARLY_STOP_PATIENCE} "
                     f"epoch_sec={time.time() - t0:.1f}",
                     flush=True,
                 )
@@ -2333,6 +2422,7 @@ def train_residual_manifold(
         if log_to_wandb and wandb.run is not None:
             log_dict = {
                 "epoch": epoch,
+                "train/cdrm_phase": phase,
                 "train/G_loss": avg_total,
                 "train/pet_loss": avg_pet,
                 "train/brain_l1": avg_brain,
@@ -2352,7 +2442,11 @@ def train_residual_manifold(
                     "val/recon_loss": val_recon_epoch,
                     "val/roi_loss": val_roi_epoch,
                     "val/score": val_score_epoch,
-                    "val/best_score": best_val,
+                    "val/best_score": best_global,
+                    "val/global_score": val_score_epoch,
+                    "val/best_global_score": best_global,
+                    "val/disease_score": val_disease_score_epoch,
+                    "val/best_disease_score": best_disease,
                     "val/base_recon": val_base_recon_epoch,
                     "val/base_roi": val_base_roi_epoch,
                     "val/improve_recon": val_improve_recon_epoch,
@@ -2365,6 +2459,11 @@ def train_residual_manifold(
                     "val/mean_gate_cortex": mean_gate_cortex_epoch,
                     "val/mean_gate_low_stage": mean_gate_low_epoch,
                     "val/mean_gate_high_stage": mean_gate_high_epoch,
+                    "val/gate_mean_cortex": mean_gate_cortex_epoch,
+                    "val/gate_std_cortex": gate_std_cortex_epoch,
+                    "val/gate_top10_cortex": gate_top10_cortex_epoch,
+                    "val/gate_bottom10_cortex": gate_bottom10_cortex_epoch,
+                    "val/gate_top_bottom_ratio": gate_top_bottom_ratio_epoch,
                     "val/disease_loss": val_disease_epoch,
                     "time/val_sec": val_sec_epoch,
                 })
@@ -2391,13 +2490,24 @@ def train_residual_manifold(
                     })
             wandb.log(log_dict, step=epoch)
 
-    if best_G_state is not None:
-        G.load_state_dict(best_G_state)
+    if best_disease_state is not None:
+        G.load_state_dict(best_disease_state)
     else:
-        best_G_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
-        torch.save(best_G_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
+        best_disease_state = {k: v.detach().cpu().clone() for k, v in G.state_dict().items()}
+        best_global_state = best_global_state or best_disease_state
+        torch.save(best_disease_state, os.path.join(CKPT_DIR, "best_disease.pth"))
+        torch.save(best_disease_state, os.path.join(CKPT_DIR, "best_residual_manifold.pth"))
+    if best_global_state is None:
+        best_global_state = best_disease_state
+    if not os.path.isfile(os.path.join(CKPT_DIR, "best_global.pth")):
+        torch.save(best_global_state, os.path.join(CKPT_DIR, "best_global.pth"))
 
-    return {"history": hist, "best_G": best_G_state}
+    return {
+        "history": hist,
+        "best_G": best_disease_state,
+        "best_global": best_global_state,
+        "best_disease": best_disease_state,
+    }
 
 
 # =========================================================================
@@ -2800,7 +2910,7 @@ def evaluate_and_save_diffusion(
         mmd_list.append(mmd_val)
 
         brain_den = brain_f.sum().clamp_min(1.0)
-        cortex_f = cortex5.float()
+        cortex_f = cortex5.float() * brain_f
         cortex_den = cortex_f.sum().clamp_min(1.0)
         uncertainty_brain_list.append(float((uncert_t * brain_f).sum().item() / brain_den.item()))
         uncertainty_cortex_list.append(float((uncert_t * cortex_f).sum().item() / cortex_den.item()))
@@ -2961,7 +3071,10 @@ def evaluate_and_save_residual_manifold(
     base_improve_list, roi_improve_list = [], []
     mean_abs_res_cal_list, mean_abs_res_dis_list, mean_abs_res_dis_raw_list = [], [], []
     mean_disease_gate_cortex_list = []
+    gate_std_cortex_list, gate_top10_cortex_list = [], []
+    gate_bottom10_cortex_list, gate_top_bottom_ratio_list = [], []
     disease_pred_list, disease_gt_list = [], []
+    disease_pred_rows, braak_gt_rows = [], []
     coeff_rows = []
     run_dir = os.path.dirname(out_dir) if os.path.basename(out_dir) else out_dir
 
@@ -3035,21 +3148,26 @@ def evaluate_and_save_residual_manifold(
         mean_abs_res_cal_list.append(float((res_cal_t.abs() * brain_f).sum().item() / brain_den.item()))
         mean_abs_res_dis_list.append(float((res_dis_t.abs() * brain_f).sum().item() / brain_den.item()))
         mean_abs_res_dis_raw_list.append(float((res_dis_raw_t.abs() * brain_f).sum().item() / brain_den.item()))
-        cortex_den = cortex_f.sum().clamp_min(1.0)
-        mean_disease_gate_cortex_list.append(
-            float((disease_gate_t * cortex_f).sum().item() / cortex_den.item())
-        )
+        gate_stats = _gate_cortex_stats(disease_gate_t, cortex_f)
+        mean_disease_gate_cortex_list.append(gate_stats["mean"])
+        gate_std_cortex_list.append(gate_stats["std"])
+        gate_top10_cortex_list.append(gate_stats["top10"])
+        gate_bottom10_cortex_list.append(gate_stats["bottom10"])
+        gate_top_bottom_ratio_list.append(gate_stats["top_bottom_ratio"])
 
         coeff_row = {"sid": sid, "stage_ord": int(meta.get("stage_ord", -1))}
         c_np = aux["c_hat"].squeeze(0).detach().float().cpu().numpy()
         a_np = aux["a_hat"].squeeze(0).detach().float().cpu().numpy()
         disease_pred_np = aux.get("disease_pred", torch.zeros(1, 3, device=device)).squeeze(0).detach().float().cpu().numpy()
+        disease_pred_rows.append(tuple(float(x) for x in disease_pred_np[:3]))
         if braak_gt is not None:
             braak_gt_np = braak_gt.squeeze(0).detach().float().cpu().numpy()
             disease_pred_list.append(torch.from_numpy(disease_pred_np).view(1, 3))
             disease_gt_list.append(torch.from_numpy(braak_gt_np).view(1, 3))
+            braak_gt_rows.append(tuple(float(x) for x in braak_gt_np[:3]))
         else:
             braak_gt_np = None
+            braak_gt_rows.append((float("nan"), float("nan"), float("nan")))
         coeff_row.update({f"c{k}": float(c_np[k]) for k in range(c_np.shape[0])})
         coeff_row.update({f"a{k}": float(a_np[k]) for k in range(a_np.shape[0])})
         coeff_row.update({
@@ -3124,6 +3242,10 @@ def evaluate_and_save_residual_manifold(
             f"|cal|={mean_abs_res_cal_list[-1]:.5f} "
             f"|dis_raw|={mean_abs_res_dis_raw_list[-1]:.5f} |dis|={mean_abs_res_dis_list[-1]:.5f} "
             f"gate_ctx={mean_disease_gate_cortex_list[-1]:.3f} "
+            f"gate_std={gate_std_cortex_list[-1]:.3f} "
+            f"gate_top10={gate_top10_cortex_list[-1]:.3f} "
+            f"gate_bottom10={gate_bottom10_cortex_list[-1]:.3f} "
+            f"gate_ratio={gate_top_bottom_ratio_list[-1]:.3f} "
             f"sec={time.time() - subj_t0:.1f}",
             flush=True,
         )
@@ -3169,7 +3291,10 @@ def evaluate_and_save_residual_manifold(
         w.writerow([
             "sid", "base_vs_fake_recon_improvement", "base_vs_fake_roi_improvement",
             "mean_abs_res_cal", "mean_abs_res_dis_raw", "mean_abs_res_dis",
-            "mean_disease_gate_cortex",
+            "mean_disease_gate_cortex", "gate_std_cortex", "gate_top10_cortex",
+            "gate_bottom10_cortex", "gate_top_bottom_ratio",
+            "disease_pred_B12", "disease_pred_B34", "disease_pred_B56",
+            "braak_norm_gt_B12", "braak_norm_gt_B34", "braak_norm_gt_B56",
         ])
         for row in zip(
             sids,
@@ -3179,8 +3304,17 @@ def evaluate_and_save_residual_manifold(
             mean_abs_res_dis_raw_list,
             mean_abs_res_dis_list,
             mean_disease_gate_cortex_list,
+            gate_std_cortex_list,
+            gate_top10_cortex_list,
+            gate_bottom10_cortex_list,
+            gate_top_bottom_ratio_list,
+            disease_pred_rows,
+            braak_gt_rows,
         ):
-            w.writerow(row)
+            base_cols = list(row[:11])
+            pred_cols = list(row[11])
+            gt_cols = list(row[12])
+            w.writerow(base_cols + pred_cols + gt_cols)
 
     disease_extra: Dict[str, float] = {}
     if disease_pred_list:
@@ -3201,10 +3335,44 @@ def evaluate_and_save_residual_manifold(
         "mean_disease_gate_cortex": (
             float(np.mean(mean_disease_gate_cortex_list)) if mean_disease_gate_cortex_list else float("nan")
         ),
+        "gate_std_cortex": float(np.mean(gate_std_cortex_list)) if gate_std_cortex_list else float("nan"),
+        "gate_top10_cortex": float(np.mean(gate_top10_cortex_list)) if gate_top10_cortex_list else float("nan"),
+        "gate_bottom10_cortex": (
+            float(np.mean(gate_bottom10_cortex_list)) if gate_bottom10_cortex_list else float("nan")
+        ),
+        "gate_top_bottom_ratio": (
+            float(np.mean(gate_top_bottom_ratio_list)) if gate_top_bottom_ratio_list else float("nan")
+        ),
         "coefficients_csv": coeff_csv,
         "per_subject_manifold_csv": manifold_csv,
         **disease_extra,
     }
+    prefixed_test_metrics = {
+        "test/SSIM": m_ssim,
+        "test/PSNR": m_psnr,
+        "test/MSE": m_mse,
+        "test/MMD": m_mmd,
+    }
+    for key in [
+        "base_vs_fake_recon_improvement",
+        "base_vs_fake_roi_improvement",
+        "mean_abs_res_cal",
+        "mean_abs_res_dis_raw",
+        "mean_abs_res_dis",
+        "mean_disease_gate_cortex",
+        "gate_std_cortex",
+        "gate_top10_cortex",
+        "gate_bottom10_cortex",
+        "gate_top_bottom_ratio",
+        "disease_mae_B12",
+        "disease_mae_B34",
+        "disease_mae_B56",
+        "disease_corr_B12",
+        "disease_corr_B34",
+        "disease_corr_B56",
+    ]:
+        if key in extra:
+            prefixed_test_metrics[f"test/{key}"] = extra[key]
     summary_json = os.path.join(run_dir, "test_metrics_summary.json")
     summary = {
         "N": n_ssim,
@@ -3214,6 +3382,7 @@ def evaluate_and_save_residual_manifold(
         "MMD": m_mmd, "MMD_std": sd_mmd, "MMD_lo95": lo_mmd, "MMD_hi95": hi_mmd,
         "per_subject_csv": per_subj_csv,
         **extra,
+        **prefixed_test_metrics,
     }
     with open(summary_json, "w") as f:
         json.dump(summary, f, indent=2)
@@ -3227,4 +3396,5 @@ def evaluate_and_save_residual_manifold(
         "per_subject_csv": per_subj_csv,
         "summary_json": summary_json,
         **extra,
+        **prefixed_test_metrics,
     }

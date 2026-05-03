@@ -171,6 +171,9 @@ CDRM_LAMBDA_A_COEF = _env_float("CDRM_LAMBDA_A_COEF", 2.0)
 CDRM_LAMBDA_DISEASE = _env_float("CDRM_LAMBDA_DISEASE", 0.0)
 CDRM_CAL_WARMUP_EPOCHS = _env_int("CDRM_CAL_WARMUP_EPOCHS", 0)
 CDRM_DIS_WARMUP_EPOCHS = _env_int("CDRM_DIS_WARMUP_EPOCHS", 0)
+CDRM_DISEASE_WARMUP_USE_BRAIN_L1 = _env_bool("CDRM_DISEASE_WARMUP_USE_BRAIN_L1", False)
+CDRM_JOINT_BRAIN_WEIGHT = _env_float("CDRM_JOINT_BRAIN_WEIGHT", 1.0)
+CDRM_JOINT_ROI_WEIGHT = _env_float("CDRM_JOINT_ROI_WEIGHT", CDRM_LAMBDA_ROI)
 CDRM_USE_DISEASE_SUPERVISION = _env_bool(
     "CDRM_USE_DISEASE_SUPERVISION",
     CDRM_LAMBDA_DISEASE > 0.0 or CDRM_CAL_WARMUP_EPOCHS > 0 or CDRM_DIS_WARMUP_EPOCHS > 0,
@@ -194,6 +197,9 @@ CDRM_USE_SPATIAL_GATE = _env_bool("CDRM_USE_SPATIAL_GATE", False)
 CDRM_GATE_LOWRES = _env_int("CDRM_GATE_LOWRES", 32)
 CDRM_GATE_COND_CH = _env_int("CDRM_GATE_COND_CH", 8)
 CDRM_GATE_SCALE = _env_float("CDRM_GATE_SCALE", 1.0)
+CDRM_GATE_MODE = os.environ.get("CDRM_GATE_MODE", "bounded_tanh").strip().lower()
+if CDRM_GATE_MODE not in {"bounded_tanh", "normalized_cortex"}:
+    raise ValueError("CDRM_GATE_MODE must be 'bounded_tanh' or 'normalized_cortex'")
 
 # =========================
 # Residual-Spatial-Prior settings

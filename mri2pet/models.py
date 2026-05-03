@@ -11,6 +11,7 @@ from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from .config import (
     CDRM_GATE_COND_CH,
     CDRM_GATE_LOWRES,
+    CDRM_GATE_MODE,
     CDRM_GATE_SCALE,
     CDRM_USE_SPATIAL_GATE,
     CDRM_USE_DISEASE_SUPERVISION,
@@ -712,14 +713,27 @@ class SpatialDiseaseGate3D(nn.Module):
     """
     Low-resolution spatial gate for the disease residual.
 
-    The output range is [1 - gate_scale, 1 + gate_scale]. The last conv is zero-initialized, so the
-    initial gate is 1 and the model starts as the original CDRM.
+    bounded_tanh: output range is [1 - gate_scale, 1 + gate_scale].
+    normalized_cortex: sigmoid logits normalized to mean 1 inside cortex.
+
+    The last conv is zero-initialized, so both modes start with gate=1 and the model
+    starts as the original CDRM.
     """
-    def __init__(self, cond_dim: int, cond_ch: int = 8, lowres: int = 32, gate_scale: float = 0.5):
+    def __init__(
+        self,
+        cond_dim: int,
+        cond_ch: int = 8,
+        lowres: int = 32,
+        gate_scale: float = 0.5,
+        gate_mode: str = "bounded_tanh",
+    ):
         super().__init__()
         self.cond_ch = int(cond_ch)
         self.lowres = int(lowres)
         self.gate_scale = float(gate_scale)
+        self.gate_mode = str(gate_mode).strip().lower()
+        if self.gate_mode not in {"bounded_tanh", "normalized_cortex"}:
+            raise ValueError("gate_mode must be 'bounded_tanh' or 'normalized_cortex'")
 
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, self.cond_ch),
@@ -768,7 +782,15 @@ class SpatialDiseaseGate3D(nn.Module):
             logits_l = self.net(x)
             logits = F.interpolate(logits_l.float(), size=target_shape, mode="trilinear", align_corners=False)
 
-            gate = 1.0 + self.gate_scale * torch.tanh(logits)
+            if self.gate_mode == "normalized_cortex":
+                raw = torch.sigmoid(logits)
+                cortex = cortex_mask.float() * brain_mask.float()
+                num = (raw * cortex).flatten(1).sum(dim=1)
+                den = cortex.flatten(1).sum(dim=1).clamp_min(1.0)
+                cortex_mean = (num / den).view(bsz, 1, 1, 1, 1).clamp_min(1e-4)
+                gate = raw / cortex_mean
+            else:
+                gate = 1.0 + self.gate_scale * torch.tanh(logits)
             return gate * brain_mask.float()
 
 
@@ -864,6 +886,7 @@ class ResidualManifoldNet(nn.Module):
                 cond_ch=CDRM_GATE_COND_CH,
                 lowres=CDRM_GATE_LOWRES,
                 gate_scale=CDRM_GATE_SCALE,
+                gate_mode=CDRM_GATE_MODE,
             )
         else:
             self.disease_gate = None
